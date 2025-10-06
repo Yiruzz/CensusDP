@@ -72,9 +72,9 @@ class HierarchicalNode:
         Get the level of this node in the tree.
         
         Returns:
-            int: The level of the node (1 for root, 2 for children of root, ...).
+            int: The level of the node (0 for root, 1 for children of root, ...).
         """
-        return len(self.hierarchical_path) + 1
+        return len(self.hierarchical_path)
     
     def is_root(self) -> bool:
         """
