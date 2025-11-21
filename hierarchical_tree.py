@@ -1,7 +1,7 @@
 from hierarchical_node import HierarchicalNode
 
 from collections import deque
-from typing import List, Callable, Optional, Tuple, Generator
+from typing import List, Callable, Tuple, Generator
 
 
 
@@ -22,7 +22,7 @@ class HierarchicalTree:
      /|\   \
      
     '''
-    def __init__(self, root_id: int = 0, constraints: Optional[List] = None) -> None:
+    def __init__(self, root_id: int = 0, constraints: List[Callable] = []) -> None:
         """
         Initialize the hierarchical tree with a root node.
         
@@ -49,7 +49,7 @@ class HierarchicalTree:
 
         queue = deque([(self.root, 0)])
         current_level = 0
-        level_nodes = []
+        level_nodes: List[HierarchicalNode] = []
 
         while queue:
             node, level = queue.popleft()
