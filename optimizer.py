@@ -14,7 +14,7 @@ class OptimizationModel:
         '''
         self.model = None
 
-    def non_negative_real_estimation(self, contingency_vector: np.ndarray, id_node: int, constraints: List[Callable] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, contingency_vector: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
         '''Non-negative estimation of the contingency vector.
         
         This method creates a Gurobi model to estimate the contingency vector using non-negative constraints.
@@ -55,14 +55,13 @@ class OptimizationModel:
         # Check for infeasibility
         if self.model.status == gp.GRB.INFEASIBLE:
             # Write the model to a file for debugging
-            print(f'Model is infeasible for node {id_node}. Writing model to infeasible_model.lp for debugging.')
             self.model.write("infeasible_model.lp")
-            return None
-
-        return x.X
+            raise ValueError(f'Model is infeasible for node {id_node}. See infeasible_model.lp file for debugging.')
+        
+        return np.asarray(x.X)
 
     
-    def rounding_estimation(self, x_tilde: np.ndarray, id_node: int, constraints: List[Callable] = None) -> np.ndarray:
+    def rounding_estimation(self, x_tilde: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
         '''Rounding estimation of the contingency vector.
         
         This method creates a Gurobi model to estimate the non negative discrete contingency vector.
@@ -104,10 +103,9 @@ class OptimizationModel:
 
         # Check for infeasibility
         if self.model.status == gp.GRB.INFEASIBLE:
-            print(f'Model is infeasible for node {id_node}. Writing model to infeasible_model.lp for debugging.')
             self.model.write("infeasible_model.lp")
-            return None
+            raise ValueError(f'Model is infeasible for node {id_node}. See infeasible_model.lp file for debugging.')
         
         # Rounded solution
-        return x_floor + y.X
+        return np.asarray(x_floor + y.X)
 
