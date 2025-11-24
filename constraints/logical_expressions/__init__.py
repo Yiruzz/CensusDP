@@ -1,21 +1,21 @@
 # Public API for `constraints.logical_expressions` package.
 
-from .base import LogicalConstraint
+from .base import LogicalExpression
 
 from .atomic import (
-    AtomicConstraint,
+    AtomicExpression,
     Equal,
     GreaterThan,
     GreaterThanOrEqual,
     LessThan,
     LessThanOrEqual,
     NotEqual,
-    TrueConstraint,
-    FalseConstraint,
+    TrueExpression,
+    FalseExpression,
 )
 
 from .compound import (
-    CompoundConstraint,
+    CompoundExpression,
     NaryExpression,
     UnaryExpression,
     BinaryExpression,
@@ -26,11 +26,11 @@ from .compound import (
 )
 
 __all__ = [
-    "LogicalConstraint",
+    "LogicalExpression",
     # atomics
-    "AtomicConstraint",
-    "TrueConstraint",
-    "FalseConstraint",
+    "AtomicExpression",
+    "TrueExpression",
+    "FalseExpression",
     "Equal",
     "GreaterThan",
     "GreaterThanOrEqual",
@@ -38,7 +38,7 @@ __all__ = [
     "LessThanOrEqual",
     "NotEqual",
     # compounds
-    "CompoundConstraint",
+    "CompoundExpression",
     "NaryExpression",
     "UnaryExpression",
     "BinaryExpression",

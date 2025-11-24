@@ -2,15 +2,15 @@ from abc import ABC
 from typing import List
 import pandas as pd
 
-from .base import LogicalConstraint
+from .base import LogicalExpression
 
 
-class CompoundConstraint(LogicalConstraint, ABC):
-    """Abstract class for constraints combining other constraints."""
+class CompoundExpression(LogicalExpression, ABC):
+    """Abstract class for expression combining other expressions."""
 
-    def __init__(self, expressions: List[LogicalConstraint]):
+    def __init__(self, expressions: List[LogicalExpression]):
         for arg in expressions:
-            if not isinstance(arg, LogicalConstraint):
+            if not isinstance(arg, LogicalExpression):
                 raise TypeError(
                     f"All sub-expressions must be LogicalExpression objects. Got: {type(arg)} in {self.__class__.__name__}."
                 )
@@ -21,26 +21,26 @@ class CompoundConstraint(LogicalConstraint, ABC):
         return f"{self.__class__.__name__}({exprs_str})"
 
 
-class NaryExpression(CompoundConstraint, ABC):
+class NaryExpression(CompoundExpression, ABC):
     '''Class for n-ary logical expressions. (Or, And)
     
     Constructor recieves a variable number of LogicalConstraint arguments.
     '''
-    def __init__(self, *args: LogicalConstraint):
+    def __init__(self, *args: LogicalExpression):
         if not args:
             raise ValueError(f"{self.__class__.__name__} requires at least one argument.")
         super().__init__(list(args))
 
 
-class UnaryExpression(CompoundConstraint, ABC):
+class UnaryExpression(CompoundExpression, ABC):
     '''Class for unary logical expressions. (Not)'''
-    def __init__(self, expression: LogicalConstraint):
+    def __init__(self, expression: LogicalExpression):
         super().__init__([expression])
 
 
-class BinaryExpression(CompoundConstraint, ABC):
+class BinaryExpression(CompoundExpression, ABC):
     '''Class for binary logical expressions. (Implies, Equivalent)'''
-    def __init__(self, antecedent: LogicalConstraint, consequent: LogicalConstraint):
+    def __init__(self, antecedent: LogicalExpression, consequent: LogicalExpression):
         super().__init__([antecedent, consequent])
 
 

@@ -2,7 +2,7 @@ import pandas as pd
 
 from typing import Callable
 
-from .logical_constraints import LogicalConstraint
+from .logical_expressions import LogicalExpression
 from constraints.constraint import Constraint
 from abc import ABC
 
@@ -10,7 +10,7 @@ class AggregateConstraint(Constraint, ABC):
     """
     Base class for all aggregate constraints. Provides the interface.
     """
-    def __init__(self, expression: LogicalConstraint, value: int) -> None:
+    def __init__(self, expression: LogicalExpression, value: int) -> None:
         """
         Constructor of an AggregateConstraint.
         Args:

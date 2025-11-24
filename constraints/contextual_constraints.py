@@ -2,7 +2,7 @@ import pandas as pd
 
 from typing import Callable
 
-from constraints.logical_constraints.base import LogicalConstraint
+from constraints.logical_expressions.base import LogicalExpression
 from .aggregate_constraints import AggregateConstraint
 
 from abc import ABC
@@ -18,11 +18,11 @@ class ContextualAggregateConstraint(AggregateConstraint, ABC):
     That means that the value of the constraint can be dynamically calculated based on the
     DataFrame associated with the node's context.
     """
-    def __init__(self, expression: LogicalConstraint, aggregation_function: Callable[[pd.DataFrame], int]) -> None:
+    def __init__(self, expression: LogicalExpression, aggregation_function: Callable[[pd.DataFrame], int]) -> None:
         """
         Constructor of a ContextualAggregateConstraint.
         Args:
-            expression (LogicalConstraint): A logical constraint to aggregate over.
+            expression (LogicalExpression): A logical expression to aggregate over.
             aggregation_function (Callable[[pd.DataFrame], int], optional): A function 
                 to calculate the value dynamically using the node's DataFrame. Defaults to None.
         """
@@ -48,7 +48,7 @@ class ContextualAggregateConstraint(AggregateConstraint, ABC):
 
 class SumEqualRealTotal(ContextualAggregateConstraint):
     """Convenience class for the user to easily set the Real Total constraint."""
-    def __init__(self, expression: LogicalConstraint) -> None:
+    def __init__(self, expression: LogicalExpression) -> None:
 
         # Function to calculate the real total from the DataFrame
         get_real_total = lambda df: len(df)

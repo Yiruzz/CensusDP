@@ -2,8 +2,8 @@ from topdown import TopDown
 
 # Import constraint building classes
 from constraints.contextual_constraints import SumEqualRealTotal
-from constraints.logical_constraints.atomic import Equal, NotEqual, TrueConstraint
-from constraints.logical_constraints.compound import And, Implies  
+from constraints.logical_expressions.atomic import Equal, NotEqual, TrueExpression
+from constraints.logical_expressions.compound import And, Implies  
 
 def main():
     '''Main function to set variables and run the TopDown algorithm.'''
@@ -89,7 +89,7 @@ def main():
     # We want that for the level of 'COMUNA' that the true total of viviendas is published.
     # Since we don't know the specific number of households per COMUNA in advance, 
     # we use a contextual constraint that will get the real total from the data at runtime (dynamically).
-    real_total_constraint = SumEqualRealTotal(expression=TrueConstraint())
+    real_total_constraint = SumEqualRealTotal(expression=TrueExpression())
     # 3 is the level of 'COMUNA' in the tree
     topdown.set_constraint_to_level(3, real_total_constraint)
 

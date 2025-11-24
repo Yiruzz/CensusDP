@@ -4,8 +4,8 @@ from abc import ABC, abstractmethod
 
 from constraints.constraint import Constraint
 
-class LogicalConstraint(Constraint, ABC):
-    """Base class for all logical constraints.
+class LogicalExpression(Constraint, ABC):
+    """Base class for all logical expressions.
 
     Implementations must provide `reduce(contingency_df)` which returns a
     boolean `pd.Series` mask aligned with `contingency_df.index`.
@@ -23,7 +23,7 @@ class LogicalConstraint(Constraint, ABC):
         raise NotImplementedError()
     
     def to_constraint(self, contingency_df: pd.DataFrame) -> Callable:
-        """Convert the logical constraint into a constraint function.
+        """Convert the logical expression into a constraint function.
 
         Args:
             contingency_df: Pandas DataFrame used as the domain for evaluation.
