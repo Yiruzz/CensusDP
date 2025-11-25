@@ -1,4 +1,4 @@
-# Constraints (Quickstart)
+# Constraints
 
 This package provides a small DSL to express logical and aggregate constraints over contingency vectors used by the TopDown algorithm.
 
