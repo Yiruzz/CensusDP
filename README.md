@@ -29,7 +29,7 @@ from constraints.aggregate_constraints import SumEqual
 
 # Instantiate with path to raw microdata, hierarchy columns, query columns and optional output path
 td = TopDown(data_path='data/microdata.csv', hierarchy=['REGION','STATE'], queries=['AGE','SEX'], out_path='noisy_microdata.csv')
-# Note that the hierarchy does not include the root level (NATIONAL), which is implicit.
+# Note that the hierarchy does not include the root level (NATIONAL). The root is implicitly defined as the aggregation of all data.
 
 # Set privacy parameters per level (list length must match number of levels of the tree)
 td.set_privacy_parameters([0.5, 0.3, 0.2])
@@ -40,9 +40,10 @@ td.set_mechanism('discrete_laplace')
 # Add constraints (see Constraints section below)
 my_constraint = SumEqual(GreaterThan('AGE', 99), 0)
 td.set_constraint_to_tree(my_constraint)
+# Or set constraint to specific level:
 # td.set_constraint_to_level(1, my_constraint)
 
-# Run end-to-end
+# Run
 noisy_df = td.run()
 ```
 
@@ -135,7 +136,7 @@ Implemented in `TopDown.estimation_phase()`. Key points:
 - Root estimation uses `OptimizationModel.non_negative_real_estimation(...)` and `OptimizationModel.rounding_estimation(...)` from `optimizer.py`.
 - For non-root levels the implementation builds joint vectors for children, converts each child's constraints to work over slices of the joint vector, adds parent-child consistency constraints (sum(children) == parent), and solves a joint optimization for all children.
 
-Currently the optimzer uses Gurobi via `gurobipy`. If you don't have a Gurobi license feel free to modify `optimizer.py` to use another solver or implement a fallback method. Consider that the constraints will be given as callables that accept contingency vectors as numpy arrays.
+The optimizer uses Pyomo as an interface over optimization solvers (defaulting to Gurobi). Pyomo provides AbstractModels for efficient reuse of the same problem structure across multiple solves. If you don't have a Gurobi license, you can modify the solver in `OptimizationModel.__init__()` to use another supported solver. The constraints are given as callables that accept contingency vectors as numpy arrays or Pyomo expressions.
 
 ## Microdata generation
 
@@ -143,7 +144,11 @@ Currently the optimzer uses Gurobi via `gurobipy`. If you don't have a Gurobi li
 
 ## Resume / checkpoints
 
-TODO
+The TopDown algorithm can be extended to support checkpointing and resuming:
+- **State Serialization**: Save algorithm state (tree structure, constraints, processed levels) to disk
+- **Progress Tracking**: Monitor completion status by tree level
+- **Partial Result Recovery**: Resume from last successfully completed level
+- **Memory Management**: Large datasets can benefit from level-by-level processing with intermediate saves
 
 ## Validation and correctness
 

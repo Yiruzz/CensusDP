@@ -64,4 +64,4 @@ Here the resulting data will satisfy that the population at the level of region 
 - `constraints/contextual_constraints.py` — contextual aggregate constraints that compute node-specific values
 - `data_handler.py` — tree construction and conversion of constraint objects to callables
 - `topdown.py` — how users register constraints with `TopDown.set_constraint_to_level` / `set_constraint_to_tree`
-- `optimizer.py` — how callables are used to add Gurobi constraints (see debugging/infeasibility handling)
+- `optimizer.py` — how callables are used to add Pyomo constraints (see debugging/infeasibility handling)
