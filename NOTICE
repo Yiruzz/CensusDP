@@ -1,0 +1,25 @@
+CensusDP - Differential Privacy for Census Microdata
+Copyright (c) 2025 Arturo Kullmer
+
+This project includes components from third-party libraries:
+
+================================================================================
+
+discrete-gaussian-differential-privacy
+Copyright (c) 2020 IBM Corp.
+Licensed under the Apache License, Version 2.0
+
+This product includes software developed by IBM Corp.
+Source: https://github.com/IBM/discrete-gaussian-differential-privacy
+
+The discrete Gaussian differential privacy library provides implementations
+of discrete Gaussian noise mechanisms for differential privacy.
+
+================================================================================
+
+This project is licensed under the MIT License, which is compatible with
+the Apache 2.0 licensed components included herein.
+
+For the full text of the MIT License, see the LICENSE file in this repository.
+For the full text of the Apache License 2.0, see:
+http://www.apache.org/licenses/LICENSE-2.0
