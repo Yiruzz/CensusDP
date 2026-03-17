@@ -47,7 +47,7 @@ def main():
     OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
 
     # With the TopDown class instantiated, we can set all the parameters
-    topdown = TopDown(data_path=DATA_PATH_VIVIENDAS, hierarchy=GEO_COLUMNS_TO_USE, queries=QUERIES, out_path=OUTPUT_PATH+OUTPUT_FILE)
+    topdown = TopDown(data_path=DATA_PATH_VIVIENDAS, hierarchy=GEO_COLUMNS_TO_USE, queries=QUERIES, out_path=OUTPUT_PATH+OUTPUT_FILE, optimizer='gurobi')
 
     #######################################################
     # Differential privacy budget and mechanism settings #
@@ -83,7 +83,32 @@ def main():
     #       In the constraints package there are a series of classes that should be used to build the constraints.
     #       See the documentation for more details.
 
-    # TODO: Do a documentation of how to build constraints with the package.
+    # CONSTRAINT BUILDING GUIDE:
+    #
+    # The constraints framework provides a DSL for expressing complex logical conditions:
+    #
+    # 1. ATOMIC EXPRESSIONS (conditions on single columns):
+    #    - Equal(column, value)        : column == value
+    #    - NotEqual(column, value)     : column != value
+    #    - GreaterThan(column, value)  : column > value
+    #    - LessThan(column, value)     : column < value
+    #    - TrueExpression()            : always true (useful for aggregations)
+    #
+    # 2. LOGICAL COMBINATORS:
+    #    - And(expr1, expr2, ...)      : all expressions must be true
+    #    - Or(expr1, expr2, ...)       : at least one expression must be true
+    #    - Not(expr)                   : negation of the expression
+    #    - Implies(left, right)        : if left is true, then right must be true
+    #
+    # 3. CONSTRAINT TYPES:
+    #    - SumEqual(expression, value) : sum of matching records equals value
+    #    - SumEqualRealTotal(expression) : sum equals the true total from data
+    #
+    # 4. APPLICATION METHODS:
+    #    - topdown.set_constraint_to_level(level, constraint) : apply to specific tree level
+    #    - topdown.set_constraint_to_tree(constraint)         : apply to all tree levels
+    #
+    # EXAMPLES:
 
     # In this case, we will add two constraints as examples.
     # We want that for the level of 'COMUNA' that the true total of viviendas is published.
