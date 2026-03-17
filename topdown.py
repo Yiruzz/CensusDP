@@ -19,7 +19,7 @@ class TopDown():
     finally it solves optimization problems to ensure consistency across the tree and adherence to 
     specified constraints by the user.
     '''
-    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv') -> None:
+    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi') -> None:
         '''
         Initialize the TopDown algorithm.
         
@@ -27,7 +27,8 @@ class TopDown():
             data_path (str): Path to the input data file.
             hierarchy (List[str]): List of columns representing the hierarchy levels.
             queries (List[str]): List of columns to be queried and aggregated.
-            out_path (str): Path to save the processed data. Defaults to "noisy_data.csv".
+            out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
+            optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -59,9 +60,7 @@ class TopDown():
         self.constraints: Dict[int, List[Constraint]] = {}
 
         self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
-        self.optimizer: OptimizationModel = OptimizationModel()
-
-
+        self.optimizer: OptimizationModel = OptimizationModel(optimizer)
         
         #self.constraints: List[List[Callable]] = []
         # self.processed_data: pd.DataFrame = None
@@ -158,14 +157,17 @@ class TopDown():
                     for constraint in child.constraints:
                         # NOTE: We use default arguments to avoid late binding issues in lambdas
                         # This can lead to all constraints using the last values saved of start and end
-                        joint_constraints.append(lambda joint_array, s=start, e=end, c=constraint: c(joint_array[s:e]))
+                        # Build a sub-dict with keys 0..(e-s-1) so the constraint's indices still match
+                        joint_constraints.append(lambda joint_array, s=start, e=end, c=constraint: c({i - s: joint_array[i] for i in range(s, e)}))
                     start = end
 
                 # Consistency constraint: sum of children = parent
                 for index in range(vectors_length):
                     # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
-                    joint_constraints.append(lambda joint_array, s=index, value=node.contingency_vector[index]: 
-                                             joint_array[s::vectors_length].sum() == value)
+                    # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
+                    indices_to_sum = list(range(index, len(joint_contingency_vector), vectors_length))
+                    joint_constraints.append(lambda joint_array, idxs=indices_to_sum, value=node.contingency_vector[index]:
+                                             sum(joint_array[j] for j in idxs) == value)
                     
                 # Solve for children nodes (joint contingency vector)
                 x_tilde = self.optimizer.non_negative_real_estimation(

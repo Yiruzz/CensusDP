@@ -45,6 +45,6 @@ class LogicalExpression(Constraint, ABC):
 
         # Return a function that checks if there are no True values in the negated indices.
         # This will be the function used as a constraint in the optimizer.
-        return lambda contingency_var, _indices=indices: contingency_var[_indices].sum() == 0
+        return lambda contingency_var, _indices=indices: sum(contingency_var[i] for i in _indices) == 0
 
 

@@ -28,7 +28,7 @@ class SumEqual(AggregateConstraint):
         # Get indices where the expression is True
         indices = reduced_series[reduced_series].index
         # Return a function that checks if the sum of the contingency variable equals the value
-        return lambda contingency_var, sum_val=self.value, _indices=indices: contingency_var[_indices].sum() == sum_val
+        return lambda contingency_var, sum_val=self.value, _indices=indices: sum(contingency_var[i] for i in _indices) == sum_val
 
 # NOTE: Add more aggregate expressions as needed
 

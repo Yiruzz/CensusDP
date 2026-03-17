@@ -1,111 +1,160 @@
-import gurobipy as gp
+import pyomo.environ as pyo
 import numpy as np
-
-from typing import List, Callable
+from typing import List, Callable, Any
 
 class OptimizationModel:
-    '''Represents an optimization model for a specific optimization problem of the geographic Tree using Gurobi.'''
+    '''
+    Represents the Pyomo model that is used to do the estimation of the contingency vectors.
 
-    def __init__(self):
+    Pyomo builds the model and is an interface over the actual optimization engine that solves the problem (e.g. Gurobi).
+    Uses ConcreteModels for direct model construction.
+    '''
+
+    def __init__(self, solver_name='gurobi'):
         '''Constructor for the OptimizationModel class.
-        
-        Attributes:
-            model (gp.Model): Gurobi model instance.
+
+        Args:
+            solver_name (str): The name of the solver to use. Defaults to 'gurobi'.
         '''
-        self.model = None
+        self.solver = pyo.SolverFactory(solver_name)
+
+    def _solve_pyomo_model(self, instance: pyo.ConcreteModel, id_node: int) -> Any:
+        '''Auxiliar function to solve the instance of the model and handle infeasibility.
+
+        Args:
+            instance (ConcreteModel): The concrete model instance to solve.
+            id_node (int): The id of the node being solved.
+
+        Returns:
+            SolverResults: The results from the solver.
+        '''
+        # Options for the solver
+        options = {'OutputFlag': 0} if self.solver.name == 'gurobi' else {}
+
+        results = self.solver.solve(instance, tee=False, options=options)
+
+        # Check termination conditions
+        if results.solver.termination_condition == pyo.TerminationCondition.optimal or \
+           results.solver.termination_condition == pyo.TerminationCondition.locallyOptimal:
+            return results
+        elif results.solver.termination_condition == pyo.TerminationCondition.infeasible:
+            # Write model for debugging
+            filename = f"infeasible_model_node_{id_node}.nl"
+            instance.write(filename)
+            raise ValueError(f'Model is infeasible for node {id_node}. See {filename} file for debugging.')
+        else:
+            raise RuntimeError(f"Solver termination failed for node {id_node}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
 
     def non_negative_real_estimation(self, contingency_vector: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
-        '''Non-negative estimation of the contingency vector.
-        
-        This method creates a Gurobi model to estimate the contingency vector using non-negative constraints.
+        '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
 
         Args:
             contingency_vector (np.ndarray): The contingency vector with noisy counts.
             id_node (int): The ID of the node for which the estimation is being performed.
-            constraints (List[Callable], optional): List of additional constraints to apply to the model. Defaults to None.
-        
+            constraints (List[Callable]): List of additional constraints to apply to the model.
+
         Returns:
             np.ndarray: Estimated contingency vector with non-negative real values.
         '''
-        # Create a new Gurobi model
-        self.model = gp.Model(f'NonNegativeRealEstimation. NodeID: {id_node}')
-        self.model.setParam('OutputFlag', 0)  # Suppress Gurobi output
-
-        # self.model.setParam('OptimalityTol', 1e-6)  # Approximate optimality tolerance (default: 1e-6, min: 1e-9, max: 1e-2)
-        # self.model.setParam('BarConvTol', 1e-6) # Tolerance for barrier convergence (default 1e-8, min: 0.0, max: 1.0)
-        # self.model.setParam('TimeLimit', 60)  # Stop after 60 seconds
-        # self.model.setParam('Heuristics', .5)  # Allocate 50% of time to heuristics
-
-        # Length of the contingency vector that we want to estimate
         n = len(contingency_vector)
-        
-        # Decision variable (vector of non-negative real values)
-        x = self.model.addMVar(shape=n, lb=0.0, name="x")
 
-        # Objective function: minimize the sum of squared differences (L2 norm)
-        self.model.setObjective(gp.quicksum((x[i] - contingency_vector[i]) * (x[i] - contingency_vector[i]) for i in range(n)), gp.GRB.MINIMIZE)
+        # Create a ConcreteModel directly
+        instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{id_node}')
 
-        # Additional constraints provided by the user
-        for i, constraint in enumerate(constraints):
-            self.model.addConstr(constraint(x), name=f"GivenConstraint_{i}")
+        # Set of indices
+        instance.I = pyo.RangeSet(0, n - 1)
 
-        # Run the model
-        self.model.optimize()
+        # Parameter: contingency vector
+        instance.c = pyo.Param(instance.I, initialize={i: contingency_vector[i] for i in range(n)})
 
-        # Check for infeasibility
-        if self.model.status == gp.GRB.INFEASIBLE:
-            # Write the model to a file for debugging
-            self.model.write("infeasible_model.lp")
-            raise ValueError(f'Model is infeasible for node {id_node}. See infeasible_model.lp file for debugging.')
-        
-        return np.asarray(x.X)
+        # Decision variable: non-negative real values
+        instance.x = pyo.Var(instance.I, domain=pyo.NonNegativeReals)
 
-    
+        # Objective: minimize L2 norm
+        def objective_rule(model):
+            return sum((model.x[i] - model.c[i])**2 for i in model.I)
+
+        instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
+
+        # Add constraints
+        instance.ConstraintList = pyo.ConstraintList()
+        for i, constraint_func in enumerate(constraints):
+            try:
+                pyomo_expression = constraint_func(instance.x)
+                # Skip trivially true constraints (e.g. from empty index sets)
+                if isinstance(pyomo_expression, bool):
+                    if not pyomo_expression:
+                        raise ValueError(f"Constraint {i} is statically infeasible (evaluates to False).")
+                    continue
+                instance.ConstraintList.add(pyomo_expression)
+            except Exception as e:
+                print(f"Error adding constraint {i}: {e}. Ensure the constraint function accepts Pyomo's Var and returns a Pyomo expression.")
+                raise e
+
+        # Solve the model
+        self._solve_pyomo_model(instance, id_node)
+
+        # Extract results
+        return np.array([pyo.value(instance.x[i]) for i in range(n)])
+
     def rounding_estimation(self, x_tilde: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
-        '''Rounding estimation of the contingency vector.
-        
-        This method creates a Gurobi model to estimate the non negative discrete contingency vector.
+        '''Rounding estimation of the contingency vector using Pyomo ConcreteModel.
 
         Args:
-            x_tilde (np.ndarray): The contingency vector with the solution of the previous optimization step.
+            x_tilde (np.ndarray): The contingency vector from the previous optimization step.
             id_node (int): The ID of the node for which the estimation is being performed.
-            constraints (List[Callable], optional): List of additional constraints to apply to the model. Defaults to None.
-        
+            constraints (List[Callable]): List of additional constraints to apply to the model.
+
         Returns:
             np.ndarray: Estimated contingency vector with non-negative integer values.
         '''
-        # Same logic as previous method
-        self.model = gp.Model(f'RoundingEstimation. NodeID: {id_node}')
-        self.model.setParam('OutputFlag', 0)
         n = len(x_tilde)
-        
-        # Rounding problem
-        # We want to find which values of the vector x should be rounded up (1) or down (0)
         x_floor = np.floor(x_tilde)
-        # We obtain the decimal part of each value
         residual_round = x_tilde - x_floor
-        
-        # Decision variable (binary vector indicating rounding up or down)
-        y = self.model.addMVar(shape=n, vtype=gp.GRB.BINARY, name="y")
 
-        # Objective function: minimize the sum of squared differences (L2 norm)
-        self.model.setObjective(gp.quicksum((residual_round[i] - y[i]) * (residual_round[i] - y[i]) for i in range(n)), gp.GRB.MINIMIZE)
+        # Create a ConcreteModel directly
+        instance = pyo.ConcreteModel(name=f'RoundingEstimation_NodeID_{id_node}')
 
-        # The rounded solution will be x_floor + y, we want constraints over this vector
-        x_rounded = x_floor + y
+        # Set of indices
+        instance.I = pyo.RangeSet(0, n - 1)
 
-        # Additional constraints
-        for i, constraint in enumerate(constraints):
-            self.model.addConstr(constraint(x_rounded), name=f"GivenConstraint_{i}")
-        
-        # Run the model
-        self.model.optimize()
+        # Parameters: residual and floor values
+        instance.r = pyo.Param(instance.I, initialize={i: residual_round[i] for i in range(n)})
+        instance.f = pyo.Param(instance.I, initialize={i: x_floor[i] for i in range(n)})
 
-        # Check for infeasibility
-        if self.model.status == gp.GRB.INFEASIBLE:
-            self.model.write("infeasible_model.lp")
-            raise ValueError(f'Model is infeasible for node {id_node}. See infeasible_model.lp file for debugging.')
-        
-        # Rounded solution
-        return np.asarray(x_floor + y.X)
+        # Decision variable: binary
+        instance.y = pyo.Var(instance.I, domain=pyo.Binary)
+
+        # Objective: minimize L2 norm of residuals
+        def objective_rule(model):
+            return sum((model.r[i] - model.y[i])**2 for i in model.I)
+
+        instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
+
+        # Define rounded vector expression for constraints
+        x_rounded = {i: instance.f[i] + instance.y[i] for i in instance.I}
+
+        # Add constraints
+        instance.ConstraintList = pyo.ConstraintList()
+        for i, constraint_func in enumerate(constraints):
+            try:
+                pyomo_expression = constraint_func(x_rounded)
+                # Skip trivially true constraints (e.g. from empty index sets)
+                if isinstance(pyomo_expression, bool):
+                    if not pyomo_expression:
+                        raise ValueError(f"Constraint {i} is statically infeasible (evaluates to False).")
+                    continue
+                instance.ConstraintList.add(pyomo_expression)
+            except Exception as e:
+                print(f"Error adding constraint {i}: {e}. Ensure the constraint function accepts Pyomo's expression dict and returns a Pyomo expression.")
+                raise e
+
+        # Solve the model
+        self._solve_pyomo_model(instance, id_node)
+
+        # Extract results
+        y_estimated_array = np.array([pyo.value(instance.y[i]) for i in range(n)])
+
+        # Final result: floor + binary decisions
+        return x_floor + y_estimated_array
 
