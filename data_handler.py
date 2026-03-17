@@ -191,8 +191,8 @@ class DataHandler:
             filtered_data = data[data[current_column] == value]
 
             # Prepare constraints for the current level
+            level_constraints = []
             if constraints and level_iterator in constraints:
-                level_constraints = []
                 # Iterate over the constraints for the current level
                 for constraint in constraints[level_iterator]:
                     # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
