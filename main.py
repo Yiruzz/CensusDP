@@ -46,12 +46,36 @@ def main():
     OUTPUT_PATH = 'data/out/'
     OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
 
-    # With the TopDown class instantiated, we can set all the parameters
-    topdown = TopDown(data_path=DATA_PATH_VIVIENDAS, hierarchy=GEO_COLUMNS_TO_USE, queries=QUERIES, out_path=OUTPUT_PATH+OUTPUT_FILE, optimizer='gurobi')
+    #######################
+    # Solver configuration #
+    #######################
 
-    #######################################################
+    # Set the solver to use and its options
+    SOLVER_NAME = 'gurobi'
+
+    # Define solver-specific options
+    if SOLVER_NAME == 'gurobi':
+        SOLVER_OPTIONS = {'OutputFlag': 0}  # Suppress Gurobi output
+    elif SOLVER_NAME == 'cplex':
+        SOLVER_OPTIONS = {'timelimit': 300}  # Example CPLEX options
+    elif SOLVER_NAME == 'glpk':
+        SOLVER_OPTIONS = {}
+    else:
+        SOLVER_OPTIONS = {}
+
+    # With the TopDown class instantiated, we can set all the parameters
+    topdown = TopDown(
+        data_path=DATA_PATH_VIVIENDAS,
+        hierarchy=GEO_COLUMNS_TO_USE,
+        queries=QUERIES,
+        out_path=OUTPUT_PATH+OUTPUT_FILE,
+        optimizer=SOLVER_NAME,
+        solver_options=SOLVER_OPTIONS
+    )
+
+    ######################################################
     # Differential privacy budget and mechanism settings #
-    #######################################################
+    ######################################################
 
     # The privact budget needs to be defined for each level of the tree, using a list.
     # In this case, we will use a tree with 6 levels, so we split the total budget in 6 parts.

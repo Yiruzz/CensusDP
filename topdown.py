@@ -19,32 +19,33 @@ class TopDown():
     finally it solves optimization problems to ensure consistency across the tree and adherence to 
     specified constraints by the user.
     '''
-    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi') -> None:
+    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}) -> None:
         '''
         Initialize the TopDown algorithm.
-        
+
         Args:
             data_path (str): Path to the input data file.
             hierarchy (List[str]): List of columns representing the hierarchy levels.
             queries (List[str]): List of columns to be queried and aggregated.
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
             optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
+            solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
-            
+
             hierarchical_columns (List[str]): List of columns representing the hierarchy levels.
             query_columns (List[str]): List of columns to be queried and aggregated.
-            
+
             privacy_parameters (List[float]): List of privacy parameters for each level of the tree.
             mechanism (str): The noise mechanism to use ('discrete_laplace' or 'discrete_gaussian').
-            
+
             tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
             optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
 
             constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints
 
-            
+
 
         '''
         self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
@@ -60,7 +61,7 @@ class TopDown():
         self.constraints: Dict[int, List[Constraint]] = {}
 
         self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
-        self.optimizer: OptimizationModel = OptimizationModel(optimizer)
+        self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options)
         
         #self.constraints: List[List[Callable]] = []
         # self.processed_data: pd.DataFrame = None

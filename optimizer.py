@@ -10,13 +10,15 @@ class OptimizationModel:
     Uses ConcreteModels for direct model construction.
     '''
 
-    def __init__(self, solver_name='gurobi'):
+    def __init__(self, solver_name='gurobi', solver_options={}):
         '''Constructor for the OptimizationModel class.
 
         Args:
             solver_name (str): The name of the solver to use. Defaults to 'gurobi'.
+            solver_options (dict): Dictionary of options to pass to the solver.
         '''
         self.solver = pyo.SolverFactory(solver_name)
+        self.solver_options = solver_options
 
     def _solve_pyomo_model(self, instance: pyo.ConcreteModel, id_node: int) -> Any:
         '''Auxiliar function to solve the instance of the model and handle infeasibility.
@@ -28,10 +30,8 @@ class OptimizationModel:
         Returns:
             SolverResults: The results from the solver.
         '''
-        # Options for the solver
-        options = {'OutputFlag': 0} if self.solver.name == 'gurobi' else {}
-
-        results = self.solver.solve(instance, tee=False, options=options)
+        # Use the solver options provided during initialization
+        results = self.solver.solve(instance, tee=False, options=self.solver_options)
 
         # Check termination conditions
         if results.solver.termination_condition == pyo.TerminationCondition.optimal or \
