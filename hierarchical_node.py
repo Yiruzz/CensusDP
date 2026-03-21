@@ -11,16 +11,18 @@ class HierarchicalNode:
     This class focuses solely on node specific data and operations,
     without any tree traversal or tree-wide operation logic.
     '''
-    def __init__(self, node_id: int, constraints: List[Callable]) -> None:
+    def __init__(self, node_id: int, geo_id: int, constraints: List[Callable]) -> None:
         """
         Initialize a hierarchical node.
         
         Args:
             node_id (int): Unique identifier for this hierarchical node
+            geo_id (int): Identifier related to geography
             constraints (List[Callable]): Optional list of constraints for this node
         
         Attributes:
-            id (int): Unique identifier for the node at its level
+            node_id (int): Unique identifier for the node at its level
+            geo_id (int): Identifier related to geography
             children (List[HierarchicalNode]): List of child nodes
             parent (HierarchicalNode): Reference to the parent node
             hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root
@@ -32,7 +34,8 @@ class HierarchicalNode:
             
             comparative_vector (np.ndarray): Optional vector for this node. Used to compare distributions.
         """
-        self.id: int = node_id
+        self.node_id: int = node_id
+        self.geo_id: int = geo_id
 
         self.children: List['HierarchicalNode'] = []
         self.parent: Optional['HierarchicalNode'] = None
@@ -57,7 +60,7 @@ class HierarchicalNode:
             child_node (HierarchicalNode): The child node to add.
         """
         child_node.parent = self
-        child_node.hierarchical_path = self.hierarchical_path + [self.id]
+        child_node.hierarchical_path = self.hierarchical_path + [self.node_id]
         self.children.append(child_node)
 
     def is_leaf(self) -> bool:

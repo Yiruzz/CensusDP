@@ -8,6 +8,7 @@ from constraints.constraint import Constraint
 from discretegauss import sample_dlaplace, sample_dgauss
 
 from typing import Callable, Dict, List
+from itertools import count
 import time
 
 
@@ -85,7 +86,7 @@ class TopDown():
 
         t1 = time.time()
         print(f'Building hierarchical tree...', end=' ')
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
+        self.tree = self.data_handler.build_hierarchical_tree(count(start=0), self.constraints)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         return None
@@ -115,12 +116,12 @@ class TopDown():
         '''
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
             contingency_vector=self.tree.root.contingency_vector,
-            id_node=self.tree.root.id,
+            id_node=self.tree.root.node_id,
             constraints=self.tree.root.constraints
         )
         self.tree.root.contingency_vector = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
-            id_node=self.tree.root.id,
+            id_node=self.tree.root.node_id,
             constraints=self.tree.root.constraints
         )
         return None
@@ -160,12 +161,12 @@ class TopDown():
                 # Solve for children nodes (joint contingency vector)
                 x_tilde = self.optimizer.non_negative_real_estimation(
                     contingency_vector=joint_contingency_vector,
-                    id_node=node.id,
+                    id_node=node.node_id,
                     constraints=joint_constraints
                 )
                 joint_solution: np.ndarray = self.optimizer.rounding_estimation(
                     x_tilde=x_tilde,
-                    id_node=node.id,
+                    id_node=node.node_id,
                     constraints=joint_constraints
                 )
 

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 from itertools import product
-from typing import List, Optional
+from typing import List, Optional, Iterator
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
@@ -125,18 +125,19 @@ class DataHandler:
         
         return contingency_vector
 
-    def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
+    def build_hierarchical_tree(self, node_id: Iterator[int], constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
         '''Build a hierarchical tree based on the hierarchical columns.
         It creates a contingency vector for each node in the tree.
         
         Args:
+            node_id (Iterator[int]): Iterator that indicates the node_id related to the instance.
             constraints (Dict[int, List[Callable]]): Dictionary mapping tree levels to their constraints.
         
         Returns:
             HierarchicalTree: The constructed hierarchical tree.
         '''
 
-        tree = HierarchicalTree()
+        tree = HierarchicalTree(root_id = next(node_id))
 
         # Generate the contingency table if not already done
         if self.contingency_df is None:
@@ -162,26 +163,24 @@ class DataHandler:
         tree.root.constraints = root_contstraints
 
         # Construct the tree recursively and count the nodes created
-        tree._node_count = self._build_subtree(tree.root, 0, self.dataframe, constraints)
+        self._build_subtree(tree.root, node_id, 0, self.dataframe, constraints)
+        tree._node_count = next(node_id)
         return tree
     
-    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> int:
+    def _build_subtree(self, parent_node: HierarchicalNode, node_id: Iterator[int], level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> None:
         '''Helper method to recursively build the subtree for a given parent node.
         
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
+            node_id (Iterator[int]): Iterator that indicates the node_id related to the instance.
             level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
             data (pd.DataFrame): The subset of data corresponding to the parent node.
             constraints (List[Callable]): List of constraints to apply to each node.
-        
-        Returns:
-            int: The number of nodes in the subtree.
         '''
         # When there are no more levels to process, return the parent node
         if level_iterator >= len(self.hierarchical_columns):
             return 0
         
-        n_nodes = 1
         # Get the current hierarchical column to split on
         current_column = self.hierarchical_columns[level_iterator]
         unique_hierarchical_values = data[current_column].unique()
@@ -205,7 +204,7 @@ class DataHandler:
 
 
             # Create a new child node
-            child_node = HierarchicalNode(node_id=value, constraints=level_constraints)
+            child_node = HierarchicalNode(node_id=next(node_id), geo_id=value, constraints=level_constraints)
             parent_node.add_child(child_node)
 
             # Create and assign the contingency vector for the child node
@@ -214,9 +213,9 @@ class DataHandler:
             child_node.parent = parent_node
 
             # Recursively build the subtree for the child node
-            n_nodes += self._build_subtree(child_node, level_iterator + 1, filtered_data, constraints)
+            self._build_subtree(child_node, node_id, level_iterator + 1, filtered_data, constraints)
 
-        return n_nodes
+        return None
     
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.
@@ -254,7 +253,7 @@ class DataHandler:
                 current_level += 1
             
             # Also don't forget to add the information of the leaf node itself
-            leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(leaf.id, leaf_size))
+            leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(leaf.geo_id, leaf_size))
 
             # Merge the leaf_dict into microdata_dict by concatenating lists for duplicate keys
             for key, values in leaf_dict.items():

@@ -34,7 +34,7 @@ class HierarchicalTree:
             root (HierarchicalNode): The root node of the tree
             _node_count (int): Internal counter to keep track of the number of nodes in the tree
         """
-        self.root = HierarchicalNode(root_id, constraints)
+        self.root = HierarchicalNode(node_id=root_id, geo_id="Country", constraints=constraints)
         self._node_count = 1
     
     def iterate_by_levels(self) -> Generator[Tuple[int, List[HierarchicalNode]], None, None]:
