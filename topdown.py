@@ -6,7 +6,6 @@ from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 
 from discretegauss import sample_dlaplace, sample_dgauss
-from constraints.callable_constraints import AggregateConstraintFunction, SubarrayConstraintFunction
 
 from typing import Callable, Dict, List
 import time
@@ -110,19 +109,10 @@ class TopDown():
         
         return None
 
-    def estimation_phase(self) -> None:
-        '''Perform the estimation phase of the TopDown algorithm.
-        
-        This method solves optimization problems at each node in the hierarchical tree to ensure
-        consistency and adherence to constraints after noise has been added.
-        '''
-        t1 = time.time()
-        print(f'Running estimation phase...')
+    def root_estimation_phase(self) -> None:
+        '''Perform the estimation phase of the TopDown algorithm for root node.
 
-        # Root estimation (level 0)
-        # Does not require consistency adjustments
-        t2 = time.time()
-        print(f'\nProcessing root node (level 0)... ', end=' ')
+        '''
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
             contingency_vector=self.tree.root.contingency_vector,
             id_node=self.tree.root.id,
@@ -133,6 +123,23 @@ class TopDown():
             id_node=self.tree.root.id,
             constraints=self.tree.root.constraints
         )
+        return None
+    
+    def subtree_estimation_phase(self) -> None:
+        raise NotImplementedError()
+
+    def estimation_phase(self) -> None:
+        '''Perform the estimation phase of the TopDown algorithm.
+        
+        This method solves optimization problems at each node in the hierarchical tree to ensure
+        consistency and adherence to constraints after noise has been added.
+        '''
+        t1 = time.time()
+        print(f'Running estimation phase...')
+
+        t2 = time.time()
+        print(f'\nProcessing root node (level 0)... ', end=' ')
+        self.root_estimation_phase()
         print(f'{time.time() - t2:.2f} seconds.')
 
         # Now process the rest of the tree level by level
@@ -142,32 +149,13 @@ class TopDown():
             for node in nodes:
                 # If the node is a leaf, no need to solve optimization
                 # NOTE: With a break we assume that all leaves are at the same level
-                if len(node.children) == 0:
+                if node.is_leaf():
                     break
                 
-                # Solve the optimization problem for the children of the current node
-                childs_contingency_vectors = [child.contingency_vector for child in node.children]
-                joint_contingency_vector = np.concatenate(childs_contingency_vectors)
-
+                joint_contingency_vector = node.combine_child_vectors()
+                
                 # Transform individual constraints for joint vector
-                joint_constraints: List[Callable] = []
-                # All vectors have the same length
-                vectors_length = len(childs_contingency_vectors[0])
-                start = 0
-                for child in node.children:
-                    end = start + vectors_length
-                    for constraint in child.constraints:
-                        # NOTE: We use an object with a __call__ method, which acts like a function, replacing a lambda function.
-                        # Build a sub-dict with keys 0..(e-s-1) so the constraint's indices still match
-                        joint_constraints.append(SubarrayConstraintFunction(start=start, end=end, constraint=constraint))
-                    start = end
-
-                # Consistency constraint: sum of children = parent
-                for index in range(vectors_length):
-                    # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
-                    # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
-                    indices_to_sum = list(range(index, len(joint_contingency_vector), vectors_length))
-                    joint_constraints.append(AggregateConstraintFunction(indices=indices_to_sum, value=node.contingency_vector[index]))
+                joint_constraints = node.combine_child_constraints(joint_contingency_vector)
                 
                 # Solve for children nodes (joint contingency vector)
                 x_tilde = self.optimizer.non_negative_real_estimation(
@@ -182,11 +170,7 @@ class TopDown():
                 )
 
                 # Save the solution back to each child node
-                start = 0
-                for child in node.children:
-                    end = start + vectors_length
-                    child.contingency_vector = joint_solution[start:end]
-                    start = end
+                node.update_child_vectors(joint_solution)
 
             if len(nodes[0].children) != 0: print(f'{time.time() - t2:.2f} seconds.')
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
