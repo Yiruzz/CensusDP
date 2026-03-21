@@ -2,6 +2,7 @@ import pandas as pd
 
 from typing import Callable
 
+from .callable_constraints import AggregateConstraintFunction
 from .logical_expressions import LogicalExpression
 from constraints.constraint import Constraint
 from abc import ABC
@@ -28,7 +29,7 @@ class SumEqual(AggregateConstraint):
         # Get indices where the expression is True
         indices = reduced_series[reduced_series].index
         # Return a function that checks if the sum of the contingency variable equals the value
-        return lambda contingency_var, sum_val=self.value, _indices=indices: sum(contingency_var[i] for i in _indices) == sum_val
-
+        return AggregateConstraintFunction(indices, self.value)
+    
 # NOTE: Add more aggregate expressions as needed
 

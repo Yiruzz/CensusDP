@@ -2,6 +2,7 @@ import pandas as pd
 from typing import Callable
 from abc import ABC, abstractmethod
 
+from constraints.callable_constraints import AggregateConstraintFunction
 from constraints.constraint import Constraint
 
 class LogicalExpression(Constraint, ABC):
@@ -45,6 +46,5 @@ class LogicalExpression(Constraint, ABC):
 
         # Return a function that checks if there are no True values in the negated indices.
         # This will be the function used as a constraint in the optimizer.
-        return lambda contingency_var, _indices=indices: sum(contingency_var[i] for i in _indices) == 0
-
+        return AggregateConstraintFunction(indices, 0)
 

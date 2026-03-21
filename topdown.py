@@ -6,6 +6,7 @@ from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 
 from discretegauss import sample_dlaplace, sample_dgauss
+from constraints.callable_constraints import AggregateConstraintFunction, SubarrayConstraintFunction
 
 from typing import Callable, Dict, List
 import time
@@ -156,10 +157,9 @@ class TopDown():
                 for child in node.children:
                     end = start + vectors_length
                     for constraint in child.constraints:
-                        # NOTE: We use default arguments to avoid late binding issues in lambdas
-                        # This can lead to all constraints using the last values saved of start and end
+                        # NOTE: We use an object with a __call__ method, which acts like a function, replacing a lambda function.
                         # Build a sub-dict with keys 0..(e-s-1) so the constraint's indices still match
-                        joint_constraints.append(lambda joint_array, s=start, e=end, c=constraint: c({i - s: joint_array[i] for i in range(s, e)}))
+                        joint_constraints.append(SubarrayConstraintFunction(start=start, end=end, constraint=constraint))
                     start = end
 
                 # Consistency constraint: sum of children = parent
@@ -167,9 +167,8 @@ class TopDown():
                     # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
                     # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
                     indices_to_sum = list(range(index, len(joint_contingency_vector), vectors_length))
-                    joint_constraints.append(lambda joint_array, idxs=indices_to_sum, value=node.contingency_vector[index]:
-                                             sum(joint_array[j] for j in idxs) == value)
-                    
+                    joint_constraints.append(AggregateConstraintFunction(indices=indices_to_sum, value=node.contingency_vector[index]))
+                
                 # Solve for children nodes (joint contingency vector)
                 x_tilde = self.optimizer.non_negative_real_estimation(
                     contingency_vector=joint_contingency_vector,
