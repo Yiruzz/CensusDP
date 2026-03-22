@@ -28,8 +28,8 @@ def main():
     GEO_COLUMNS_TO_USE = GEO_COLUMNS[:GEO_COLUMNS.index(PROCESS_UNTIL) + 1]
 
     # Define the columns to use that will be queried in each node of the tree.
-    # QUERIES = ['P08', 'P09'] # Sex and Age
-    QUERIES = ['P02', 'P03A', 'P03B'] # Viviendas queries
+    #QUERIES = ['P01', 'P02', 'P03A', 'P03B', 'P03C', 'P04', 'P05']
+    QUERIES = ['P02', 'P03A', 'P03B']
 
     ##############################
     # Input and output data path # 
@@ -55,7 +55,8 @@ def main():
 
     # Define solver-specific options
     if SOLVER_NAME == 'gurobi':
-        SOLVER_OPTIONS = {'OutputFlag': 0}  # Suppress Gurobi output
+        SOLVER_OPTIONS = {'OutputFlag': 0, # Suppress Gurobi output
+                          'Threads': 3 }  
     elif SOLVER_NAME == 'cplex':
         SOLVER_OPTIONS = {'timelimit': 300}  # Example CPLEX options
     elif SOLVER_NAME == 'glpk':

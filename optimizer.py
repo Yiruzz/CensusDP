@@ -17,7 +17,7 @@ class OptimizationModel:
             solver_name (str): The name of the solver to use. Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver.
         '''
-        self.solver = pyo.SolverFactory(solver_name)
+        self.solver = pyo.SolverFactory(solver_name, manage_env=True)
         self.solver_options = solver_options
 
     def _solve_pyomo_model(self, instance: pyo.ConcreteModel, id_node: int) -> Any:
