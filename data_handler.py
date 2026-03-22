@@ -163,14 +163,15 @@ class DataHandler:
         tree.root.constraints = root_contstraints
 
         # Construct the tree recursively and count the nodes created
-        self._build_subtree(tree.root, node_id, 0, self.dataframe, constraints)
+        self._build_subtree(tree, tree.root, node_id, 0, self.dataframe, constraints)
         tree._node_count = next(node_id)
         return tree
     
-    def _build_subtree(self, parent_node: HierarchicalNode, node_id: Iterator[int], level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> None:
+    def _build_subtree(self, tree: HierarchicalTree, parent_node: HierarchicalNode, node_id: Iterator[int], level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> None:
         '''Helper method to recursively build the subtree for a given parent node.
         
         Args:
+            tree (HierarchicalTree): Tree where nodes are added in order of creation.
             parent_node (HierarchicalNode): The parent node to which children will be added.
             node_id (Iterator[int]): Iterator that indicates the node_id related to the instance.
             level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
@@ -202,9 +203,9 @@ class DataHandler:
                     assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
                     level_constraints.append(constraint.to_constraint(self.contingency_df))
 
-
             # Create a new child node
             child_node = HierarchicalNode(node_id=next(node_id), geo_id=value, constraints=level_constraints)
+            tree._nodes.append(child_node)
             parent_node.add_child(child_node)
 
             # Create and assign the contingency vector for the child node
@@ -213,7 +214,7 @@ class DataHandler:
             child_node.parent = parent_node
 
             # Recursively build the subtree for the child node
-            self._build_subtree(child_node, node_id, level_iterator + 1, filtered_data, constraints)
+            self._build_subtree(tree, child_node, node_id, level_iterator + 1, filtered_data, constraints)
 
         return None
     

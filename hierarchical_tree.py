@@ -36,6 +36,7 @@ class HierarchicalTree:
         """
         self.root = HierarchicalNode(node_id=root_id, geo_id="Country", constraints=constraints)
         self._node_count = 1
+        self._nodes: list[HierarchicalNode] = [self.root]
     
     def iterate_by_levels(self) -> Generator[Tuple[int, List[HierarchicalNode]], None, None]:
         """

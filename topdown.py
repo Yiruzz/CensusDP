@@ -169,7 +169,6 @@ class TopDown():
                     id_node=node.node_id,
                     constraints=joint_constraints
                 )
-
                 # Save the solution back to each child node
                 node.update_child_vectors(joint_solution)
 
