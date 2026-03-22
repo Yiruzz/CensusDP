@@ -154,4 +154,4 @@ class HierarchicalNode:
     
     def __repr__(self) -> str:
         '''String representation of the node.'''
-        return f"HierarchicalNode(id={self.id}, level={self.get_level()}, children={len(self.children)})"
+        return f"HierarchicalNode(id={self.node_id}, level={self.get_level()}, children={len(self.children)})"
