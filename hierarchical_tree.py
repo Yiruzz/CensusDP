@@ -1,82 +1,49 @@
 from hierarchical_node import HierarchicalNode
-
-from collections import deque
-from typing import List, Callable, Tuple, Generator
-
-
+from typing import List, Tuple
 
 class HierarchicalTree:
-    '''Represents a hierarchical tree structure. Each node is a HierarchicalNode.
+    '''Represents a hierarchical tree structure composed of multiple HierarchicalNode objects.
+    The tree is represented as a list of nodes.
 
-    This class is responsible for tree structure management, traversal,
-    and operations that need to be applied across multiple nodes.
+    Example:
+        [<HierarchicalNode>, <HierarchicalNode>, ...]
 
-    Example of a hierarchical tree:
-    
-    C = Country
-    S = State
+    Where each node id corresponds to its index in the list
+    and the father_id attribute of each node indicates the index of its parent node in the list.
+    Also is possible indentify the levels of the tree by after get the nodes of each level using ranges of indices.
 
-        C
-       / \
-      S1  S2
-     /|\   \
-     
     '''
-    def __init__(self, root_id: int = 0, constraints: List[Callable] = []) -> None:
-        """
-        Initialize the hierarchical tree with a root node.
+
+    def __init__(self, nodes: List["HierarchicalNode"], node_ranges_by_level: List[Tuple[int, int]]) -> None:
+        '''Initializes the hierarchical tree structure with a list of nodes and their corresponding index ranges for each level.
         
         Args:
-            root_id: ID for the root node
-            constraints: Optional constraints for the root node
-
-        Attributes:
-            root (HierarchicalNode): The root node of the tree
-            _node_count (int): Internal counter to keep track of the number of nodes in the tree
-        """
-        self.root = HierarchicalNode(root_id, constraints)
-        self._node_count = 1
-    
-    def iterate_by_levels(self) -> Generator[Tuple[int, List[HierarchicalNode]], None, None]:
-        """
-        Iterate over the tree level by level using BFS.
+            nodes: A list of HierarchicalNode objects representing the nodes in the tree.
+            node_ranges_by_level: A list of tuples, where each tuple contains the start and end index of nodes for a specific level in the tree.
         
-        Yields:
-            Tuples of (level, list of nodes at that level)
-        """
-        if not self.root:
-            raise ValueError("The tree has no root node.")
-
-        queue = deque([(self.root, 0)])
-        current_level = 0
-        level_nodes: List[HierarchicalNode] = []
-
-        while queue:
-            node, level = queue.popleft()
-
-            # When we reach a new level, yield the previous level's nodes
-            if level != current_level:
-                yield current_level, level_nodes
-                current_level = level
-                level_nodes = []
-
-            level_nodes.append(node)
-
-            for child in node.children:
-                queue.append((child, level + 1))
-
-        if level_nodes:
-            yield current_level, level_nodes
-
-    def apply(self, operation: Callable[[HierarchicalNode], None]) -> None:
-        """
-        Apply a function to each node in the tree considering BFS traversal.
+        Atributes:
+            nodes: A list of HierarchicalNode objects representing the nodes in the tree.
+            node_ranges_by_level: A list of tuples, where each tuple contains the start and end index of nodes for a specific level in the tree.
+            _node_count: The total number of nodes in the tree.
+            _level_count: The total number of levels in the tree.
+        '''
         
-        Args:
-            operation: Function that takes a HierarchicalNode as input and returns None
-        """
-        bfs_traversal = self.iterate_by_levels()
-        for _, nodes in bfs_traversal:
-            for node in nodes:
-                operation(node)
+        self.nodes: List["HierarchicalNode"] = nodes
+        self.node_ranges_by_level: List[Tuple[int, int]] = node_ranges_by_level
+        self._node_count: int = len(self.nodes)
+        self._level_count: int = len(self.node_ranges_by_level)
     
+    def __repr__(self) -> str:
+        '''Create a string representation of the hierarchical tree structure.
+        Show the number of nodes and levels, and the range of node indices for each level.
+
+        Returns:
+            str: A string representation of the hierarchical tree structure.
+
+        '''
+        tree = f"HierarchicalTree with {self._node_count} nodes and {self._level_count} levels. \n"
+
+        for level, (start_idx, end_idx) in enumerate(self.node_ranges_by_level):
+            tree += f"  Level {level}: Nodes {start_idx} to {end_idx-1} - {end_idx - start_idx} nodes \n"
+
+        return tree

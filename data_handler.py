@@ -1,3 +1,6 @@
+from collections import deque
+from dataclasses import fields
+
 import pandas as pd
 import numpy as np
 
@@ -12,56 +15,77 @@ from hierarchical_node import HierarchicalNode
 class DataHandler:
     '''Class to handle data loading, preprocessing and postprocessing.'''
 
-    def __init__(self, file_path: str, output_path: str = 'noisy_data.csv') -> None:
+    def __init__(self, input_path: str, hierarchical_columns: List[str], query_columns: List[str],
+                 tree_path: str, contingency_vectors_folder_path: str, output_path: str) -> None:
         '''Constructror for DataHandler class.
         
         Args:
-            file_path (str): Path to the data file.
+            input_path (str): Path to the input data file.
+            hierarchical_columns (List[str]): List of columns representing the hierarchical levels, in order from highest to lowest.
+            query_columns (List[str]): List of columns to use for generating the contingency table.
+            tree_path (str): Path to the file containing the hierarchical tree structure.
+            contingency_vectors_folder_path (str): Path to the folder containing contingency vectors for each node in the tree.
             output_path (str): Path to save the processed data.
 
         Attributes:
-            file_path (str): Path to the data file.
-            output_path (str): Path to save the processed data. Defaults to "noisy_data.csv".
+            data_path (str): Path to the data file.
+            microdata_path (str): Path to save the processed microdata.
+
+            tree_path (str): Path to the file containing the hierarchical tree structure.
+            contingency_vectors_folder_path (str): Path to the folder containing contingency vectors for each node in the tree.
             
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
-            contingency_df (Optional[pd.DataFrame]): DataFrame to hold the contingency table.    
-
-            query_columns (List[str]): List of columns to use for generating the contingency table.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
+            query_columns (List[str]): List of columns to use for generating the contingency table.
+            
         '''
-        # Input and output paths
-        self.file_path: str = file_path
-        self.output_path: str = output_path
 
-        # Dataframe to hold the data (loaded from file_path).
+        # Input and output paths
+        self.data_path: str = input_path
+        self.microdata_path: str = output_path
+
+        # Paths related to the tree structure and contingency vectors.
+        self.tree_path: str = tree_path
+        self.contingency_vectors_folder_path: str = contingency_vectors_folder_path
+
+        # DataFrame to hold the data (loaded from file_path).
         self.dataframe: Optional[pd.DataFrame] = None
+        self.hierarchical_columns: List[str] = hierarchical_columns
+        self.query_columns: List[str] = query_columns
 
         # Used to store and have an order on each unique combination of attributes.
         # The contingency vectors will have the same order of this dataframe.
         self.contingency_df: Optional[pd.DataFrame] = None
 
-        # Hierarchical columns (first value highest hierarchy, last lowest).
-        self.hierarchical_columns: List[str] = []
-
-        # Query columns (not considered for the hierarchy).
-        self.query_columns: List[str] = []
-
-    def read_data(self, columns: List[str], sep: str = ',', nrows: Optional[int] = None) -> pd.DataFrame:
+    def read_data(self, sep: str = ',') -> None:
         '''Read data from the file_path into a pandas DataFrame.
         
         Args:
-            sep (str): Separator used in the CSV file. Defaults to ",".
-            columns (List[str]): List of columns to read from the CSV file.
-            nrows (Optional[int]): Number of rows to read from the CSV file. If None, read all rows. Defaults to None.
+            file_path (str): Path to the data file.
 
-        Returns:
-            pd.DataFrame: DataFrame containing the loaded data.
         '''
-        if nrows is not None and nrows > 0:
-            self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns, nrows=nrows)
-        else:
-            self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
-        return self.dataframe
+        self.dataframe = pd.read_csv(self.data_path, sep=sep)
+        return None
+    
+    def reduce_data(self) -> None:
+        '''Reduce the dataframe to the necessary columns.
+
+        Args:
+            columns_to_use (List[str]): List of columns to keep in the dataframe.
+
+        '''
+  
+        self.dataframe = self.dataframe[self.hierarchical_columns + self.query_columns]
+        return None
+    
+    def sort_data_by_hierarchy(self) -> None:
+        '''Sort the data by the hierarchical columns in ascending order.
+        
+        '''
+
+        self.dataframe.sort_values(by=self.hierarchical_columns, inplace=True)
+        self.dataframe.reset_index(drop=True, inplace=True)
+        return None
 
     def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None) -> None:
         '''Write the processed data to the output_path.
@@ -69,15 +93,26 @@ class DataHandler:
         Args:
             data (pd.DataFrame): DataFrame containing the processed data to write.
             out_path (Optional[str]): Optional path to save the processed data. If None, use self.output_path.
+
         '''
-        data.to_csv((out_path or self.output_path), index=False)
+        data.to_csv((out_path or self.microdata_path), sep=';', index=False, encoding='utf-8')
+        return None
+
     
-    def generate_contingency_dataframe(self, query_columns: List[str]) -> pd.DataFrame:
+    def compress_file(self, file_path: str, should_delete_original: bool = True) -> None:
+        '''Compress the given file.
+        Useful for then sorted data is saved to a new file, the original file can be deleted to save space,
+        specially when working with large datasets.
+        
+        Args:
+            file_path (str): Path to the file to compress.
+            should_delete_original (bool): Whether to delete the original file after compression. Defaults to True.
+        '''
+        raise NotImplementedError("This method is not implemented yet.")
+    
+    def generate_contingency_dataframe(self) -> pd.DataFrame:
         '''Generate a contingency dataframe from the loaded data.
         This method assumes that each column have all the possible values.
-
-        Args:
-            query_columns (List[str]): List of query columns to aggregate.
 
         Returns:
             pd.DataFrame: Contingency DataFrame with each unique combination of query columns.
@@ -85,17 +120,16 @@ class DataHandler:
         # Get unique values for each column
         # NOTE: Here we assume that each column contains all possible values
         # Example: if the domain of "Age" is [0, ..., 100], we assume that the column contains all those values
-        assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
-        unique_values = [self.dataframe[col].unique() for col in query_columns]
+        unique_values = [self.dataframe[col].unique() for col in self.query_columns]
 
         # Generate all possible combinations (Cartesian product)
-        self.contingency_df = pd.DataFrame(list(product(*unique_values)), columns=query_columns)
+        self.contingency_df = pd.DataFrame(list(product(*unique_values)), columns=self.query_columns)
         
         # Sort by the columns to ensure a consistent order
-        self.contingency_df.sort_values(by=query_columns, inplace=True)
+        self.contingency_df.sort_values(by=self.query_columns, inplace=True)
         self.contingency_df.reset_index(drop=True, inplace=True)
 
-        print("Contingency DataFrame generated with shape:", self.contingency_df.shape, "in", end=' ')
+        print("Contingency DataFrame generated with shape:", self.contingency_df.shape)
 
         return self.contingency_df
     
@@ -108,9 +142,6 @@ class DataHandler:
         Returns:
             np.ndarray: Contingency vector with counts for each unique combination in contingency_df.
         '''
-        if self.contingency_df is None:
-            raise ValueError("Contingency DataFrame is not generated. Call generate_contingency_table first.")
-
         queries = self.contingency_df.columns.tolist()
 
         # Group the data by the permutation columns and count occurrences
@@ -124,100 +155,172 @@ class DataHandler:
         contingency_vector = merged['frequency'].to_numpy(dtype=int)
         
         return contingency_vector
+    
+    def create_contingency_vectors(self, tree: HierarchicalTree) -> None:
+        for node in tree.nodes:
+            # Get the segment of the data corresponding to the current node
+            start, end = node.df_range
+            df_node = self.dataframe.iloc[start:end+1]
 
-    def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
-        '''Build a hierarchical tree based on the hierarchical columns.
-        It creates a contingency vector for each node in the tree.
-        
-        Args:
-            constraints (Dict[int, List[Callable]]): Dictionary mapping tree levels to their constraints.
-        
+            # Create the contingency vector for the current node
+            node.contingency_vector = self.create_contingency_vector(df_node)
+            
+        return None
+
+    def load_tree(self) -> HierarchicalTree:
+        '''
+        Load the hierarchical tree structure based on a file created by the function create_tree.
+        For each row, create a node with the corresponding information and put it in the right place in the tree.
+
         Returns:
-            HierarchicalTree: The constructed hierarchical tree.
+            HierarchicalTree: The loaded hierarchical tree structure.
         '''
 
-        tree = HierarchicalTree()
+        nodes = []
+        node_ranges_by_level = []
 
-        # Generate the contingency table if not already done
-        if self.contingency_df is None:
-            self.generate_contingency_dataframe(self.query_columns)
-        
-        assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
-        # Contingency vector for the root node (entire dataset)
-        tree.root.contingency_vector = self.create_contingency_vector(self.dataframe)
-        
-        # List of constraints for the root node
-        root_contstraints = []
-        if constraints and 0 in constraints:
-            # Iterate over the constraints for the root node
-            for constraint in constraints[0]:
-                # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
-                match constraint:
-                    case ContextualAggregateConstraint():
-                        constraint.apply_aggregation_function(self.dataframe)
-                # Append the constraint function to the root constraints list
-                assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-                root_contstraints.append(constraint.to_constraint(self.contingency_df))
+        index_last_hierarchical_column = len(self.hierarchical_columns)
 
-        tree.root.constraints = root_contstraints
+        # Read the tree file into a DataFrame
+        tree_df = pd.read_csv(self.tree_path, sep=';')
 
-        # Construct the tree recursively and count the nodes created
-        tree._node_count = self._build_subtree(tree.root, 0, self.dataframe, constraints)
-        return tree
-    
-    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> int:
-        '''Helper method to recursively build the subtree for a given parent node.
-        
-        Args:
-            parent_node (HierarchicalNode): The parent node to which children will be added.
-            level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
-            data (pd.DataFrame): The subset of data corresponding to the parent node.
-            constraints (List[Callable]): List of constraints to apply to each node.
-        
-        Returns:
-            int: The number of nodes in the subtree.
+        curr_level = 0
+
+        # Iterate over the rows of the DataFrame and create nodes
+        for _, row in tree_df.iterrows():
+            node_id = int(row['id'])
+            parent_id = int(row['parent']) if not pd.isna(row['parent']) else None
+            geo_value = int(row['geo'])
+            level = int(row['level'])
+
+            # If we have reached a new level in the tree,
+            # update the node_ranges_by_level list because finished a level.
+            if level > curr_level:
+                node_ranges_by_level.append((None, node_id))
+                curr_level = level
+
+            # Stop loading nodes if we have reached a level greater
+            # than the last hierarchical column index specified.
+            # Since the file was created in order, all subsequent nodes
+            # will have a level greater than this, so we can skip them.
+            if level > index_last_hierarchical_column:
+                break
+
+            df_range = tuple(map(int, row['df_range'].strip('()').split(',')))
+            children_range = tuple(map(int, row['children_range'].strip('()').split(','))) if not pd.isna(row['children_range']) else None
+
+            if level == index_last_hierarchical_column:
+                children_range= None
+
+            node = HierarchicalNode(node_id=node_id, parent_id=parent_id, geo_value=geo_value,
+                                    level=level, df_range=df_range, children_range=children_range)
+            nodes.append(node)
+
+        # Complete the node_ranges_by_level list
+        node_ranges_by_level[0] = (0, node_ranges_by_level[0][1])
+        for i in range(len(node_ranges_by_level) - 1):
+            node_ranges_by_level[i+1] = (node_ranges_by_level[i][1], node_ranges_by_level[i+1][1])
+
+        if len(node_ranges_by_level) < index_last_hierarchical_column + 1:
+            # If we reach the end of all levels in the tree without breaking
+            # due to the level condition, we need to add the remaining level.
+            node_ranges_by_level.append((node_ranges_by_level[-1][1], len(nodes)))
+
+        return HierarchicalTree(nodes, node_ranges_by_level)
+
+    def create_tree(self) -> None:
         '''
-        # When there are no more levels to process, return the parent node
-        if level_iterator >= len(self.hierarchical_columns):
-            return 0
+        Create a tree based on the hierarchical columns.
+        Using the sorted DataFrame, it gets the indices for each node related to the DataFrame.
+        This allows saving the tree structure to a file, which can later be loaded with "load_tree" and
+        create different contingency vectors dividing the work efficiently, because the data for each node is independent.
+
+        '''
+        # Inialize the list of nodes 
+        nodes = []
+
+        # Get rows relationated to the hierarchical columns as a numpy array
+        data_geo = self.dataframe[self.hierarchical_columns].values             
+        rows = len(self.dataframe)
+
+        # Create the root node
+        curr_id = 0
+        curr_level = 0
+        root_node = HierarchicalNode(node_id=curr_id, parent_id=None, geo_value=curr_id,
+                                     level=curr_level, df_range=(0, rows-1), children_range=None)
         
-        n_nodes = 1
-        # Get the current hierarchical column to split on
-        current_column = self.hierarchical_columns[level_iterator]
-        unique_hierarchical_values = data[current_column].unique()
+        nodes.append(root_node)
 
-        for value in unique_hierarchical_values:
-            # Filter data for the current hierarchical value
-            filtered_data = data[data[current_column] == value]
+        curr_id += 1
+        curr_level += 1
 
-            # Prepare constraints for the current level
-            level_constraints = []
-            if constraints and level_iterator in constraints:
-                # Iterate over the constraints for the current level
-                for constraint in constraints[level_iterator]:
-                    # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
-                    match constraint:
-                        case ContextualAggregateConstraint():
-                            constraint.apply_aggregation_function(filtered_data)
-                    # Append the constraint function to the level constraints list
-                    assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-                    level_constraints.append(constraint.to_constraint(self.contingency_df))
+        # Start BFS
+        q = deque()
+        q.append(root_node)
 
+        while q:
+            node = q.popleft()
+            child_level = node.level + 1
 
-            # Create a new child node
-            child_node = HierarchicalNode(node_id=value, constraints=level_constraints)
-            parent_node.add_child(child_node)
+            # If the child level is greater than the number of hierarchical columns,
+            # we have reached the leaf nodes, so we stop creating children since the level
+            if child_level > len(self.hierarchical_columns):
+                break
 
-            # Create and assign the contingency vector for the child node
-            child_node.contingency_vector = self.create_contingency_vector(filtered_data)
+            # Take the segment of the data corresponding to the current hierarchical level
+            # Find the indices where the value changes, which will correspond to the children nodes. 
+            # This is possible because the data is sorted by the hierarchical columns, so each node corresponds to a contiguous block of rows in the DataFrame,
+            # and each child node corresponds to a contiguous block of rows within that block, where the value of the current hierarchical column is constant
+            start, end = node.df_range
+            segment = data_geo[start:end+1, child_level - 1] 
+            changes = np.where(segment[:-1] != segment[1:])[0]
+            indices = np.concatenate(([start], changes + start + 1, [end + 1]))
 
-            child_node.parent = parent_node
+            # Prepare the range of the children nodes for the parent node
+            start_child_range = curr_id
 
-            # Recursively build the subtree for the child node
-            n_nodes += self._build_subtree(child_node, level_iterator + 1, filtered_data, constraints)
+            # For each child 
+            for i in range(len(indices) - 1):
+                # Create a node
+                start_index, end_index = indices[i], indices[i + 1] - 1
+                geo_value = data_geo[start_index, child_level - 1] 
+                child = HierarchicalNode(node_id=curr_id, parent_id=node.id, geo_value=geo_value,
+                                         level=child_level, df_range=(start_index, end_index), children_range=None)
 
-        return n_nodes
-    
+                # Append the child node to the tree and to the queue for BFS
+                nodes.append(child)
+                q.append(child)
+                curr_id += 1
+        
+            # Complete the children range for the parent node
+            end_child_range = curr_id - 1
+            node.children_range = (start_child_range, end_child_range)
+
+        # Save the tree path file with the nodes information
+
+        # Define the fields to save for each node in the tree
+        fields = ['id', 'parent', 'geo', 'level', 'df_range', 'children_range']
+
+        # Convert the list of nodes to a list of dictionaries with the specified fields
+        data = []
+        for node in nodes:
+            node_dict = {
+                'id': node.id,
+                'parent': node.parent if node.parent is not None else '',
+                'geo' : node.geo,
+                'level': node.level,
+                'df_range': (int(node.df_range[0]), int(node.df_range[1])),
+                'children_range': (int(node.children_range[0]), int(node.children_range[1])) if node.children_range else ''
+            }
+            data.append(node_dict)
+
+        # Create the DataFrame
+        df = pd.DataFrame(data, columns=fields)
+
+        # Save the DataFrame to a CSV file
+        self.write_data(df, out_path=self.tree_path)
+        return None
+  
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.
         
@@ -231,7 +334,7 @@ class DataHandler:
             pd.DataFrame: The reconstructed microdata.
         '''
         microdata_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
-        for leaf in list(tree.iterate_by_levels())[-1][1]:
+        for leaf in tree.nodes[tree.node_ranges_by_level[-1][0]:]:
             # Create a Diccionary to store the microdata for the current node
             leaf_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
             
@@ -244,17 +347,18 @@ class DataHandler:
 
             # Add the hierarchical information for the current node
             # Determine how many microdata rows this leaf contributes (based on query columns)
+
             leaf_size = len(leaf_dict[self.query_columns[0]])
-            # Offset to track the level in the hierarchy from top to bottom
-            current_level = 0
+            curr_level = len(self.hierarchical_columns) - 1
+            curr_node = leaf
+
             # We do not include the root node in the hierarchical path as it is redundant in the final
             # data because the root is the highest level of the hierarchy and all data belongs to it
-            for hierarchical_value in leaf.hierarchical_path[1:]:
-                leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(hierarchical_value, leaf_size))
-                current_level += 1
-            
-            # Also don't forget to add the information of the leaf node itself
-            leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(leaf.id, leaf_size))
+            while not curr_node.is_root():            
+                geo_value = curr_node.id
+                leaf_dict[self.hierarchical_columns[curr_level]] = list(np.repeat(geo_value, leaf_size))
+                curr_node = tree.nodes[curr_node.parent]
+                curr_level -= 1
 
             # Merge the leaf_dict into microdata_dict by concatenating lists for duplicate keys
             for key, values in leaf_dict.items():

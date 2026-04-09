@@ -1,91 +1,93 @@
 import numpy as np
-
-from typing import Callable, List, Optional, Any
+from typing import Callable, List, Optional, Tuple
 
 class HierarchicalNode:
-    '''Represents a node in a hierarchical tree structure.
-    
-    Each node contains an array with the data and a list of its children.
+    ''' Represents a node in a hierarchical tree class, containing information about its ID, parent ID, level,
+    DataFrame range, children range, contingency vector path, and constraints. 
+    A node can be either a leaf node (if it has no children) or an internal node (if it has children).
 
-    This class focuses solely on node specific data and operations,
-    without any tree traversal or tree-wide operation logic.
+    Example:
+        Node 0 (Parent: None) in level 0 [Internal]
+          DataFrame range: (0, 1000)
+          Children range: (1, 10) - Total: 9 children
+          Contingency vector: Setted
+          Constraints: 1 constraints
+        
+        Node 1 (Parent: 0) in level 1 [Leaf]
+          DataFrame range: (0, 100)
+          Children range: Empty - Total: 0 children
+          Contingency vector: Not set
+          Constraints: 0 constraints
+
+    When the tree is first built or loaded, the node contains only the ID, parent ID, level, DataFrame range,
+    and children range. The contingency vector and constraints are set later depending on the specific
+    queries and constraints defined in the TopDown class.
+
     '''
-    def __init__(self, node_id: int, constraints: List[Callable]) -> None:
-        """
-        Initialize a hierarchical node.
-        
-        Args:
-            node_id (int): Unique identifier for this hierarchical node
-            constraints (List[Callable]): Optional list of constraints for this node
-        
-        Attributes:
-            id (int): Unique identifier for the node at its level
-            children (List[HierarchicalNode]): List of child nodes
-            parent (HierarchicalNode): Reference to the parent node
-            hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root
 
-            contingency_vector (np.ndarray): Contingency vector for this node.
-            constraints (List[Callable]): List of constraints for this node.
-                                          The constraints are functions that take a contingency vector as input
-                                          and return a boolean indicating whether the constraint is satisfied.
-            
-            comparative_vector (np.ndarray): Optional vector for this node. Used to compare distributions.
-        """
+    def __init__(self, node_id: int, parent_id: Optional[int], geo_value: int, level: int, df_range: Tuple[int, int], children_range: Optional[Tuple[int, int]]) -> None:
+        '''Initializes a hierarchical node with its ID, parent ID, level, dataframe range, and children range.
+
+        Args:
+            node_id: An integer representing the unique identifier of the node.
+            parent_id: An optional integer representing the identifier of the parent node. None if the node is the root.
+            geo_value: An integer that represents the geographic value of the node (i.e., the value at which it is divided within its level)
+            level: An integer representing the level of the node in the hierarchical tree considering hierarchical columns.
+            df_range: A tuple of two integers representing the start and end indices of the sorted dataframe rows corresponding to this node.
+            children_range: A tuple, or None if the node is a leaf, representing the start and end indices (corresponding with their IDs) of the child nodes.
+        
+        Atributes:
+            id: An integer representing the unique identifier of the node.
+            parent: An optional integer representing the identifier of the parent node. None if the node is the root.
+            level: An integer representing the level of the node in the hierarchical tree.
+            df_range: A tuple of two integers representing the start and end indices of the sorted dataframe rows corresponding to this node.
+            children_range: A tuple, or None if the node is a leaf, representing the start and end indices (corresponding with their IDs) of the child nodes.
+            contigency_vector: A list with frecuencies .
+            constraints: A list of callables representing the constraints associated with this node asociated its contingency vector. Initially empty.
+        '''
+        
         self.id: int = node_id
+        self.parent: Optional[int] = parent_id
+        self.geo: int = geo_value
 
-        self.children: List['HierarchicalNode'] = []
-        self.parent: Optional['HierarchicalNode'] = None
+        self.level: int = level
 
-        # The path is needed to save runtime when generating data from a specific node
-        self.hierarchical_path: List[Any] = []
-        
-        # Data containers
-        self.contingency_vector: np.ndarray = np.array([])
-        self.constraints: List[Callable] = constraints
-        
-        # This value is only used to compare distributions between different states of the data
-        # e.g., original data vs noisy data
-        # It is only relevant when a distance metric is defined by the user
-        self.comparative_vector: Optional[np.ndarray] = None
+        self.df_range: Tuple[int, int] = df_range
+        self.children_range: Optional[Tuple[int, int]] = children_range
 
-    def add_child(self, child_node: 'HierarchicalNode') -> None:
-        """
-        Add a child node to this node.
+        self.contingency_vector: np.array[int] = None
+        self.constraints: List[Callable] = []
+
+    def is_root(self) -> bool:
+        '''Determine if the node is the root node.
         
-        Args:
-            child_node (HierarchicalNode): The child node to add.
-        """
-        child_node.parent = self
-        child_node.hierarchical_path = self.hierarchical_path + [self.id]
-        self.children.append(child_node)
+        Returns:
+            bool: True if the node is root (i.e., has no parent node), False otherwise.
+        '''
+        return self.parent is None
 
     def is_leaf(self) -> bool:
-        """
-        Check if the node is a leaf (no children).
-        
+        ''' Determine if the node is a leaf node (i.e., has no children) based on the presence of the children_range attribute.
+
         Returns:
-            bool: True if the node is a leaf, False otherwise.
-        """
-        return len(self.children) == 0
-    
-    def get_level(self) -> int:
-        """
-        Get the level of this node in the tree.
-        
-        Returns:
-            int: The level of the node (0 for root, 1 for children of root, ...).
-        """
-        return len(self.hierarchical_path)
-    
-    def is_root(self) -> bool:
-        """
-        Check if the node is the root (no parent).
-        
-        Returns:
-            bool: True if the node is the root, False otherwise.
-        """
-        return self.parent is None
+            bool: True if the node is a leaf node, False otherwise.
+
+        '''
+        return self.children_range is None
     
     def __repr__(self) -> str:
-        '''String representation of the node.'''
-        return f"HierarchicalNode(id={self.id}, level={self.get_level()}, children={len(self.children)})"
+        '''Create a string representation of the hierarchical node,
+        showing its ID, parent ID, level, dataframe range, children range, contingency vector path, and constraints.
+
+        Returns:
+            str: A string representation of the hierarchical node.
+
+        '''
+
+        node = f"\nNode {self.id} (Parent: {self.parent}) in level {self.level} {'[Leaf]' if self.is_leaf() else '[Internal]'}\n"
+        node += f"  DataFrame range: {self.df_range} \n"
+        node += f"  Children range: {self.children_range if self.children_range else 'Empty'} - Total: {1 + self.children_range[1] - self.children_range[0]} children \n"
+        node += f"  Contingency vector: {'Setted' if len(self.contingency_vector) else 'Not set'} \n"
+        node += f"  Constraints: {len(self.constraints)} constraints \n"
+        
+        return node
