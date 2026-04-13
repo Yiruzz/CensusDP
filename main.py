@@ -43,7 +43,7 @@ def main():
     # DATA_PATH_PERSONAS = 'data/csv-personas-censo-2017/microdato_censo2017-personas/Microdato_Censo2017-Personas.csv'
     DATA_PATH_VIVIENDAS= 'data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/Microdato_Censo2017-Viviendas.csv'
 
-    OUTPUT_PATH = 'data/out/'
+    OUTPUT_PATH = 'data/asdout/'
     OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
 
     #######################
@@ -163,11 +163,9 @@ def main():
     # Additional settings #
     #######################
 
-    # Path of data that already has been processed until higher level of the tree.
-    # This is used to avoid to process the data again if it has already been processed by the algorithm.
-    # If None the algorithm will start from the root node.
-    DATA_PATH_PROCESSED = None
-    if DATA_PATH_PROCESSED: topdown.read_processed_data(DATA_PATH_PROCESSED, sep=';')
+    # TODO: Implement a logging system to keep track of the algorithm's execution and partial results.
+    #       Then implement the option to load the logs and partial results to continue the execution of the algorithm from a specific point.
+    #       This is useful for long executions and to avoid losing progress in case of crashes or interruptions.
 
     # Distance metric to use (manhattan, euclidean, cosine) if None no distance will be computed.
     # The distance metric is used to compare the original contingency vector with the noisy one.

@@ -142,14 +142,6 @@ The optimizer uses Pyomo as an interface over optimization solvers (defaulting t
 
 `TopDown.construct_microdata()` and `DataHandler.construct_microdata(tree)` reconstruct synthetic microdata from leaf contingency vectors by replicating combinations according to counts in the contingency vector and adding hierarchical columns.
 
-## Resume / checkpoints
-
-The TopDown algorithm can be extended to support checkpointing and resuming:
-- **State Serialization**: Save algorithm state (tree structure, constraints, processed levels) to disk
-- **Progress Tracking**: Monitor completion status by tree level
-- **Partial Result Recovery**: Resume from last successfully completed level
-- **Memory Management**: Large datasets can benefit from level-by-level processing with intermediate saves
-
 ## Validation and correctness
 
 - `TopDown.check_correctness()` verify that each parent's contingency totals equal the sum of its children (basic consistency check).
