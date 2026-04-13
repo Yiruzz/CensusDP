@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 from itertools import product
-from typing import List, Optional
+from typing import List, Dict, Optional
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
@@ -39,7 +39,6 @@ class DataHandler:
             query_columns (List[str]): List of columns to use for generating the contingency table.
             
         '''
-
         # Input and output paths
         self.data_path: str = input_path
         self.microdata_path: str = output_path
@@ -74,7 +73,6 @@ class DataHandler:
             columns_to_use (List[str]): List of columns to keep in the dataframe.
 
         '''
-  
         self.dataframe = self.dataframe[self.hierarchical_columns + self.query_columns]
         return None
     
@@ -82,7 +80,6 @@ class DataHandler:
         '''Sort the data by the hierarchical columns in ascending order.
         
         '''
-
         self.dataframe.sort_values(by=self.hierarchical_columns, inplace=True)
         self.dataframe.reset_index(drop=True, inplace=True)
         return None
@@ -157,6 +154,13 @@ class DataHandler:
         return contingency_vector
     
     def create_contingency_vectors(self, tree: HierarchicalTree) -> None:
+        '''Create contingency vectors for each node in the tree based on the corresponding segment of the data for that node.
+
+        Args: 
+            tree (HierarchicalTree): The hierarchical tree to which the contingency vectors will be added.
+                                     The contingency vector for each node will be generated based on the segment of the data corresponding to that node,
+                                     which is determined by the df_range attribute of the node.
+        '''
         for node in tree.nodes:
             # Get the segment of the data corresponding to the current node
             start, end = node.df_range
@@ -166,16 +170,42 @@ class DataHandler:
             node.contingency_vector = self.create_contingency_vector(df_node)
             
         return None
+    
+    def add_constraints(self, tree: HierarchicalTree, constraints: Dict[int, List[Constraint]]) -> None:
+        '''Add constraints to the nodes of the tree based on the specified levels.
+        
+        Args: 
+            tree (HierarchicalTree): The hierarchical tree to which the constraints will be added.
+            constraints (Dict[int, List[Constraint]]): A dictionary where the keys are the levels of the tree and the values are lists of constraints to apply to those levels.        
+
+        '''
+        # For each level in the constraints dictionary
+        for level in constraints.keys():
+
+            # Get the range of nodes corresponding to that level in the tree
+            range = tree.node_ranges_by_level[level]
+
+            # For each node in that range, add the corresponding constraints 
+            for node in tree.nodes[range[0]:range[1]+1]:
+                level_constraints = []
+                for constraint in constraints[level]:
+                    # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
+                    match constraint:
+                        case ContextualAggregateConstraint():
+                            start, end = node.df_range
+                            constraint.apply_aggregation_function(self.dataframe.iloc[start:end+1])
+                    level_constraints.append(constraint.to_constraint(self.contingency_df))
+                node.constraints.extend(level_constraints) 
+        return None
 
     def load_tree(self) -> HierarchicalTree:
-        '''
-        Load the hierarchical tree structure based on a file created by the function create_tree.
+        '''Load the hierarchical tree structure based on a file created by the function create_tree.
         For each row, create a node with the corresponding information and put it in the right place in the tree.
 
         Returns:
             HierarchicalTree: The loaded hierarchical tree structure.
-        '''
 
+        '''
         nodes = []
         node_ranges_by_level = []
 
@@ -229,8 +259,7 @@ class DataHandler:
         return HierarchicalTree(nodes, node_ranges_by_level)
 
     def create_tree(self) -> None:
-        '''
-        Create a tree based on the hierarchical columns.
+        '''Create a tree based on the hierarchical columns.
         Using the sorted DataFrame, it gets the indices for each node related to the DataFrame.
         This allows saving the tree structure to a file, which can later be loaded with "load_tree" and
         create different contingency vectors dividing the work efficiently, because the data for each node is independent.
@@ -332,6 +361,7 @@ class DataHandler:
 
         Returns:
             pd.DataFrame: The reconstructed microdata.
+
         '''
         microdata_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
         for leaf in tree.nodes[tree.node_ranges_by_level[-1][0]:]:

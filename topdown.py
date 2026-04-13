@@ -136,10 +136,10 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.')
 
         # Set constraints for each node in the tree
-        #t1 = time.time()
-        #print(f'Setting constraints for each node in the tree...', end=' ')
-        #self.data_handler.add_constraints(self.tree, self.constraints)
-        #print(f'{time.time() - t1:.2f} seconds.')
+        t1 = time.time()
+        print(f'Setting constraints for each node in the tree...', end=' ')
+        self.data_handler.add_constraints(self.tree, self.constraints)
+        print(f'{time.time() - t1:.2f} seconds.')
 
         return None
 
@@ -284,9 +284,6 @@ class TopDown():
         Args:
             constraint (Constraint): The Constraint to add.
         '''
-        if not self.hierarchical_columns: 
-            raise ValueError("Hierarchical columns must be set before adding constraints to the tree.")
-    
         for level in range(len(self.hierarchical_columns)):
             if level not in self.constraints:
                 self.constraints[level] = []
@@ -305,8 +302,7 @@ class TopDown():
             if level_iter not in self.constraints:
                 self.constraints[level_iter] = []
             self.constraints[level_iter].append(constraint)
-    
-    
+
     # TODO: Implement method to set constraint to specific node
     # def set_constraint_to_node(self, node_id: int, constraint: Constraint) -> None:
     #     '''Set a constraint to a specific node in the hierarchical tree.
@@ -321,7 +317,7 @@ class TopDown():
     #         node_id (int): The ID of the node to which the constraint should be added.
     #         constraint (Constraint): The Constraint to add.
     #     '''
-    #     node = self.tree.find_node_by_id(node_id)
+    #     node = self.tree.nodes[node_id]
     #     if node is not None:
     #         node.constraints.append(constraint)
 
