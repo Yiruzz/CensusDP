@@ -25,25 +25,27 @@ class HierarchicalNode:
 
     '''
 
-    def __init__(self, node_id: int, parent_id: Optional[int], geo_value: int, level: int, df_range: Tuple[int, int], children_range: Optional[Tuple[int, int]]) -> None:
+    def __init__(self, node_id: int, parent_id: Optional[int], geo_value: int, level: int,
+                 df_range: Tuple[int, int], children_range: Optional[Tuple[int, int]]) -> None:
         '''Initializes a hierarchical node with its ID, parent ID, level, dataframe range, and children range.
 
         Args:
-            node_id: An integer representing the unique identifier of the node.
-            parent_id: An optional integer representing the identifier of the parent node. None if the node is the root.
-            geo_value: An integer that represents the geographic value of the node (i.e., the value at which it is divided within its level)
-            level: An integer representing the level of the node in the hierarchical tree considering hierarchical columns.
-            df_range: A tuple of two integers representing the start and end indices of the sorted dataframe rows corresponding to this node.
-            children_range: A tuple, or None if the node is a leaf, representing the start and end indices (corresponding with their IDs) of the child nodes.
-        
-        Atributes:
-            id: An integer representing the unique identifier of the node.
-            parent: An optional integer representing the identifier of the parent node. None if the node is the root.
-            level: An integer representing the level of the node in the hierarchical tree.
-            df_range: A tuple of two integers representing the start and end indices of the sorted dataframe rows corresponding to this node.
-            children_range: A tuple, or None if the node is a leaf, representing the start and end indices (corresponding with their IDs) of the child nodes.
-            contigency_vector: A list with frecuencies .
-            constraints: A list of callables representing the constraints associated with this node asociated its contingency vector. Initially empty.
+            node_id (int): An integer representing the unique identifier of the node.
+            parent_id (Optional[int]): An optional integer representing the identifier of the parent node. None if the node is the root.
+            geo_value (int): An integer that represents the geographic value of the node (i.e., the value at which it is divided within its level)
+            level (int): An integer representing the level of the node in the hierarchical tree considering hierarchical columns.
+            df_range (Tuple[int, int]): A tuple of two integers representing the start and end indices of the sorted dataframe rows corresponding to this node.
+            children_range (Optional[Tuple[int, int]]): A tuple, or None if the node is a leaf, representing the start and end indices (corresponding with their IDs) of the child nodes.
+
+        Attributes:
+            id (int): An integer representing the unique identifier of the node.
+            parent (Optional[int]): An optional integer representing the identifier of the parent node. None if the node is the root.
+            geo (int): An integer that represents the geographic value of the node (i.e., the value at which it is divided within its level)
+            level (int): An integer representing the level of the node in the hierarchical tree.
+            df_range (Tuple[int, int]): A tuple of two integers representing the start and end indices of the sorted dataframe rows corresponding to this node.
+            children_range (Optional[Tuple[int, int]]): A tuple, or None if the node is a leaf, representing the start and end indices (corresponding with their IDs) of the child nodes.
+            contingency_vector (np.array[int]): A numpy array containing the contingency frequencies for the node.
+            constraints (List[Callable]): A list of callables representing the constraints associated with this node associated with its contingency vector. Initially empty.
         '''
         
         self.id: int = node_id
@@ -83,11 +85,14 @@ class HierarchicalNode:
             str: A string representation of the hierarchical node.
 
         '''
-
         node = f"\nNode {self.id} (Parent: {self.parent}) in level {self.level} {'[Leaf]' if self.is_leaf() else '[Internal]'}\n"
         node += f"  DataFrame range: {self.df_range} \n"
-        node += f"  Children range: {self.children_range if self.children_range else 'Empty'} - Total: {1 + self.children_range[1] - self.children_range[0]} children \n"
-        node += f"  Contingency vector: {'Setted' if len(self.contingency_vector) else 'Not set'} \n"
+        node += f"  Children range: {self.children_range if self.children_range else 'Empty'}"
+
+        if self.children_range is not None:
+            node += f" - Total: {1 + self.children_range[1] - self.children_range[0]} children"
+
+        node += f"\n  Contingency vector: {'Setted' if len(self.contingency_vector) else 'Not set'} \n"
         node += f"  Constraints: {len(self.constraints)} constraints \n"
         
         return node

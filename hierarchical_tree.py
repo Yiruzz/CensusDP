@@ -18,14 +18,14 @@ class HierarchicalTree:
         '''Initializes the hierarchical tree structure with a list of nodes and their corresponding index ranges for each level.
         
         Args:
-            nodes: A list of HierarchicalNode objects representing the nodes in the tree.
-            node_ranges_by_level: A list of tuples, where each tuple contains the start and end index of nodes for a specific level in the tree.
+            nodes (List["HierarchicalNode"]): A list of HierarchicalNode objects representing the nodes in the tree.
+            node_ranges_by_level (List[Tuple[int, int]]): A list of tuples, where each tuple contains the start and end index of nodes for a specific level in the tree.
         
         Atributes:
-            nodes: A list of HierarchicalNode objects representing the nodes in the tree.
-            node_ranges_by_level: A list of tuples, where each tuple contains the start and end index of nodes for a specific level in the tree.
-            _node_count: The total number of nodes in the tree.
-            _level_count: The total number of levels in the tree.
+            nodes (List["HierarchicalNode"]): A list of HierarchicalNode objects representing the nodes in the tree.
+            node_ranges_by_level (List[Tuple[int, int]]): A list of tuples, where each tuple contains the start and end index of nodes for a specific level in the tree.
+            _node_count (int): The total number of nodes in the tree.
+            _level_count (int): The total number of levels in the tree.
         '''
         
         self.nodes: List["HierarchicalNode"] = nodes
