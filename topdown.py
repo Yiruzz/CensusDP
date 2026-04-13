@@ -19,7 +19,7 @@ class TopDown():
     finally it solves optimization problems to ensure consistency across the tree and adherence to 
     specified constraints by the user.
     '''
-    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}) -> None:
+    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -30,6 +30,7 @@ class TopDown():
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
             optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
+            optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -61,7 +62,7 @@ class TopDown():
         self.constraints: Dict[int, List[Constraint]] = {}
 
         self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
-        self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options)
+        self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options, optimizer_path)
         
         #self.constraints: List[List[Callable]] = []
         # self.processed_data: pd.DataFrame = None
