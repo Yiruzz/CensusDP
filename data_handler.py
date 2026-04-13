@@ -3,6 +3,7 @@ import numpy as np
 
 from itertools import product
 from typing import List, Optional
+from pathlib import Path
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
@@ -31,7 +32,13 @@ class DataHandler:
         '''
         # Input and output paths
         self.file_path: str = file_path
-        self.output_path: str = output_path
+
+        path_obj = Path(output_path)
+        if path_obj.parent.exists() and path_obj.parent.is_dir():
+            self.output_path = output_path
+        else:
+            print(f"Warning: Output path {output_path} is not valid. 'noisy_data.csv' will be saved in the current directory instead.")
+            self.output_path = 'noisy_data.csv'
 
         # Dataframe to hold the data (loaded from file_path).
         self.dataframe: Optional[pd.DataFrame] = None
