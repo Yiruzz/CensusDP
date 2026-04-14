@@ -37,12 +37,12 @@ class HierarchicalTree:
         self.root = HierarchicalNode(root_id, constraints)
         self._node_count = 1
     
-    def iterate_by_levels(self) -> Generator[Tuple[int, List[HierarchicalNode]], None, None]:
+    def iterate_by_levels(self) -> List[Tuple[int, List[HierarchicalNode]]]:
         """
         Iterate over the tree level by level using BFS.
         
-        Yields:
-            Tuples of (level, list of nodes at that level)
+        Returns:
+            List of tuples of (level, list of nodes at that level)
         """
         if not self.root:
             raise ValueError("The tree has no root node.")
@@ -50,13 +50,14 @@ class HierarchicalTree:
         queue = deque([(self.root, 0)])
         current_level = 0
         level_nodes: List[HierarchicalNode] = []
+        levels: List[Tuple[int, List[HierarchicalNode]]] = []
 
         while queue:
             node, level = queue.popleft()
 
-            # When we reach a new level, yield the previous level's nodes
+            # When we reach a new level, store the previous level's nodes
             if level != current_level:
-                yield current_level, level_nodes
+                levels.append((current_level, level_nodes))
                 current_level = level
                 level_nodes = []
 
@@ -66,7 +67,9 @@ class HierarchicalTree:
                 queue.append((child, level + 1))
 
         if level_nodes:
-            yield current_level, level_nodes
+            levels.append((current_level, level_nodes))
+
+        return levels
 
     def apply(self, operation: Callable[[HierarchicalNode], None]) -> None:
         """
