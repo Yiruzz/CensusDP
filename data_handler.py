@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 from itertools import product
-from typing import List, Dict, Optional
+from typing import List, Dict, Tuple, Optional
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
@@ -32,7 +32,10 @@ class DataHandler:
 
             tree_folder (str): Path to the file containing the hierarchical tree structure and the contingency vectors or save them.
             tree_file (str): Path to the file containing the hierarchical tree.
-            contingency_vectors_file (str): Path to the file with the contingency vectors.
+            raw_contingency_vectors_file (Tuple[Optional[str], bool]): Tuple that represents the file containing the raw contingency vectors and a boolean value indicating whether it is necessary to save it or not.
+                                                                       We assume that if we have the filename, it means the file exists and can be loaded.       
+            noisy_contingency_vectors_file (Tuple[Optional[str], bool]): Tuple that represents the file containing the noisy contingency vectors and a boolean value indicating whether it is necessary to save it or not.
+                                                                         We assume that if we have the filename, it means the file exists and can be loaded.
             
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
@@ -46,8 +49,9 @@ class DataHandler:
 
         # Paths related to the tree structure and the contingency vectors.
         self.tree_folder: str = output_tree
-        self.tree_file: str = None
-        self.contingency_vectors_file = None
+        self.tree_file: Optional[str] = None
+        self.raw_contingency_vectors_file: Tuple[Optional[str], bool] = (None, False)        
+        self.noisy_contingency_vectors_file: Tuple[Optional[str], bool] = (None, False)
 
         # DataFrame to hold the data (loaded from file_path).
         self.dataframe: Optional[pd.DataFrame] = None
@@ -111,7 +115,7 @@ class DataHandler:
         self.contingency_df.sort_values(by=self.query_columns, inplace=True)
         self.contingency_df.reset_index(drop=True, inplace=True)
 
-        print("Contingency DataFrame generated with shape:", self.contingency_df.shape)
+        print(" Contingency DataFrame generated with shape:", self.contingency_df.shape)
 
         return self.contingency_df
     
@@ -182,13 +186,14 @@ class DataHandler:
                 node.constraints.extend(level_constraints) 
         return None
     
-    def load_contingency_vectors(self, tree: HierarchicalTree) -> None:
+    def load_contingency_vectors(self, tree: HierarchicalTree, filename: str) -> None:
         '''Load the contingency vectors from the file, mapping each row index to the corresponding node index.
 
         Args:
             tree (HierarchicalTree): The hierarchical tree to which the contingency vectors will be added.
+            filename (str): Name of the CSV file (located in `self.tree_folder`) containing the contingency vectors.
         '''
-        df = pd.read_csv(self.tree_folder+self.contingency_vectors_file)
+        df = pd.read_csv(f"{self.tree_folder}/{filename}", sep=";")
         vectores = df.values.astype(int)
 
         index = 0
@@ -345,6 +350,21 @@ class DataHandler:
         df = pd.DataFrame(data, columns=fields)
 
         return df
+    
+    def get_contingency_vectors(self, tree: HierarchicalTree) -> pd.DataFrame:
+        '''Extracts the contingency vectors from all nodes in a hierarchical tree.
+        
+        Args:
+            tree (HierarchicalTree): A hierarchical tree structure containing nodes with contingency vectors.
+
+        Returns:
+            pd.DataFrame: A DataFrame with one column named "contingency_vector", where each row corresponds to the contingency vector of a node in the tree.
+        '''
+        vectors_list = []
+        for node in tree.nodes:
+            vectors_list.append(node.contingency_vector)
+        df = pd.DataFrame(vectors_list, columns=[f"v{i}" for i in range(len(vectors_list[0]))])
+        return df
   
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.
@@ -357,7 +377,6 @@ class DataHandler:
 
         Returns:
             pd.DataFrame: The reconstructed microdata.
-
         '''
         microdata_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
         for leaf in tree.nodes[tree.node_ranges_by_level[-1][0]:]:

@@ -166,15 +166,29 @@ def main():
 
     TREE_FILE = 'tree.csv'
     LOAD_PREVIOUS_TREE = True
+
+    CONTIGENCY_VECTORS_FILE = 'contingency_vectors_' + PROCESS_UNTIL + '_'.join(QUERIES) + '.csv'
+    
     if LOAD_PREVIOUS_TREE:
         topdown.load_tree(TREE_FILE)
     
-        CONTIGENCY_VECTORS_FILE = 'contingency_vectors_' + PROCESS_UNTIL + '_'.join(QUERIES) + '.csv'
-        LOAD_PREVIOUS_CONTINGENCY_VECTORS = False
-        LOAD_PREVIOUS_NOISE_CONTINGENCY_VECTORS = False
+        LOAD_PREVIOUS_CONTINGENCY_VECTORS = True
+        NOISE_CONTINGENCY_VECTORS = False
 
         if LOAD_PREVIOUS_CONTINGENCY_VECTORS:
-            topdown.load_contigency_vectors(CONTIGENCY_VECTORS_FILE, noisy=LOAD_PREVIOUS_NOISE_CONTINGENCY_VECTORS)    
+            topdown.load_contigency_vectors(CONTIGENCY_VECTORS_FILE, noisy=NOISE_CONTINGENCY_VECTORS)    
+
+    # These two methods save the contingency vectors before and after applying noise.
+    # They are useful as checkpoints to prevent losing work in case of a crash,
+    # avoiding the need to recompute the vectors or reapply the noise.
+    # The files are saved in TREE_PATH with the filenames CONTINGENCY_VECTORS_FILE
+    # and CONTINGENCY_VECTORS_FILE_noisy, respectively.
+
+   # NOTE: If you decide to save the contingency vectors (raw or noisy), you must not have previously indicated that
+    # contingency vectors (raw or noisy, as applicable) would be loaded, since it does not make sense to save something
+    # that you already had available.
+    #topdown.save_raw_contingency_vectors(CONTIGENCY_VECTORS_FILE)
+    topdown.save_noisy_contingency_vectors(CONTIGENCY_VECTORS_FILE)
 
     # Distance metric to use (manhattan, euclidean, cosine) if None no distance will be computed.
     # The distance metric is used to compare the original contingency vector with the noisy one.

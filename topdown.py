@@ -72,11 +72,11 @@ class TopDown():
         the contingency vectors for each node in the tree and setting their constraints.
         '''
 
-        print(f'Initializing TopDown algorithm...')
+        print(f'\nInitializing TopDown algorithm...')
 
         # Read the data 
         t1 = time.time()
-        print(f'Reading data...', end=' ')
+        print(f' Reading data...', end=' ')
         self.data_handler.read_data(sep=';')
         print(f'{time.time() - t1:.2f} seconds.')
 
@@ -84,13 +84,13 @@ class TopDown():
         if self.data_handler.tree_file is None:
             # Sort read data
             t1 = time.time()
-            print(f'Sorting data by hierarchical columns...', end=' ')
+            print(f' Sorting data by hierarchical columns...', end=' ')
             self.data_handler.sort_data_by_hierarchy()
             print(f'{time.time() - t1:.2f} seconds.')
 
             # Write sorted data to use in a next execution (but update the current dataframe)
             t1 = time.time()
-            print(f'Writing data by hierarchical columns...', end=' ')
+            print(f' Writing data by hierarchical columns...', end=' ')
             folder = "/".join(self.data_handler.data_path.split('/')[:-1])
             filename = self.data_handler.data_path.split('/')[-1]
             out_path = f"{folder}/{filename.split('.')[0]}_sorted.csv"
@@ -100,13 +100,13 @@ class TopDown():
             #NOTE: Create the tree is very fast, so not is necessary save it, but it is useful for the user to see and debugg then.
             # Create tree
             t1 = time.time()
-            print(f'Creating hierarchical tree structure...', end=' ')
+            print(f' Creating hierarchical tree structure...', end=' ')
             df = self.data_handler.create_tree()
             print(f'{time.time() - t1:.2f} seconds.')
 
             # Save tree
             t1 = time.time()
-            print(f'Saving hierarchical tree structure...', end=' ')
+            print(f' Saving hierarchical tree structure...', end=' ')
             tree_file = "tree.csv"
             self.data_handler.write_data(df, f"{self.data_handler.tree_folder}/{tree_file}")
             self.data_handler.tree_file = tree_file
@@ -118,7 +118,7 @@ class TopDown():
         
         # Load tree
         t1 = time.time()
-        print(f'Loading hierarchical tree structure...', end=' ')
+        print(f' Loading hierarchical tree structure...', end=' ')
         self.tree = self.data_handler.load_tree()
         print(f'{time.time() - t1:.2f} seconds.')
         
@@ -128,23 +128,32 @@ class TopDown():
         # Check if there are oldest contigency vectors
         # NOTE: The user have the responsability to check if the file passed has the contigency vectors for all nodes and
         # them correspondent to the queries.
-        if self.data_handler.contingency_vectors_file is None:
-            # Generate contigency vectors for each node in the tree
+        raw_file, raw_flag = self.data_handler.raw_contingency_vectors_file
+        noisy_file, noisy_flag = self.data_handler.noisy_contingency_vectors_file
+
+        file_to_load = None
+        if raw_file is not None and not raw_flag:
+            file_to_load = raw_file
+        elif noisy_file is not None and not noisy_flag:
+            file_to_load = noisy_file
+
+        if file_to_load is not None:
             t1 = time.time()
-            print(f'Creating contingency vectors for each node in the tree...', end=' ')
-            self.data_handler.create_contingency_vectors(self.tree)
-            print(f'{time.time() - t1:.2f} seconds.')
+            print(" Loading contingency vectors for each node in the tree...", end=" ")
+            self.data_handler.load_contingency_vectors(self.tree, file_to_load)
+            print(f"{time.time() - t1:.2f} seconds.")
         
         else:
-            # Load contigency vectors
+            # Generate contigency vectors for each node in the tree
             t1 = time.time()
-            print(f'Loading contingency vectors for each node in the tree...', end=' ')
-            self.data_handler.load_contingency_vectors(self.tree)
-            print(f'{time.time() - t1:.2f} seconds.') 
+            print(f' Creating contingency vectors for each node in the tree...', end=' ')
+            self.data_handler.create_contingency_vectors(self.tree)
+            print(f'{time.time() - t1:.2f} seconds.')
+
 
         # Set constraints for each node in the tree
         t1 = time.time()
-        print(f'Setting constraints for each node in the tree...', end=' ')
+        print(f' Setting constraints for each node in the tree...', end=' ')
         self.data_handler.add_constraints(self.tree, self.constraints)
         print(f'{time.time() - t1:.2f} seconds.')
 
@@ -157,7 +166,7 @@ class TopDown():
         privacy parameters and mechanism.
         '''
         t1 = time.time()
-        print(f'Running measurement phase...', end=' ')
+        print(f'\nRunning measurement phase...', end=' ')
         for node in self.tree.nodes:
             self.add_noise(node.contingency_vector, self.privacy_parameters[node.level])
         print(f'{time.time() - t1:.2f} seconds.')
@@ -170,7 +179,7 @@ class TopDown():
         consistency and adherence to constraints after noise has been added.
         '''
         t1 = time.time()
-        print(f'Running estimation phase...', end=' ')
+        print(f'\nRunning estimation phase...', end=' ')
 
         # Root estimation (level 0)
         # Does not require consistency adjustments
@@ -272,7 +281,7 @@ class TopDown():
         Returns:
             pd.DataFrame: The constructed differentially private microdata.
         '''
-        print(f'Constructing microdata from hierarchical tree...', end=' ')
+        print(f'\nConstructing microdata from hierarchical tree...', end=' ')
         t1 = time.time()
         noisy_df = self.data_handler.construct_microdata(self.tree)
         print(f'{time.time() - t1:.2f} seconds.')
@@ -373,27 +382,65 @@ class TopDown():
             case _:
                  raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
     
-    def load_tree(self, file_path: str) -> None:
+    def load_tree(self, filename: str) -> None:
         '''Save the file to the tree to load in the initialization phase.
         Thus if the file doesn't save in data handler attribute, the tree must be created.
         
         Args:
-            file_path (str): Path to the tree file.
+            filename (str): Path to the tree file.
         '''
-        self.data_handler.tree_file = file_path 
+        self.data_handler.tree_file = filename
         return None
 
-    def load_contigency_vectors(self, file_path: str, noisy: bool = False) -> None:
+    def load_contigency_vectors(self, filename: str, noisy: bool = False) -> None:
         '''Save the file to the contingency vectors to load in the initialization phase.
         Thus if the file doesn't save in data handler attribute, the contingency vectors must be created (but not necessarily save).
 
         Args:
-            file_path (str) = Path to the contingency vectors file.
+            filename (str) = Path to the contingency vectors file.
             noisy (bool) = Specify if the vectors in the file have noisy or not. 
         '''
-        self.data_handler.contingency_vectors_path = file_path
-        self.tree.noisy_contingency_vectors = noisy
+        if noisy: 
+            self.data_handler.noisy_contingency_vectors_file = (filename, False)
+        else:
+            self.data_handler.raw_contingency_vectors_file = (filename, False)
         return None
+    
+    def save_contingency_vectors(self, filename: str) -> pd.DataFrame:
+        '''Retrieve the contingency vectors from the tree structure,
+        writes them to a file in the configured tree folder, and returns them
+        as a DataFrame.
+
+        Args:
+            filename (str): Name of the output file where the contingency vectors will be stored.
+
+        Returns:
+            pd.DataFrame: DataFrame containing the computed contingency vectors.
+        '''
+        print(f'\nSaving progress...')
+        print(f' Getting contingency vectors from hierarchical tree...', end=' ')
+        t1 = time.time()
+        vectors_df = self.data_handler.get_contingency_vectors(self.tree)
+        print(f'{time.time() - t1:.2f} seconds.')
+
+        print(f' Writing contingency vectors data to {self.data_handler.tree_folder}/{filename}...', end=' ')
+        t1 = time.time()
+        self.data_handler.write_data(vectors_df, f"{self.data_handler.tree_folder}/{filename}")
+        print(f'{time.time() - t1:.2f} seconds.')
+        return vectors_df
+    
+    def save_raw_contingency_vectors(self, filename: str) -> None: 
+        '''Store the filename and set a flag indicating that the raw contingency vectors need to be saved.
+        '''
+        self.data_handler.raw_contingency_vectors_file = (filename, True)
+        return None
+
+    def save_noisy_contingency_vectors(self, filename: str) -> None:
+        '''Store the filename for the noisy contingency vectors and set a flag indicating that they need to be saved.
+        '''
+        noisy_file = f"{filename.split('.')[0]}_noisy.csv"
+        self.data_handler.noisy_contingency_vectors_file = (noisy_file, True)
+        return None 
     
     def run(self) -> pd.DataFrame:
         '''Run the TopDown algorithm end-to-end.
@@ -404,9 +451,17 @@ class TopDown():
         Returns:
             pd.DataFrame: The constructed differentially private microdata.
         '''
+        raw_file, raw_flag = self.data_handler.raw_contingency_vectors_file
+        noisy_file, noisy_flag = self.data_handler.noisy_contingency_vectors_file
+
         self.initialize()
-        if not self.tree.noisy_contingency_vectors: self.measurement_phase()
+        if raw_flag: self.save_contingency_vectors(raw_file)
+
+        if noisy_file is None or noisy_flag: self.measurement_phase()
+        if noisy_flag: self.save_contingency_vectors(noisy_file)
+
         self.estimation_phase()
+
         noisy_data = self.construct_microdata()
         return noisy_data
     
