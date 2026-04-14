@@ -28,7 +28,7 @@ def main():
 
     # Define the columns to use that will be queried in each node of the tree.
     # QUERIES = ['P08', 'P09'] # Sex and Age
-    QUERIES = ['P01'] # Viviendas queries
+    QUERIES = ['P01', 'P02'] # Viviendas queries
 
     ##############################
     # Input and output data path # 
@@ -165,7 +165,7 @@ def main():
     #######################
 
     TREE_FILE = 'tree.csv'
-    LOAD_PREVIOUS_TREE = False
+    LOAD_PREVIOUS_TREE = True
     if LOAD_PREVIOUS_TREE:
         topdown.load_tree(TREE_FILE)
     
@@ -187,7 +187,7 @@ def main():
     
     # This method can be used to check the correctness of the results.
     # Also used for testing purposes.
-    #topdown.check_correctness()
+    topdown.check_correctness()
 
 if __name__ == "__main__":
     main()

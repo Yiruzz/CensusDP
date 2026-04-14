@@ -405,40 +405,30 @@ class TopDown():
             pd.DataFrame: The constructed differentially private microdata.
         '''
         self.initialize()
-        #if not self.tree.noisy_contingency_vectors: self.measurement_phase()
-        #self.estimation_phase()
-        #noisy_data = self.construct_microdata()
-        #return noisy_data
+        if not self.tree.noisy_contingency_vectors: self.measurement_phase()
+        self.estimation_phase()
+        noisy_data = self.construct_microdata()
+        return noisy_data
     
     def check_correctness(self) -> None:
         '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
-
         '''
-        if self.tree.root is not None:
-            print(f'Checking correctness of the tree...')
-            time1 = time.time()
-            self._check_correctness_node(self.tree.root)
-            time2 = time.time()
-            print(f'Finished checking correctness in {time2-time1} seconds.\n')
+        print(f'Checking correctness of the tree...')
+        time1 = time.time()
+        for node in self.tree.nodes:
+            if not node.children_range is None:
+                node_sum = np.sum(node.contingency_vector)
+                children_sum = 0 
 
+                start, end = node.children_range
+                for index in range(start, end+1):
+                    children_sum += np.sum(self.tree.nodes[index].contingency_vector)
 
-    def _check_correctness_node(self, node) -> None:
-        '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.
+                if node_sum != children_sum:            
+                    print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
+                    print(f'Parent node contingency vector: {node.contingency_vector}')
+                    raise ValueError('Tree correctness check failed.')
 
-        Args:
-            node (HierarchicalNode): The node to check.
-        '''
-        if node.children:
-            # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = np.sum(node.contingency_vector)
-            children_sum = 0
-            for child in node.children:
-                children_sum += np.sum(child.contingency_vector)
-
-            if node_sum != children_sum:            
-                print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {node.contingency_vector}')
-                raise ValueError('Tree correctness check failed.')
-            else:
-                for child in node.children:
-                    self._check_correctness_node(child)
+        time2 = time.time()
+        print(f'Finished checking correctness in {time2-time1} seconds.\n')
+        return None
