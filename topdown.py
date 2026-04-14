@@ -10,6 +10,10 @@ from discretegauss import sample_dlaplace, sample_dgauss
 from typing import Callable, Dict, List
 import time
 
+from epsipy import private
+from epsipy.iterate import piter
+from epsipy.core.budget import PureBudget, ZCDPBudget, Budget
+from epsipy.core.private_computation import ConsumeBudget
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -91,7 +95,8 @@ class TopDown():
 
         return None
 
-    def measurement_phase(self) -> None:
+    @private()
+    def measurement_phase(self):
         '''Perform the measurement phase of the TopDown algorithm.
         
         This method adds noise to the data at each node in the hierarchical tree according to the specified
@@ -99,16 +104,26 @@ class TopDown():
         '''
         t1 = time.time()
         print(f'Running measurement phase...\n')
-        for level, nodes in self.tree.iterate_by_levels():
+      
+        for level, nodes in piter(self.tree.iterate_by_levels(), schedule=lambda i, _: (2**i)):
             t2 = time.time()
             print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
-            privacy_budget = self.privacy_parameters[level]
-            for node in nodes:
-                self.add_noise(node.contingency_vector, privacy_budget)
+            yield self.paralel_composition(nodes)
             print(f'{time.time() - t2:.2f} seconds.')
         print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
         
         return None
+
+    @private()
+    def paralel_composition(self, nodes):
+        '''Apply noise to the contingency vectors of the given nodes in parallel, using the appropriate privacy budget for the level of the hierarchichal tree.
+
+        Args:
+            nodes (List[HierarchicalNode]): List of nodes to which noise should be added.
+        '''
+
+        budget = yield ConsumeBudget()      
+        [self.add_noise(node.contingency_vector, budget) for node in nodes]
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -195,12 +210,12 @@ class TopDown():
         
         return None
     
-    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: float,) -> np.ndarray:
+    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: Budget) -> np.ndarray:
         '''Add noise to the contingency vector using the specified mechanism.
         
         Args:
             contingency_vector (np.ndarray): The original contingency vector.
-            privacy_budget (float): The privacy budget (epsilon) for noise addition.
+            privacy_budget (Budget): The privacy budget for noise addition.
         
         Returns:
             np.ndarray: The noisy contingency vector.
@@ -289,27 +304,27 @@ class TopDown():
         self.privacy_parameters = privacy_parameters
 
     
-    def discrete_gaussian(self, rho: float) -> int:
-        '''Applies discrete Gaussian noise to the contingency vector.
+    def discrete_gaussian(self, budget: ZCDPBudget) -> int:
+        '''Applies discrete Gaussian noise to the contingency vector considering zCDP.
         
         Args:
-            rho (float): The privacy parameter.
+            budget (ZCDPBudget): The privacy parameter rho from epsipy.
         
         Returns:
             int: The noise value to be added.
         '''
-        return sample_dgauss(rho)
+        return sample_dgauss(budget.rho)
     
-    def discrete_laplace(self, epsilon: float) -> int:
-        '''Applies Laplace noise to the contingency vector.
+    def discrete_laplace(self, budget: PureBudget, sens: float = 1.0) -> int:
+        '''Applies Laplace noise to the contingency vector considering pure differential privacy.
         
         Args:
-            epsilon (float): The privacy parameter.
-        
+            budget (PureBudget): The privacy parameter epsilon from epsipy.
+            sens (float): The sensitivity of the query.
         Returns:
             int: The noise value to be added.
         '''
-        return sample_dlaplace(1/epsilon)
+        return sample_dlaplace(sens/budget.epsilon)
     
     def set_mechanism(self, mechanism: str) -> None:
         '''Set the noise mechanism to use for adding noise to the data.
@@ -325,7 +340,8 @@ class TopDown():
             case _:
                  raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
 
-    def run(self) -> pd.DataFrame:
+    @private()
+    def run(self):
         '''Run the TopDown algorithm end-to-end.
         
         This method executes the full TopDown algorithm, including initialization,
@@ -335,7 +351,7 @@ class TopDown():
             pd.DataFrame: The constructed differentially private microdata.
         '''
         self.initialize()
-        self.measurement_phase()
+        yield self.measurement_phase()
         self.estimation_phase()
         noisy_data = self.construct_microdata()
         return noisy_data

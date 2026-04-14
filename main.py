@@ -5,6 +5,9 @@ from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import Equal, NotEqual, TrueExpression
 from constraints.logical_expressions.compound import And, Implies  
 
+# Privacy budget managment
+from epsipy import run
+
 def main():
     '''Main function to set variables and run the TopDown algorithm.'''
 
@@ -79,23 +82,12 @@ def main():
     # Differential privacy budget and mechanism settings #
     ######################################################
 
-    # The privact budget needs to be defined for each level of the tree, using a list.
-    # In this case, we will use a tree with 6 levels, so we split the total budget in 6 parts.
-    # Privacy parameter to use for the whole algorithm.
-    total_privacy_budget = 10
-    n_levels = 6
-
-    # We will consider and exponential allocation of the privacy budget across the levels of the tree.
-    aux = 0
-    for i in range(n_levels):
-        aux += (2**i)
-    # Privacy parameters for the noise generation. First value for root, last for leaves.
-    PRIVACY_PARAMETERS = [(total_privacy_budget/aux)*(2**i) for i in range(n_levels)]
-    topdown.set_privacy_parameters(PRIVACY_PARAMETERS)
-
     # Noise mechanism to use (discrete_laplace or discrete_gaussian).
     MECHANISM = 'discrete_laplace'
     topdown.set_mechanism(MECHANISM)
+
+    # The privacy parameter should be set when running the algorithm
+    PRIVACY_BUDGET = 15
 
     ####################
     # Edit Constraints #
@@ -175,8 +167,8 @@ def main():
 
 
 
-    # Finally, we can run the TopDown algorithm
-    topdown.run()
+    # Finally, we can run the TopDown algorithm with the specified budget
+    run(topdown.run(), PRIVACY_BUDGET)
     
     # This method can be used to check the correctness of the results.
     # Also used for testing purposes.
