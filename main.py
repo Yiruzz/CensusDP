@@ -28,7 +28,7 @@ def main():
 
     # Define the columns to use that will be queried in each node of the tree.
     # QUERIES = ['P08', 'P09'] # Sex and Age
-    QUERIES = ['P01', 'P02', 'P03A', 'P03B'] # Viviendas queries
+    QUERIES = ['P01'] # Viviendas queries
 
     ##############################
     # Input and output data path # 
@@ -44,13 +44,8 @@ def main():
 
     OUTPUT_PATH = 'data/out/'
     OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
-
-    TREE_PATH = 'data/tree/'
-    TREE_FILE = 'tree.csv'
-    PREE_TREE = False
     
-    CONTIGENCY_VECTORS_SUBFOLDER = 'contingency_vectors/' + PROCESS_UNTIL + '_' + '_'.join(QUERIES)
-    PREE_CONTINGENCY_VECTORS = False
+    TREE_PATH = 'data/tree/'
 
     #######################
     # Solver configuration #
@@ -75,11 +70,8 @@ def main():
         hierarchy=GEO_COLUMNS,
         last_hierarchical_column=PROCESS_UNTIL,
         queries=QUERIES,
+        tree_path=TREE_PATH,
         microdata_path=OUTPUT_PATH + OUTPUT_FILE,
-        tree_path=TREE_PATH + TREE_FILE,
-        pree_tree=PREE_TREE,
-        contingency_vectors_folder_path=TREE_PATH + CONTIGENCY_VECTORS_SUBFOLDER,
-        pree_contigency_vectors=PREE_CONTINGENCY_VECTORS,
         optimizer=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS
     )
@@ -172,11 +164,17 @@ def main():
     # Additional settings #
     #######################
 
-    # Path of data that already has been processed until higher level of the tree.
-    # This is used to avoid to process the data again if it has already been processed by the algorithm.
-    # If None the algorithm will start from the root node.
-    DATA_PATH_PROCESSED = None
-    if DATA_PATH_PROCESSED: topdown.read_processed_data(DATA_PATH_PROCESSED, sep=';')
+    TREE_FILE = 'tree.csv'
+    LOAD_PREVIOUS_TREE = False
+    if LOAD_PREVIOUS_TREE:
+        topdown.load_tree(TREE_FILE)
+    
+        CONTIGENCY_VECTORS_FILE = 'contingency_vectors_' + PROCESS_UNTIL + '_'.join(QUERIES) + '.csv'
+        LOAD_PREVIOUS_CONTINGENCY_VECTORS = False
+        LOAD_PREVIOUS_NOISE_CONTINGENCY_VECTORS = False
+
+        if LOAD_PREVIOUS_CONTINGENCY_VECTORS:
+            topdown.load_contigency_vectors(CONTIGENCY_VECTORS_FILE, noisy=LOAD_PREVIOUS_NOISE_CONTINGENCY_VECTORS)    
 
     # Distance metric to use (manhattan, euclidean, cosine) if None no distance will be computed.
     # The distance metric is used to compare the original contingency vector with the noisy one.

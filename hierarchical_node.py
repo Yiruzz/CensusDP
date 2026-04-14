@@ -92,7 +92,7 @@ class HierarchicalNode:
         if self.children_range is not None:
             node += f" - Total: {1 + self.children_range[1] - self.children_range[0]} children"
 
-        node += f"\n  Contingency vector: {'Setted' if len(self.contingency_vector) else 'Not set'} \n"
+        node += f"\n  Contingency vector: {'Setted' if not self.contingency_vector is None else 'Not set'} \n"
         node += f"  Constraints: {len(self.constraints)} constraints \n"
         
         return node

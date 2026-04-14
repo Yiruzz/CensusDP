@@ -16,43 +16,44 @@ class DataHandler:
     '''Class to handle data loading, preprocessing and postprocessing.'''
 
     def __init__(self, input_path: str, hierarchical_columns: List[str], query_columns: List[str],
-                 tree_path: str, contingency_vectors_folder_path: str, output_path: str) -> None:
+                 output_tree: str, output_path: str) -> None:
         '''Constructror for DataHandler class.
         
         Args:
             input_path (str): Path to the input data file.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels, in order from highest to lowest.
             query_columns (List[str]): List of columns to use for generating the contingency table.
-            tree_path (str): Path to the file containing the hierarchical tree structure.
-            contingency_vectors_folder_path (str): Path to the folder containing contingency vectors for each node in the tree.
+            output_tree (str): Path to the file containing the hierarchical tree structure and the contingency vectors or save them.
             output_path (str): Path to save the processed data.
 
         Attributes:
             data_path (str): Path to the data file.
             microdata_path (str): Path to save the processed microdata.
 
-            tree_path (str): Path to the file containing the hierarchical tree structure.
-            contingency_vectors_folder_path (str): Path to the folder containing contingency vectors for each node in the tree.
+            tree_folder (str): Path to the file containing the hierarchical tree structure and the contingency vectors or save them.
+            tree_file (str): Path to the file containing the hierarchical tree.
+            contingency_vectors_file (str): Path to the file with the contingency vectors.
             
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
             query_columns (List[str]): List of columns to use for generating the contingency table.
-            
+
+            contingency_df (Optional[pd.DataFrame]): DataFrame use to store and have an order on each unique combination of attributes.  
         '''
         # Input and output paths
         self.data_path: str = input_path
         self.microdata_path: str = output_path
 
-        # Paths related to the tree structure and contingency vectors.
-        self.tree_path: str = tree_path
-        self.contingency_vectors_folder_path: str = contingency_vectors_folder_path
+        # Paths related to the tree structure and the contingency vectors.
+        self.tree_folder: str = output_tree
+        self.tree_file: str = None
+        self.contingency_vectors_file = None
 
         # DataFrame to hold the data (loaded from file_path).
         self.dataframe: Optional[pd.DataFrame] = None
         self.hierarchical_columns: List[str] = hierarchical_columns
         self.query_columns: List[str] = query_columns
 
-        # Used to store and have an order on each unique combination of attributes.
         # The contingency vectors will have the same order of this dataframe.
         self.contingency_df: Optional[pd.DataFrame] = None
 
@@ -61,7 +62,6 @@ class DataHandler:
         
         Args:
             file_path (str): Path to the data file.
-
         '''
         self.dataframe = pd.read_csv(self.data_path, sep=sep)
         return None
@@ -71,14 +71,12 @@ class DataHandler:
 
         Args:
             columns_to_use (List[str]): List of columns to keep in the dataframe.
-
         '''
         self.dataframe = self.dataframe[self.hierarchical_columns + self.query_columns]
         return None
     
     def sort_data_by_hierarchy(self) -> None:
         '''Sort the data by the hierarchical columns in ascending order.
-        
         '''
         self.dataframe.sort_values(by=self.hierarchical_columns, inplace=True)
         self.dataframe.reset_index(drop=True, inplace=True)
@@ -90,22 +88,9 @@ class DataHandler:
         Args:
             data (pd.DataFrame): DataFrame containing the processed data to write.
             out_path (Optional[str]): Optional path to save the processed data. If None, use self.output_path.
-
         '''
         data.to_csv((out_path or self.microdata_path), sep=';', index=False, encoding='utf-8')
         return None
-
-    
-    def compress_file(self, file_path: str, should_delete_original: bool = True) -> None:
-        '''Compress the given file.
-        Useful for then sorted data is saved to a new file, the original file can be deleted to save space,
-        specially when working with large datasets.
-        
-        Args:
-            file_path (str): Path to the file to compress.
-            should_delete_original (bool): Whether to delete the original file after compression. Defaults to True.
-        '''
-        raise NotImplementedError("This method is not implemented yet.")
     
     def generate_contingency_dataframe(self) -> pd.DataFrame:
         '''Generate a contingency dataframe from the loaded data.
@@ -177,7 +162,6 @@ class DataHandler:
         Args: 
             tree (HierarchicalTree): The hierarchical tree to which the constraints will be added.
             constraints (Dict[int, List[Constraint]]): A dictionary where the keys are the levels of the tree and the values are lists of constraints to apply to those levels.        
-
         '''
         # For each level in the constraints dictionary
         for level in constraints.keys():
@@ -197,6 +181,21 @@ class DataHandler:
                     level_constraints.append(constraint.to_constraint(self.contingency_df))
                 node.constraints.extend(level_constraints) 
         return None
+    
+    def load_contingency_vectors(self, tree: HierarchicalTree) -> None:
+        '''Load the contingency vectors from the file, mapping each row index to the corresponding node index.
+
+        Args:
+            tree (HierarchicalTree): The hierarchical tree to which the contingency vectors will be added.
+        '''
+        df = pd.read_csv(self.tree_folder+self.contingency_vectors_file)
+        vectores = df.values.astype(int)
+
+        index = 0
+        for node in tree.nodes:
+            node.contingency_vector = vectores[index]
+            index += 1
+        return None
 
     def load_tree(self) -> HierarchicalTree:
         '''Load the hierarchical tree structure based on a file created by the function create_tree.
@@ -204,7 +203,6 @@ class DataHandler:
 
         Returns:
             HierarchicalTree: The loaded hierarchical tree structure.
-
         '''
         nodes = []
         node_ranges_by_level = []
@@ -212,7 +210,7 @@ class DataHandler:
         index_last_hierarchical_column = len(self.hierarchical_columns)
 
         # Read the tree file into a DataFrame
-        tree_df = pd.read_csv(self.tree_path, sep=';')
+        tree_df = pd.read_csv(f"{self.tree_folder}/{self.tree_file}", sep=';')
 
         curr_level = 0
 
@@ -258,12 +256,14 @@ class DataHandler:
 
         return HierarchicalTree(nodes, node_ranges_by_level)
 
-    def create_tree(self) -> None:
+    def create_tree(self) -> pd.DataFrame:
         '''Create a tree based on the hierarchical columns.
         Using the sorted DataFrame, it gets the indices for each node related to the DataFrame.
         This allows saving the tree structure to a file, which can later be loaded with "load_tree" and
         create different contingency vectors dividing the work efficiently, because the data for each node is independent.
 
+        Returns:
+            df (pd.DataFrame): Tree DataFrame to save.
         '''
         # Inialize the list of nodes 
         nodes = []
@@ -325,8 +325,6 @@ class DataHandler:
             end_child_range = curr_id - 1
             node.children_range = (start_child_range, end_child_range)
 
-        # Save the tree path file with the nodes information
-
         # Define the fields to save for each node in the tree
         fields = ['id', 'parent', 'geo', 'level', 'df_range', 'children_range']
 
@@ -346,9 +344,7 @@ class DataHandler:
         # Create the DataFrame
         df = pd.DataFrame(data, columns=fields)
 
-        # Save the DataFrame to a CSV file
-        self.write_data(df, out_path=self.tree_path)
-        return None
+        return df
   
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.

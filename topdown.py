@@ -20,9 +20,7 @@ class TopDown():
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], last_hierarchical_column: str, queries: List[str],
-                 microdata_path: str, tree_path: str, pree_tree: bool,
-                 contingency_vectors_folder_path: str, pree_contigency_vectors: bool,
-                 optimizer: str, solver_options: dict) -> None:
+                 tree_path: str, microdata_path: str, optimizer: str, solver_options: dict) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -31,11 +29,8 @@ class TopDown():
             hierarchy (List[str]): List of columns representing the hierarchy levels.
             last_hierarchical_column (str): The last column in the hierarchy that will be considered.
             queries (List[str]): List of columns to be queried and aggregated.
+            tree_path (str): Path to save the three and maybe the contingency vectors.
             microdata_path (str): Path to save the processed microdata.
-            tree_path (str): Path to save the hierarchical tree. 
-            pree_tree (bool): Flag indicating whether a pre-built tree is provided.
-            contingency_vectors_folder_path (str): Path to the folder containing contingency vectors.
-            pree_contigency_vectors (bool): Flag indicating whether pre-built contingency vectors are provided.
             optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.).
             solver_options (dict): Dictionary of options to pass to the solver.
 
@@ -43,24 +38,21 @@ class TopDown():
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
 
             hierarchical_columns (List[str]): List of columns representing the hierarchy levels.
+            index_last_hierarchical_column (int): Index that indicate which is the positions of the last hierarchical column to consider.
             query_columns (List[str]): List of columns to be queried and aggregated.
 
             privacy_parameters (List[float]): List of privacy parameters for each level of the tree.
             mechanism (str): The noise mechanism to use ('discrete_laplace' or 'discrete_gaussian').
 
-            pre_tree (bool): Flag indicating whether a pre-built tree is provided.
-            pre_contigency_vectors (bool): Flag indicating whether pre-built contingency vectors are provided.
-
             tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
             optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
             constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints
-        '''
 
+        '''
         self.data_handler: DataHandler = DataHandler(input_path=data_path,
                                                      hierarchical_columns=hierarchy,
                                                      query_columns=queries,
-                                                     tree_path=tree_path,
-                                                     contingency_vectors_folder_path=contingency_vectors_folder_path,
+                                                     output_tree=tree_path,
                                                      output_path=microdata_path)
         
         self.hierarchical_columns: List[str] = hierarchy
@@ -69,9 +61,6 @@ class TopDown():
 
         self.privacy_parameters: List[float] = []
         self.mechanism: Callable = lambda x: x  # Default to identity function
-
-        self.pre_tree: bool = pree_tree
-        self.pre_contigency_vectors: bool = pree_contigency_vectors
 
         self.tree: HierarchicalTree = HierarchicalTree(nodes=[], node_ranges_by_level=[])
         self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options)
@@ -85,55 +74,73 @@ class TopDown():
 
         print(f'Initializing TopDown algorithm...')
 
-        # Read the data
+        # Read the data 
         t1 = time.time()
         print(f'Reading data...', end=' ')
         self.data_handler.read_data(sep=';')
         print(f'{time.time() - t1:.2f} seconds.')
 
-        # Create the hierarchical tree structure based on the hierarchical columns if no tree path is provided
-        if not self.pre_tree:
-            # If no tree path is provided, that meaning that the data passed is not sorted by the hierarchical columns
+        # Check if use a created tree with its sorted data (assumed)
+        if self.data_handler.tree_file is None:
+            # Sort read data
             t1 = time.time()
             print(f'Sorting data by hierarchical columns...', end=' ')
             self.data_handler.sort_data_by_hierarchy()
             print(f'{time.time() - t1:.2f} seconds.')
-            
-            original_file = self.data_handler.data_path
-            sorted_file = self.data_handler.data_path.replace('.csv', '_sorted.csv')
 
+            # Write sorted data to use in a next execution (but update the current dataframe)
             t1 = time.time()
-            print(f'Write sorted data by hierarchical columns...', end=' ')
-            self.data_handler.write_data(self.data_handler.dataframe, out_path=sorted_file)
+            print(f'Writing data by hierarchical columns...', end=' ')
+            folder = "/".join(self.data_handler.data_path.split('/')[:-1])
+            filename = self.data_handler.data_path.split('/')[-1]
+            out_path = f"{folder}/{filename.split('.')[0]}_sorted.csv"
+            self.data_handler.write_data(self.data_handler.dataframe, out_path)
             print(f'{time.time() - t1:.2f} seconds.')
 
-            self.data_handler.data_path = sorted_file
-            #self.data_handler.compress_file(original_file, should_delete_original=True)
-
+            #NOTE: Create the tree is very fast, so not is necessary save it, but it is useful for the user to see and debugg then.
+            # Create tree
             t1 = time.time()
             print(f'Creating hierarchical tree structure...', end=' ')
-            self.data_handler.create_tree()
+            df = self.data_handler.create_tree()
             print(f'{time.time() - t1:.2f} seconds.')
 
-        # Reduce the data to the necessary columns 
+            # Save tree
+            t1 = time.time()
+            print(f'Saving hierarchical tree structure...', end=' ')
+            tree_file = "tree.csv"
+            self.data_handler.write_data(df, f"{self.data_handler.tree_folder}/{tree_file}")
+            self.data_handler.tree_file = tree_file
+            print(f'{time.time() - t1:.2f} seconds.')
+
+        # Reduce the data
         self.data_handler.hierarchical_columns = self.hierarchical_columns[:self.index_last_hierarchical_column+1]
         self.data_handler.reduce_data()
-
-        # Load the tree until the hierarchical level specified
-        print(f'Loading existing tree...', end=' ')
+        
+        # Load tree
         t1 = time.time()
+        print(f'Loading hierarchical tree structure...', end=' ')
         self.tree = self.data_handler.load_tree()
         print(f'{time.time() - t1:.2f} seconds.')
-    
-        print(f'\nHierarchical tree structure loaded:')
-        print(self.tree)
-
+        
+        # Create contingency dataframe to create constrains after
         self.data_handler.generate_contingency_dataframe()
 
-        t1 = time.time()
-        print(f'Creating contingency vectors for each node in the tree...', end=' ')
-        self.data_handler.create_contingency_vectors(self.tree)
-        print(f'{time.time() - t1:.2f} seconds.')
+        # Check if there are oldest contigency vectors
+        # NOTE: The user have the responsability to check if the file passed has the contigency vectors for all nodes and
+        # them correspondent to the queries.
+        if self.data_handler.contingency_vectors_file is None:
+            # Generate contigency vectors for each node in the tree
+            t1 = time.time()
+            print(f'Creating contingency vectors for each node in the tree...', end=' ')
+            self.data_handler.create_contingency_vectors(self.tree)
+            print(f'{time.time() - t1:.2f} seconds.')
+        
+        else:
+            # Load contigency vectors
+            t1 = time.time()
+            print(f'Loading contingency vectors for each node in the tree...', end=' ')
+            self.data_handler.load_contingency_vectors(self.tree)
+            print(f'{time.time() - t1:.2f} seconds.') 
 
         # Set constraints for each node in the tree
         t1 = time.time()
@@ -365,7 +372,29 @@ class TopDown():
                 self.mechanism = self.discrete_gaussian
             case _:
                  raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
+    
+    def load_tree(self, file_path: str) -> None:
+        '''Save the file to the tree to load in the initialization phase.
+        Thus if the file doesn't save in data handler attribute, the tree must be created.
+        
+        Args:
+            file_path (str): Path to the tree file.
+        '''
+        self.data_handler.tree_file = file_path 
+        return None
 
+    def load_contigency_vectors(self, file_path: str, noisy: bool = False) -> None:
+        '''Save the file to the contingency vectors to load in the initialization phase.
+        Thus if the file doesn't save in data handler attribute, the contingency vectors must be created (but not necessarily save).
+
+        Args:
+            file_path (str) = Path to the contingency vectors file.
+            noisy (bool) = Specify if the vectors in the file have noisy or not. 
+        '''
+        self.data_handler.contingency_vectors_path = file_path
+        self.tree.noisy_contingency_vectors = noisy
+        return None
+    
     def run(self) -> pd.DataFrame:
         '''Run the TopDown algorithm end-to-end.
         
@@ -376,13 +405,14 @@ class TopDown():
             pd.DataFrame: The constructed differentially private microdata.
         '''
         self.initialize()
-        self.measurement_phase()
-        self.estimation_phase()
-        noisy_data = self.construct_microdata()
-        return noisy_data
+        #if not self.tree.noisy_contingency_vectors: self.measurement_phase()
+        #self.estimation_phase()
+        #noisy_data = self.construct_microdata()
+        #return noisy_data
     
     def check_correctness(self) -> None:
         '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
+
         '''
         if self.tree.root is not None:
             print(f'Checking correctness of the tree...')
