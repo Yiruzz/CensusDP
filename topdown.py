@@ -1,15 +1,15 @@
 import pandas as pd
 import numpy as np
 from hierarchical_tree import HierarchicalTree
+from hierarchical_tree import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 
-from discretegauss import sample_dlaplace, sample_dgauss
+from noisy import sample_dgauss_fast, sample_dgauss_optimized,  sample_dlaplace_fast, sample_dlaplace_optimized
 
 from typing import Callable, Dict, List
 import time
-
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -168,7 +168,7 @@ class TopDown():
         t1 = time.time()
         print(f'\nRunning measurement phase...', end=' ')
         for node in self.tree.nodes:
-            self.add_noise(node.contingency_vector, self.privacy_parameters[node.level])
+            self.add_noise(node, self.privacy_parameters[node.level])
         print(f'{time.time() - t1:.2f} seconds.')
         return None
 
@@ -256,21 +256,20 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.')
         return None
     
-    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: float,) -> np.ndarray:
-        '''Add noise to the contingency vector using the specified mechanism.
+    def add_noise(self, node: HierarchicalNode, privacy_budget: float) -> None:
+        '''Add noise to the node's contingency vector using the specified mechanism.
+        Generate the same number of values as the entries in the contingency vector, 
+        then sum the values and update the vector.
         
         Args:
-            contingency_vector (np.ndarray): The original contingency vector.
+            node (HierarchicalNode): The node with a contingency vector.
             privacy_budget (float): The privacy budget (epsilon) for noise addition.
-        
-        Returns:
-            np.ndarray: The noisy contingency vector.
         '''
 
-        for i in range(len(contingency_vector)):
-            contingency_vector[i] += self.mechanism(privacy_budget)
-        
-        return contingency_vector
+        n = len(node.contingency_vector)
+        noise = self.mechanism(privacy_budget, n)
+        node.contingency_vector += noise
+        return None
 
     def construct_microdata(self) -> pd.DataFrame:
         '''Construct the differentially private microdata from the hierarchical tree.
@@ -345,43 +344,54 @@ class TopDown():
         '''
         self.privacy_parameters = privacy_parameters
 
-    
-    def discrete_gaussian(self, rho: float) -> int:
-        '''Applies discrete Gaussian noise to the contingency vector.
-        
+    def discrete_gaussian(self, mode: str) -> Callable:
+        '''Create a discrete Gaussian sampling mechanism using the selected implementation mode.
+
         Args:
-            rho (float): The privacy parameter.
-        
+            mode (str): Implementation mode ('fast' or 'optimized' (default))
+
         Returns:
-            int: The noise value to be added.
+            Callable: A function that takes privacy parameter used to derive the scale and number of samples to generate
+                      and returns samples from the discrete Gaussian mechanism.
         '''
-        return sample_dgauss(rho)
+        match mode:
+            case 'fast':
+                return lambda epsilon, n_samples: sample_dgauss_fast(1/epsilon, n_samples)
+            case _:
+                return lambda epsilon, n_samples: sample_dgauss_optimized(1/epsilon, n_samples)
     
-    def discrete_laplace(self, epsilon: float) -> int:
-        '''Applies Laplace noise to the contingency vector.
-        
+    def discrete_laplace(self, mode: str) -> Callable:
+        '''Create a discrete Laplace sampling mechanism using the selected implementation mode.
+
         Args:
-            epsilon (float): The privacy parameter.
-        
+            mode (str): Implementation mode ('fast' or 'optimized' (default))
+
         Returns:
-            int: The noise value to be added.
+            Callable: A function that takes privacy parameter used to derive the scale and number of samples to generate
+                      and returns samples from the discrete Laplace mechanism.
         '''
-        return sample_dlaplace(1/epsilon)
-    
-    def set_mechanism(self, mechanism: str) -> None:
-        '''Set the noise mechanism to use for adding noise to the data.
+        match mode:
+            case 'fast':
+                return lambda epsilon, n_samples: sample_dlaplace_fast(1/epsilon, n_samples)
+            case _:
+                return lambda epsilon, n_samples: sample_dlaplace_optimized(1/epsilon, n_samples)
+        
+    def set_mechanism(self, mechanism: str, mode: str) -> None:
+        '''Set the noise mechanism and mode to use for adding noise to the data.
         
         Args:
             mechanism (str): The noise mechanism to use ('discrete_laplace' or 'discrete_gaussian').
+            mode (str): The mode to use ('Optimized' or 'Fast').
         '''
         match mechanism:
             case 'discrete_laplace':
-                self.mechanism = self.discrete_laplace
+                self.mechanism = self.discrete_laplace(mode)
+
             case 'discrete_gaussian':
-                self.mechanism = self.discrete_gaussian
+                self.mechanism = self.discrete_gaussian(mode)
             case _:
                  raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
-    
+
     def load_tree(self, filename: str) -> None:
         '''Save the file to the tree to load in the initialization phase.
         Thus if the file doesn't save in data handler attribute, the tree must be created.

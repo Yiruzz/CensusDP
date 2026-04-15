@@ -28,7 +28,7 @@ def main():
 
     # Define the columns to use that will be queried in each node of the tree.
     # QUERIES = ['P08', 'P09'] # Sex and Age
-    QUERIES = ['P01', 'P02'] # Viviendas queries
+    QUERIES = ['P01', 'P02', 'P03A', 'P03B'] # Viviendas queries
 
     ##############################
     # Input and output data path # 
@@ -94,9 +94,15 @@ def main():
     PRIVACY_PARAMETERS = [(total_privacy_budget/aux)*(2**i) for i in range(n_levels)]
     topdown.set_privacy_parameters(PRIVACY_PARAMETERS)
 
+    # By default, the OpenDP library is used to generate noisy values according to the selected distribution.
+    # You can also enable an experimental mode in which noisy values are generated using a NumPy-based formulation. This approach is faster,
+    # but it does not provide guarantees regarding floating-point security and not strictly follow the specified mathematical formulation.
+
     # Noise mechanism to use (discrete_laplace or discrete_gaussian).
+    # Mode (optimized or fast)
     MECHANISM = 'discrete_laplace'
-    topdown.set_mechanism(MECHANISM)
+    MODE = 'optimized'
+    topdown.set_mechanism(MECHANISM, MODE)
 
     ####################
     # Edit Constraints #
@@ -172,7 +178,7 @@ def main():
     if LOAD_PREVIOUS_TREE:
         topdown.load_tree(TREE_FILE)
     
-        LOAD_PREVIOUS_CONTINGENCY_VECTORS = True
+        LOAD_PREVIOUS_CONTINGENCY_VECTORS = False
         NOISE_CONTINGENCY_VECTORS = False
 
         if LOAD_PREVIOUS_CONTINGENCY_VECTORS:
@@ -184,10 +190,10 @@ def main():
     # The files are saved in TREE_PATH with the filenames CONTINGENCY_VECTORS_FILE
     # and CONTINGENCY_VECTORS_FILE_noisy, respectively.
 
-   # NOTE: If you decide to save the contingency vectors (raw or noisy), you must not have previously indicated that
+    # NOTE: If you decide to save the contingency vectors (raw or noisy), you must not have previously indicated that
     # contingency vectors (raw or noisy, as applicable) would be loaded, since it does not make sense to save something
     # that you already had available.
-    #topdown.save_raw_contingency_vectors(CONTIGENCY_VECTORS_FILE)
+    topdown.save_raw_contingency_vectors(CONTIGENCY_VECTORS_FILE)
     topdown.save_noisy_contingency_vectors(CONTIGENCY_VECTORS_FILE)
 
     # Distance metric to use (manhattan, euclidean, cosine) if None no distance will be computed.
