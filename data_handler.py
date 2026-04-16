@@ -195,7 +195,7 @@ class DataHandler:
         '''
         df = pd.read_csv(f"{self.tree_folder}/{filename}", sep=";")
         vectores = df.values.astype(int)
-
+    
         index = 0
         for node in tree.nodes:
             node.contingency_vector = vectores[index]

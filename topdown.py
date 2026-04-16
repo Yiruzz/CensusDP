@@ -1,15 +1,58 @@
 import pandas as pd
 import numpy as np
+
 from hierarchical_tree import HierarchicalTree
 from hierarchical_tree import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
+from noisy import sample_dgauss_fast, sample_dgauss_optimized, sample_dlaplace_fast, sample_dlaplace_optimized
 
-from noisy import sample_dgauss_fast, sample_dgauss_optimized,  sample_dlaplace_fast, sample_dlaplace_optimized
-
-from typing import Callable, Dict, List
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from typing import Callable, Dict, List, Tuple, Any
 import time
+
+process_solver = None
+
+def init_process(solver_name: str, solver_options: Dict[str, Any]) -> None:
+    ''' Initialize the solver instance for the process using the user-provided parameters.
+    
+    The solver instance is stored in a global variable for access by tasks executed in this process.
+
+    Args:
+        solver_name (str): Name of the solver to use (e.g., 'gurobi').
+        solver_options (Dict[str, Any]): Dictionary of options to configure the solver.
+    '''
+    global process_solver
+    process_solver = OptimizationModel(solver_name, solver_options)
+    return None
+
+def solve(node_id: int, joint_contingency_vector: np.ndarray[int], joint_constraints: List[Callable]) -> Tuple[int, np.ndarray[int]]:
+    ''' Task executed in a separate process to solve a node in parallel.
+
+    The solver instance is stored in a global variable for the process, 
+    so it does not need to be passed as an argument each time.
+
+    Args:
+        node_id (int): Unique identifier for this hierarchical node.
+        joint_contingency_vector (np.ndarray[int]): Contingency vector constructed from the node's children.
+        joint_constraints (List[Callable]): List of constraints associated with the joint contingency vector.
+
+    Returns:
+        Tuple[int, np.ndarray[int]]: A tuple containing the node ID and the resulting solution of the problem.
+                                     This allows mapping the solution back to the corresponding node.
+    '''
+    x_tilde = process_solver.non_negative_real_estimation(
+        contingency_vector=joint_contingency_vector,
+        id_node=node_id,
+        constraints=joint_constraints
+    )
+    joint_solution: np.ndarray = process_solver.rounding_estimation(
+        x_tilde=x_tilde,
+        id_node=node_id,
+        constraints=joint_constraints
+    )
+    return node_id, joint_solution
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -45,7 +88,7 @@ class TopDown():
             mechanism (str): The noise mechanism to use ('discrete_laplace' or 'discrete_gaussian').
 
             tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
-            optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
+            optimizer (Tuple[str, Dict[str, Any]]): Tuple containing the solver name and its configuration options used to create an OptimizationModel instance.
             constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints
 
         '''
@@ -63,7 +106,7 @@ class TopDown():
         self.mechanism: Callable = lambda x: x  # Default to identity function
 
         self.tree: HierarchicalTree = HierarchicalTree(nodes=[], node_ranges_by_level=[])
-        self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options)
+        self.optimizer: Tuple[str, Dict[str, Any]] = (optimizer, solver_options)
         self.constraints: Dict[int, List[Constraint]] = {}
     
     def initialize(self) -> None:
@@ -254,6 +297,96 @@ class TopDown():
                 start = end
 
         print(f'{time.time() - t1:.2f} seconds.')
+        return None
+    
+    def root_estimation_phase(self) -> None:
+        '''Perform the estimation phase of the TopDown algorithm for root node.
+        '''
+        optimizer = OptimizationModel(*self.optimizer)
+
+        root = self.tree.nodes[0]
+        x_tilde = optimizer.non_negative_real_estimation(
+            contingency_vector=root.contingency_vector,
+            id_node=root.id,
+            constraints=root.constraints
+        )
+        root.contingency_vector = optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            id_node=root.id,
+            constraints=root.constraints
+        )
+        return None
+
+    def subtree_estimation_phase(self) -> None:
+        ''' 
+        Allows solving optimization models in parallel once their contingency vectors are updated.
+        
+        This means that it is not necessary to wait for an entire level to finish before moving to the next,
+        because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
+        There is no explicit waiting for a level to complete.
+        '''
+
+        # Create arguments from the root node to pass updated vectors to regional nodes.
+        root = self.tree.nodes[0]
+        joint_contingency_vector = self.tree.get_combined_contingency_vector(0)
+        root_arguments = (root.id, joint_contingency_vector, self.tree.build_joint_constraints(0, joint_contingency_vector))
+
+        # Create a process pool with workers, each with its own environment (for Gurobi)
+        # This avoids the cost of creating a new environment for each thread; we can reuse the environments
+        # because no information about the solved models is saved—only the license and other parameters.
+        # TODO: Investigate how 'cplex' or 'glpk' handle parallelism, whether they use an environment or something similar, 
+        # because this might require modifying the init_process function.
+        with ProcessPoolExecutor(max_workers=2,
+                                 initializer=init_process, initargs=self.optimizer) as executor:
+            # Submit the root node task
+            futures = {executor.submit(solve, *root_arguments): root_arguments}
+
+            # While there are tasks running
+            while futures:
+                # Take the first task that completes
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+
+                # Remove completed futures and retrieve their results
+                for fut in done:
+                    futures.pop(fut) 
+                    node_id, joint_solution = fut.result()
+
+                    # Update the child nodes associated with this node
+                    self.tree.set_contingency_vectors(node_id, joint_solution)
+
+                    # Process the child nodes of the current node
+                    # All children of this node are either internal nodes or leaves.
+                    # If a child is not a leaf, submit a task to solve its sub-tree.
+                    # If a child is a leaf, we stop submitting further tasks for this branch.
+                    # TODO: Consider submitting child tasks gradually instead of all at once,
+                    # when there is sufficient RAM, because having many futures in memory can be expensive.
+                    start_idx, end_idx = self.tree.nodes[node_id].children_range
+                    for idx in range(start_idx, end_idx+1):
+                        if not self.tree.nodes[idx].is_leaf():
+                            joint_contingency_vector = self.tree.get_combined_contingency_vector(idx)
+                            child_arguments = (idx, joint_contingency_vector, self.tree.build_joint_constraints(idx, joint_contingency_vector))
+                            fut = executor.submit(solve, *child_arguments)
+                            futures[fut] = child_arguments
+                        else: break
+        return None
+    
+    def estimation_phase(self) -> None:
+        '''Perform the estimation phase of the TopDown algorithm.
+        
+        This method solves optimization problems at each node in the hierarchical tree to ensure
+        consistency and adherence to constraints after noise has been added.
+        '''
+        t1 = time.time()
+        print(f'\nRunning estimation phase...')
+
+        t2 = time.time()
+        print(f'Processing root node (level 0)... ', end=' ')
+        self.root_estimation_phase()
+        print(f'{time.time() - t2:.2f} seconds.')
+
+        self.subtree_estimation_phase()
+        print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
+        
         return None
     
     def add_noise(self, node: HierarchicalNode, privacy_budget: float) -> None:
