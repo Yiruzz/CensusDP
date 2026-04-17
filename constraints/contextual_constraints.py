@@ -2,7 +2,7 @@ import pandas as pd
 
 from typing import Callable
 
-from .callable_constraints import AggregateConstraintFunction
+from callable_wrappers import SerializableAggregateFunction
 from constraints.logical_expressions.base import LogicalExpression
 from .aggregate_constraints import AggregateConstraint
 
@@ -63,5 +63,5 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         # Get indices where the expression is True
         indices = reduced_series[reduced_series].index
         # Return a function that checks if the sum of the contingency variable equals the value
-        return AggregateConstraintFunction(indices, self.value)
+        return SerializableAggregateFunction(indices, self.value)
 

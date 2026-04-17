@@ -1,6 +1,7 @@
 import numpy as np
 
-from constraints.callable_constraints import AggregateConstraintFunction, SubarrayConstraintFunction
+from callable_wrappers import (SerializableAggregateFunction,
+                               SerializableSubarrayFunction)
 
 from hierarchical_node import HierarchicalNode
 from typing import List, Tuple, Callable
@@ -84,7 +85,7 @@ class HierarchicalTree:
             for constraint in node.constraints:
                 # NOTE: We use an object with a __call__ method, which acts like a function, replacing a lambda function.
                 # Build a sub-dict with keys 0..(e-s-1) so the constraint's indices still match
-                joint_constraints.append(SubarrayConstraintFunction(start=i, end=j, constraint=constraint))
+                joint_constraints.append(SerializableSubarrayFunction(start=i, end=j, func=constraint))
             i = j
 
         # Consistency constraint: sum of children = parent
@@ -92,7 +93,7 @@ class HierarchicalTree:
             # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
             # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
             indices_to_sum = list(range(idx, joint_contingency_vector_length, vectors_length))
-            joint_constraints.append(AggregateConstraintFunction(indices=indices_to_sum, value=self.nodes[idx_node].contingency_vector[idx]))
+            joint_constraints.append(SerializableAggregateFunction(indices=indices_to_sum, value=self.nodes[idx_node].contingency_vector[idx]))
     
         return joint_constraints
     

@@ -6,7 +6,10 @@ from hierarchical_tree import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from noisy import sample_dgauss_fast, sample_dgauss_optimized, sample_dlaplace_fast, sample_dlaplace_optimized
+from noisy import (sample_dgauss_fast,
+                   sample_dgauss_optimized,
+                   sample_dlaplace_fast,
+                   sample_dlaplace_optimized)
 
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
@@ -268,7 +271,6 @@ class TopDown():
                 for fut in done:
                     futures.pop(fut)
                     node_id, joint_solution = fut.result()
-                    #print("Nodo completado: ", node_id)
 
                     # Update tree
                     self.tree.set_contingency_vectors(node_id, joint_solution)
