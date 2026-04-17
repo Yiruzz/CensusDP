@@ -8,6 +8,7 @@ from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 from noisy import sample_dgauss_fast, sample_dgauss_optimized, sample_dlaplace_fast, sample_dlaplace_optimized
 
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from typing import Callable, Dict, List, Tuple, Any
 import time
@@ -214,90 +215,6 @@ class TopDown():
             self.add_noise(node, self.privacy_parameters[node.level])
         print(f'{time.time() - t1:.2f} seconds.')
         return None
-
-    def estimation_phase(self) -> None:
-        '''Perform the estimation phase of the TopDown algorithm.
-        
-        This method solves optimization problems at each node in the hierarchical tree to ensure
-        consistency and adherence to constraints after noise has been added.
-        '''
-        t1 = time.time()
-        print(f'\nRunning estimation phase...', end=' ')
-
-        # Root estimation (level 0)
-        # Does not require consistency adjustments
-        root = self.tree.nodes[0]
-        x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            contingency_vector=root.contingency_vector,
-            id_node=root.id,
-            constraints=root.constraints
-        )
-        root.contingency_vector = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            id_node=root.id,
-            constraints=root.constraints
-        )
-
-        # Now process the rest of the tree level by level
-        for node in self.tree.nodes:
-            # If the node is a leaf, no need to solve optimization
-            # NOTE: With a break we assume that all leaves are at the same level
-            if node.is_leaf():
-                break
-                
-            # Solve the optimization problem for the children of the current node
-            childs_contingency_vectors = []
-            for i in range(node.children_range[0], node.children_range[1]+1):
-                child = self.tree.nodes[i]
-                childs_contingency_vectors.append(child.contingency_vector)
-
-            joint_contingency_vector = np.concatenate(childs_contingency_vectors)
-
-            # Transform individual constraints for joint vector
-            joint_constraints: List[Callable] = []
-            # All vectors have the same length
-            vectors_length = len(childs_contingency_vectors[0])
-            start = 0
-            for i in range(node.children_range[0], node.children_range[1]+1):
-                child = self.tree.nodes[i]
-                end = start + vectors_length
-                for constraint in child.constraints:
-                    # NOTE: We use default arguments to avoid late binding issues in lambdas
-                    # This can lead to all constraints using the last values saved of start and end
-                    # Build a sub-dict with keys 0..(e-s-1) so the constraint's indices still match
-                    joint_constraints.append(lambda joint_array, s=start, e=end, c=constraint: c({i - s: joint_array[i] for i in range(s, e)}))
-                start = end
-
-            # Consistency constraint: sum of children = parent
-            for index in range(vectors_length):
-                # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
-                # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
-                indices_to_sum = list(range(index, len(joint_contingency_vector), vectors_length))
-                joint_constraints.append(lambda joint_array, idxs=indices_to_sum, value=node.contingency_vector[index]:
-                                            sum(joint_array[j] for j in idxs) == value)
-                    
-            # Solve for children nodes (joint contingency vector)
-            x_tilde = self.optimizer.non_negative_real_estimation(
-                contingency_vector=joint_contingency_vector,
-                id_node=node.id,
-                constraints=joint_constraints
-            )
-            joint_solution: np.ndarray = self.optimizer.rounding_estimation(
-                x_tilde=x_tilde,
-                id_node=node.id,
-                constraints=joint_constraints
-            )
-
-            # Save the solution back to each child node
-            start = 0
-            for i in range(node.children_range[0], node.children_range[1]+1):
-                child = self.tree.nodes[i]
-                end = start + vectors_length
-                child.contingency_vector = joint_solution[start:end]
-                start = end
-
-        print(f'{time.time() - t1:.2f} seconds.')
-        return None
     
     def root_estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm for root node.
@@ -318,56 +235,74 @@ class TopDown():
         return None
 
     def subtree_estimation_phase(self) -> None:
-        ''' 
-        Allows solving optimization models in parallel once their contingency vectors are updated.
+        '''Allows solving optimization models in parallel once their contingency vectors are updated.
         
         This means that it is not necessary to wait for an entire level to finish before moving to the next,
         because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
-        There is no explicit waiting for a level to complete.
         '''
-
-        # Create arguments from the root node to pass updated vectors to regional nodes.
         root = self.tree.nodes[0]
         joint_contingency_vector = self.tree.get_combined_contingency_vector(0)
-        root_arguments = (root.id, joint_contingency_vector, self.tree.build_joint_constraints(0, joint_contingency_vector))
+        root_arguments = (
+            root.id,
+            joint_contingency_vector,
+            self.tree.build_joint_constraints(0, joint_contingency_vector)
+        )
 
-        # Create a process pool with workers, each with its own environment (for Gurobi)
-        # This avoids the cost of creating a new environment for each thread; we can reuse the environments
-        # because no information about the solved models is saved—only the license and other parameters.
-        # TODO: Investigate how 'cplex' or 'glpk' handle parallelism, whether they use an environment or something similar, 
-        # because this might require modifying the init_process function.
-        with ProcessPoolExecutor(max_workers=2,
-                                 initializer=init_process, initargs=self.optimizer) as executor:
-            # Submit the root node task
-            futures = {executor.submit(solve, *root_arguments): root_arguments}
+        max_workers = 4
+        buffer = 2
+        max_outstanding = max_workers + buffer
 
-            # While there are tasks running
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=init_process, initargs=self.optimizer) as executor:
+            next_ranges = deque()
+            curr_range = None
+
+            # Submit root
+            futures = {
+                executor.submit(solve, *root_arguments): root_arguments
+            }
+
             while futures:
-                # Take the first task that completes
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
-                # Remove completed futures and retrieve their results
+                # Process completed tasks
                 for fut in done:
-                    futures.pop(fut) 
+                    futures.pop(fut)
                     node_id, joint_solution = fut.result()
+                    #print("Nodo completado: ", node_id)
 
-                    # Update the child nodes associated with this node
+                    # Update tree
                     self.tree.set_contingency_vectors(node_id, joint_solution)
 
-                    # Process the child nodes of the current node
-                    # All children of this node are either internal nodes or leaves.
-                    # If a child is not a leaf, submit a task to solve its sub-tree.
-                    # If a child is a leaf, we stop submitting further tasks for this branch.
-                    # TODO: Consider submitting child tasks gradually instead of all at once,
-                    # when there is sufficient RAM, because having many futures in memory can be expensive.
-                    start_idx, end_idx = self.tree.nodes[node_id].children_range
-                    for idx in range(start_idx, end_idx+1):
-                        if not self.tree.nodes[idx].is_leaf():
-                            joint_contingency_vector = self.tree.get_combined_contingency_vector(idx)
-                            child_arguments = (idx, joint_contingency_vector, self.tree.build_joint_constraints(idx, joint_contingency_vector))
-                            fut = executor.submit(solve, *child_arguments)
-                            futures[fut] = child_arguments
-                        else: break
+                    # Add children range
+                    node = self.tree.nodes[node_id]
+                    next_ranges.append(node.get_children_iter())
+
+                    # Initialize current range if needed
+                    if curr_range is None and next_ranges:
+                        curr_range = next_ranges.popleft()
+
+                # Fill available slots
+                while len(futures) < max_outstanding and curr_range is not None:
+                    try:
+                        node_id = next(curr_range)
+                    except StopIteration:
+                        if next_ranges:
+                            curr_range = next_ranges.popleft()
+                        else:
+                            curr_range = None
+                        continue
+
+                    if self.tree.nodes[node_id].is_leaf():
+                        continue
+
+                    joint_contingency_vector = self.tree.get_combined_contingency_vector(node_id)
+                    child_arguments = (
+                        node_id,
+                        joint_contingency_vector,
+                        self.tree.build_joint_constraints(node_id, joint_contingency_vector)
+                    )
+                    fut = executor.submit(solve, *child_arguments)
+                    futures[fut] = child_arguments
         return None
     
     def estimation_phase(self) -> None:

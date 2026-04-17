@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Iterator
 
 class HierarchicalNode:
     ''' Represents a node in a hierarchical tree class, containing information about its ID, parent ID, level,
@@ -69,13 +69,22 @@ class HierarchicalNode:
         return self.parent is None
 
     def is_leaf(self) -> bool:
-        ''' Determine if the node is a leaf node (i.e., has no children) based on the presence of the children_range attribute.
+        '''Determine if the node is a leaf node (i.e., has no children) based on the presence of the children_range attribute.
 
         Returns:
             bool: True if the node is a leaf node, False otherwise.
 
         '''
         return self.children_range is None
+    
+    def get_children_iter(self) -> Iterator[int]:
+        '''Return an iterator over the range of children of the node.
+
+        Returns:
+            Iterator[int]: An iterator yielding child indices from start to end (inclusive).
+        '''
+        start, end = self.children_range
+        return iter(range(start, end + 1))
     
     def __repr__(self) -> str:
         '''Create a string representation of the hierarchical node,
