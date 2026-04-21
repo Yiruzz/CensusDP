@@ -48,18 +48,21 @@ class OptimizationModel:
         else:
             raise RuntimeError(f"Solver termination failed for node {id_node}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
 
-    def non_negative_real_estimation(self, contingency_vector: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
 
+        Minimizes ||x - M_tilde||^2 subject to non-negativity and user constraints,
+        where M_tilde are the noisy query answers already computed during the measurement phase.
+
         Args:
-            contingency_vector (np.ndarray): The contingency vector with noisy counts.
+            noisy_measurements (np.ndarray): Noisy query answers M_tilde = Q @ x + noise.
             id_node (int): The ID of the node for which the estimation is being performed.
             constraints (List[Callable]): List of additional constraints to apply to the model.
 
         Returns:
             np.ndarray: Estimated contingency vector with non-negative real values.
         '''
-        n = len(contingency_vector)
+        n = len(noisy_measurements)
 
         # Create a ConcreteModel directly
         instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{id_node}')
@@ -67,15 +70,15 @@ class OptimizationModel:
         # Set of indices
         instance.I = pyo.RangeSet(0, n - 1)
 
-        # Parameter: contingency vector
-        instance.c = pyo.Param(instance.I, initialize={i: contingency_vector[i] for i in range(n)})
-
         # Decision variable: non-negative real values
         instance.x = pyo.Var(instance.I, domain=pyo.NonNegativeReals)
 
-        # Objective: minimize L2 norm
+        # Parameter: noisy measurements M_tilde
+        instance.m = pyo.Param(instance.I, initialize={i: noisy_measurements[i] for i in range(n)})
+
+        # Objective: minimize ||x - M_tilde||^2
         def objective_rule(model):
-            return sum((model.x[i] - model.c[i])**2 for i in model.I)
+            return sum((model.x[i] - model.m[i])**2 for i in model.I)
 
         instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 

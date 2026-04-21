@@ -7,7 +7,7 @@ from constraints.constraint import Constraint
 
 from discretegauss import sample_dlaplace, sample_dgauss
 
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 import time
 
 
@@ -58,6 +58,7 @@ class TopDown():
 
         self.privacy_parameters: List[float] = []
         self.mechanism: Callable = lambda x: x  # Default to identity function
+        self.query_matrix: Optional[np.ndarray] = None  # None means identity (Q = I)
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
@@ -86,7 +87,9 @@ class TopDown():
 
         t1 = time.time()
         print(f'Building hierarchical tree...', end=' ')
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
+        if not self.query_matrix:
+            self.query_matrix = np.eye(len(self.data_handler.contingency_df))  # Identity matrix if no query matrix is provided
+        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.query_matrix)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         return None
@@ -124,7 +127,7 @@ class TopDown():
         t2 = time.time()
         print(f'\nProcessing root node (level 0)... ', end=' ')
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            contingency_vector=self.tree.root.contingency_vector,
+            noisy_measurements=self.tree.root.contingency_vector,
             id_node=self.tree.root.id,
             constraints=self.tree.root.constraints
         )
@@ -146,13 +149,13 @@ class TopDown():
                     break
                 
                 # Solve the optimization problem for the children of the current node
-                childs_contingency_vectors = [child.contingency_vector for child in node.children]
-                joint_contingency_vector = np.concatenate(childs_contingency_vectors)
+                vectors_length = len(node.children[0].contingency_vector)
+                joint_noisy_measurements = np.concatenate([child.contingency_vector for child in node.children])
+                # All nodes have the same length of the contingency vector
+                joint_x_length = len(node.children) * vectors_length
 
                 # Transform individual constraints for joint vector
                 joint_constraints: List[Callable] = []
-                # All vectors have the same length
-                vectors_length = len(childs_contingency_vectors[0])
                 start = 0
                 for child in node.children:
                     end = start + vectors_length
@@ -167,13 +170,13 @@ class TopDown():
                 for index in range(vectors_length):
                     # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
                     # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
-                    indices_to_sum = list(range(index, len(joint_contingency_vector), vectors_length))
+                    indices_to_sum = list(range(index, joint_x_length, vectors_length))
                     joint_constraints.append(lambda joint_array, idxs=indices_to_sum, value=node.contingency_vector[index]:
                                              sum(joint_array[j] for j in idxs) == value)
-                    
-                # Solve for children nodes (joint contingency vector)
+
+                # Solve for children nodes
                 x_tilde = self.optimizer.non_negative_real_estimation(
-                    contingency_vector=joint_contingency_vector,
+                    noisy_measurements=joint_noisy_measurements,
                     id_node=node.id,
                     constraints=joint_constraints
                 )
@@ -208,7 +211,7 @@ class TopDown():
 
         for i in range(len(contingency_vector)):
             contingency_vector[i] += self.mechanism(privacy_budget)
-        
+
         return contingency_vector
 
     def construct_microdata(self) -> pd.DataFrame:
