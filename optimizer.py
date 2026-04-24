@@ -48,41 +48,48 @@ class OptimizationModel:
         else:
             raise RuntimeError(f"Solver termination failed for node {id_node}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
 
-    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, id_node: int, constraints: List[Callable], query_matrix: np.ndarray) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
 
-        Minimizes ||x - M_tilde||^2 subject to non-negativity and user constraints,
-        where M_tilde are the noisy query answers already computed during the measurement phase.
+        Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is the concatenation
+        of per-child measurement blocks y_k (each of length n_queries = Q.shape[0]) and the
+        decision variable x is the concatenation of per-child cell-count blocks x_k
+        (each of length n_cells = Q.shape[1]). For the identity workload, Q = np.eye(n_cells)
+        is passed by TopDown.initialize(), so this path handles both cases uniformly.
+
+        Constraints are always expressed in cell space (indices 0..n_cells-1 per child).
 
         Args:
-            noisy_measurements (np.ndarray): Noisy query answers M_tilde = Q @ x + noise.
+            noisy_measurements (np.ndarray): Concatenated noisy query answers y = Q @ x + noise.
             id_node (int): The ID of the node for which the estimation is being performed.
             constraints (List[Callable]): List of additional constraints to apply to the model.
+            query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells).
 
         Returns:
-            np.ndarray: Estimated contingency vector with non-negative real values.
+            np.ndarray: Estimated cell-count vector with non-negative real values,
+                shape (n_children * n_cells,).
         '''
-        n = len(noisy_measurements)
+        n_queries, n_cells = query_matrix.shape
+        n_children = len(noisy_measurements) // n_queries
+        n = n_children * n_cells
 
-        # Create a ConcreteModel directly
         instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{id_node}')
-
-        # Set of indices
         instance.I = pyo.RangeSet(0, n - 1)
-
-        # Decision variable: non-negative real values
         instance.x = pyo.Var(instance.I, domain=pyo.NonNegativeReals)
 
-        # Parameter: noisy measurements M_tilde
-        instance.m = pyo.Param(instance.I, initialize={i: noisy_measurements[i] for i in range(n)})
-
-        # Objective: minimize ||x - M_tilde||^2
+        # Objective: sum_k || Q @ x_k - y_k ||^2
+        # Q entries are Python floats (constants) so Pyomo builds a pure quadratic expression.
         def objective_rule(model):
-            return sum((model.x[i] - model.m[i])**2 for i in model.I)
+            total = 0
+            for k in range(n_children):
+                for r in range(n_queries):
+                    q_x_r = sum(float(query_matrix[r, j]) * model.x[k * n_cells + j] for j in range(n_cells) if query_matrix[r, j] != 0)
+                    total += (q_x_r - float(noisy_measurements[k * n_queries + r])) ** 2
+            return total
 
         instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
-        # Add constraints
+        # Add constraints (always expressed in cell space — indices 0..n_cells-1 per child)
         instance.ConstraintList = pyo.ConstraintList()
         for i, constraint_func in enumerate(constraints):
             try:

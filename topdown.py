@@ -134,6 +134,7 @@ class TopDown():
             noisy_measurements=self.tree.root.contingency_vector,
             id_node=self.tree.root.id,
             constraints=self.tree.root.constraints,
+            query_matrix=self.Q
         )
         self.tree.root.contingency_vector = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
@@ -183,6 +184,7 @@ class TopDown():
                     noisy_measurements=joint_noisy_measurements,
                     id_node=node.id,
                     constraints=joint_constraints,
+                    query_matrix=self.Q
                 )
                 joint_solution: np.ndarray = self.optimizer.rounding_estimation(
                     x_tilde=x_tilde,
