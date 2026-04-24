@@ -8,7 +8,7 @@ from queries import QueryWorkload
 
 from discretegauss import sample_dlaplace, sample_dgauss
 
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Union
 import time
 
 
@@ -20,14 +20,14 @@ class TopDown():
     finally it solves optimization problems to ensure consistency across the tree and adherence to 
     specified constraints by the user.
     '''
-    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
+    def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
         '''
         Initialize the TopDown algorithm.
 
         Args:
             data_path (str): Path to the input data file.
             hierarchy (List[str]): List of columns representing the hierarchy levels.
-            queries (List[str]): List of columns to be queried and aggregated.
+            query_columns (List[str]): List of columns to be queried and aggregated.
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
             optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
@@ -52,14 +52,14 @@ class TopDown():
         '''
         self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
         self.hierarchical_columns: List[str] = hierarchy
-        self.query_columns: List[str] = queries
+        self.query_columns: List[str] = query_columns
 
         self.data_handler.hierarchical_columns = hierarchy
-        self.data_handler.query_columns = queries
+        self.data_handler.query_columns = query_columns
 
         self.privacy_parameters: List[float] = []
         self.mechanism: Callable = lambda x: x  # Default to identity function
-        self.query_matrix: Optional[Union[np.ndarray, QueryWorkload]] = None  # None means identity (Q = I)
+        self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
@@ -88,12 +88,12 @@ class TopDown():
 
         t1 = time.time()
         print(f'Building hierarchical tree...', end=' ')
-        Q: Optional[np.ndarray] = None
-        if isinstance(self.query_matrix, QueryWorkload):
-            Q = self.query_matrix.build(self.data_handler.contingency_df)
-        elif self.query_matrix is not None:
-            Q = self.query_matrix
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, Q)
+        if isinstance(self.Q, QueryWorkload):
+            self.Q = self.Q.build(self.data_handler.contingency_df)
+        elif not isinstance(self.Q, np.ndarray):
+            # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
+            self.Q = np.eye(len(self.data_handler.contingency_df))
+        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         return None
@@ -133,7 +133,7 @@ class TopDown():
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
             noisy_measurements=self.tree.root.contingency_vector,
             id_node=self.tree.root.id,
-            constraints=self.tree.root.constraints
+            constraints=self.tree.root.constraints,
         )
         self.tree.root.contingency_vector = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
@@ -153,7 +153,7 @@ class TopDown():
                     break
                 
                 # Solve the optimization problem for the children of the current node
-                vectors_length = len(node.children[0].contingency_vector)
+                vectors_length = self.Q.shape[1]
                 joint_noisy_measurements = np.concatenate([child.contingency_vector for child in node.children])
                 # All nodes have the same length of the contingency vector
                 joint_x_length = len(node.children) * vectors_length
@@ -182,7 +182,7 @@ class TopDown():
                 x_tilde = self.optimizer.non_negative_real_estimation(
                     noisy_measurements=joint_noisy_measurements,
                     id_node=node.id,
-                    constraints=joint_constraints
+                    constraints=joint_constraints,
                 )
                 joint_solution: np.ndarray = self.optimizer.rounding_estimation(
                     x_tilde=x_tilde,
@@ -299,13 +299,13 @@ class TopDown():
         '''Set the workload query matrix Q.
 
         Q is applied during tree construction: each node stores Q @ x instead of x.
-        When Q is the identity the behaviour is equivalent to the default (no matrix set).
+        If not called, initialize() constructs np.eye(n_cells) as the default.
 
         Args:
             query_matrix: Either a QueryWorkload (DSL object, built lazily at initialize() time)
                           or a pre-built numpy ndarray of shape (n_queries, n_cells).
         '''
-        self.query_matrix = query_matrix
+        self.Q = query_matrix
 
     
     def discrete_gaussian(self, rho: float) -> int:

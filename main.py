@@ -33,8 +33,8 @@ def main():
     GEO_COLUMNS_TO_USE = GEO_COLUMNS[:GEO_COLUMNS.index(PROCESS_UNTIL) + 1]
 
     # Define the columns to use that will be queried in each node of the tree.
-    # QUERIES = ['P08', 'P09'] # Sex and Age
-    QUERIES = ['P02', 'P03A', 'P03B'] # Viviendas queries
+    # QUERY_COLUMNS = ['P08', 'P09'] # Sex and Age
+    QUERY_COLUMNS = ['P02', 'P03A', 'P03B'] # Viviendas queries
 
 
     ##############################
@@ -50,7 +50,7 @@ def main():
     DATA_PATH_VIVIENDAS= 'data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/Microdato_Censo2017-Viviendas.csv'
 
     OUTPUT_PATH = 'data/out/'
-    OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
+    OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERY_COLUMNS) + '.csv'
 
     #######################
     # Solver configuration #
@@ -74,7 +74,7 @@ def main():
     topdown = TopDown(
         data_path=DATA_PATH_VIVIENDAS,
         hierarchy=GEO_COLUMNS_TO_USE,
-        queries=QUERIES,
+        query_columns=QUERY_COLUMNS,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
         optimizer=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
@@ -82,7 +82,7 @@ def main():
     )
 
     # Set the queries to be answered at each node of the tree.
-    topdown.set_query_workload(QueryWorkload().value_counts(QUERIES))
+    topdown.set_query_workload(QueryWorkload().value_counts(QUERY_COLUMNS))
 
     ######################################################
     # Differential privacy budget and mechanism settings #
