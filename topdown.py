@@ -4,10 +4,11 @@ from hierarchical_tree import HierarchicalTree
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
+from queries import QueryWorkload
 
 from discretegauss import sample_dlaplace, sample_dgauss
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 import time
 
 
@@ -58,7 +59,7 @@ class TopDown():
 
         self.privacy_parameters: List[float] = []
         self.mechanism: Callable = lambda x: x  # Default to identity function
-        self.query_matrix: Optional[np.ndarray] = None  # None means identity (Q = I)
+        self.query_matrix: Optional[Union[np.ndarray, QueryWorkload]] = None  # None means identity (Q = I)
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
@@ -87,9 +88,12 @@ class TopDown():
 
         t1 = time.time()
         print(f'Building hierarchical tree...', end=' ')
-        if not self.query_matrix:
-            self.query_matrix = np.eye(len(self.data_handler.contingency_df))  # Identity matrix if no query matrix is provided
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.query_matrix)
+        Q: Optional[np.ndarray] = None
+        if isinstance(self.query_matrix, QueryWorkload):
+            Q = self.query_matrix.build(self.data_handler.contingency_df)
+        elif self.query_matrix is not None:
+            Q = self.query_matrix
+        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, Q)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         return None
@@ -285,11 +289,23 @@ class TopDown():
 
     def set_privacy_parameters(self, privacy_parameters: List[float]) -> None:
         '''Set the privacy parameters for each level of the hierarchical tree.
-        
+
         Args:
             privacy_parameters (List[float]): List of privacy parameters (epsilon) for each level.
         '''
         self.privacy_parameters = privacy_parameters
+
+    def set_query_workload(self, query_matrix: Union[QueryWorkload, np.ndarray]) -> None:
+        '''Set the workload query matrix Q.
+
+        Q is applied during tree construction: each node stores Q @ x instead of x.
+        When Q is the identity the behaviour is equivalent to the default (no matrix set).
+
+        Args:
+            query_matrix: Either a QueryWorkload (DSL object, built lazily at initialize() time)
+                          or a pre-built numpy ndarray of shape (n_queries, n_cells).
+        '''
+        self.query_matrix = query_matrix
 
     
     def discrete_gaussian(self, rho: float) -> int:

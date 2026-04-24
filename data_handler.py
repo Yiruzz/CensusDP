@@ -229,6 +229,12 @@ class DataHandler:
 
         return n_nodes
     
+    # NOTE: This method will not work if the query matrix contains any workload that is not a simple count of the contingency cells.
+    # TODO: Make a more complete version of construction of output data, it does not need to be microdata.
+    #       For example it can be just aggregate data, where each count have the information of the query that produces it:
+    #       (df['Sex'] == 'Male') & (df['Age'] == 30) -> 10
+    #       (df['Sex'] == 'Female') & (df['Age'] == 30) -> 15
+    #       ... and so on on the other queries.
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.
         

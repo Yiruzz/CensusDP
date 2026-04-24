@@ -5,6 +5,11 @@ from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import Equal, NotEqual, TrueExpression
 from constraints.logical_expressions.compound import And, Implies  
 
+# Import query building classes
+from queries import QueryWorkload, col
+
+
+
 def main():
     '''Main function to set variables and run the TopDown algorithm.'''
 
@@ -30,6 +35,7 @@ def main():
     # Define the columns to use that will be queried in each node of the tree.
     # QUERIES = ['P08', 'P09'] # Sex and Age
     QUERIES = ['P02', 'P03A', 'P03B'] # Viviendas queries
+
 
     ##############################
     # Input and output data path # 
@@ -74,6 +80,9 @@ def main():
         solver_options=SOLVER_OPTIONS,
         optimizer_path=OPT_PATH
     )
+
+    # Set the queries to be answered at each node of the tree.
+    topdown.set_query_workload(QueryWorkload().value_counts(QUERIES))
 
     ######################################################
     # Differential privacy budget and mechanism settings #
@@ -144,7 +153,9 @@ def main():
     # 3 is the level of 'COMUNA' in the tree
     topdown.set_constraint_to_level(3, real_total_constraint)
 
-    # TODO: Study macros for a better user interface
+    # TODO: Maybe a refactor to the constraint building process to make it more user-friendly.
+    #       See queries workload definition for inspiration and use overloading of boolean and comparison operators
+    #       in the expressions to make it more intuitive to build the constraints.
 
     # The Census data specifies that if a household was empty when the census was taken,
     # then the question can't be answeredd. The value 98 is used to indicate that the question
