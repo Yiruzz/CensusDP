@@ -5,6 +5,7 @@ from hierarchical_tree import HierarchicalTree
 from hierarchical_tree import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
+from Profilers.Profiler_Respaldo.guro import OptimizationModelG
 from constraints.constraint import Constraint
 from noisy import (sample_dgauss_fast,
                    sample_dgauss_optimized,
@@ -16,47 +17,6 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from typing import Callable, Dict, List, Tuple, Any
 import time
 
-process_solver = None
-
-def init_process(solver_name: str, solver_options: Dict[str, Any]) -> None:
-    ''' Initialize the solver instance for the process using the user-provided parameters.
-    
-    The solver instance is stored in a global variable for access by tasks executed in this process.
-
-    Args:
-        solver_name (str): Name of the solver to use (e.g., 'gurobi').
-        solver_options (Dict[str, Any]): Dictionary of options to configure the solver.
-    '''
-    global process_solver
-    process_solver = OptimizationModel(solver_name, solver_options)
-    return None
-
-def solve(node_id: int, joint_contingency_vector: np.ndarray[int], joint_constraints: List[Callable]) -> Tuple[int, np.ndarray[int]]:
-    ''' Task executed in a separate process to solve a node in parallel.
-
-    The solver instance is stored in a global variable for the process, 
-    so it does not need to be passed as an argument each time.
-
-    Args:
-        node_id (int): Unique identifier for this hierarchical node.
-        joint_contingency_vector (np.ndarray[int]): Contingency vector constructed from the node's children.
-        joint_constraints (List[Callable]): List of constraints associated with the joint contingency vector.
-
-    Returns:
-        Tuple[int, np.ndarray[int]]: A tuple containing the node ID and the resulting solution of the problem.
-                                     This allows mapping the solution back to the corresponding node.
-    '''
-    x_tilde = process_solver.non_negative_real_estimation(
-        contingency_vector=joint_contingency_vector,
-        id_node=node_id,
-        constraints=joint_constraints
-    )
-    joint_solution: np.ndarray = process_solver.rounding_estimation(
-        x_tilde=x_tilde,
-        id_node=node_id,
-        constraints=joint_constraints
-    )
-    return node_id, joint_solution
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -110,7 +70,7 @@ class TopDown():
         self.mechanism: Callable = lambda x: x  # Default to identity function
 
         self.tree: HierarchicalTree = HierarchicalTree(nodes=[], node_ranges_by_level=[])
-        self.optimizer: Tuple[str, Dict[str, Any]] = (optimizer, solver_options)
+        self.optimizer: OptimizationModel = OptimizationModelG()
         self.constraints: Dict[int, List[Constraint]] = {}
     
     def initialize(self) -> None:
@@ -218,114 +178,48 @@ class TopDown():
             self.add_noise(node, self.privacy_parameters[node.level])
         print(f'{time.time() - t1:.2f} seconds.')
         return None
-    
-    def root_estimation_phase(self) -> None:
-        '''Perform the estimation phase of the TopDown algorithm for root node.
-        '''
-        optimizer = OptimizationModel(*self.optimizer)
 
-        root = self.tree.nodes[0]
-        x_tilde = optimizer.non_negative_real_estimation(
-            contingency_vector=root.contingency_vector,
-            id_node=root.id,
-            constraints=root.constraints
-        )
-        root.contingency_vector = optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            id_node=root.id,
-            constraints=root.constraints
-        )
-        return None
-
-    def subtree_estimation_phase(self) -> None:
-        '''Allows solving optimization models in parallel once their contingency vectors are updated.
-        
-        This means that it is not necessary to wait for an entire level to finish before moving to the next,
-        because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
-        '''
-        root = self.tree.nodes[0]
-        joint_contingency_vector = self.tree.get_combined_contingency_vector(0)
-        root_arguments = (
-            root.id,
-            joint_contingency_vector,
-            self.tree.build_joint_constraints(0, joint_contingency_vector)
-        )
-
-        max_workers = 4
-        buffer = 2
-        max_outstanding = max_workers + buffer
-
-        with ProcessPoolExecutor(max_workers=max_workers, initializer=init_process, initargs=self.optimizer) as executor:
-            next_ranges = deque()
-            curr_range = None
-
-            # Submit root
-            futures = {
-                executor.submit(solve, *root_arguments): root_arguments
-            }
-
-            while futures:
-                done, _ = wait(futures, return_when=FIRST_COMPLETED)
-
-                # Process completed tasks
-                for fut in done:
-                    futures.pop(fut)
-                    node_id, joint_solution = fut.result()
-
-                    # Update tree
-                    self.tree.set_contingency_vectors(node_id, joint_solution)
-
-                    # Add children range
-                    node = self.tree.nodes[node_id]
-                    next_ranges.append(node.get_children_iter())
-
-                    # Initialize current range if needed
-                    if curr_range is None and next_ranges:
-                        curr_range = next_ranges.popleft()
-
-                # Fill available slots
-                while len(futures) < max_outstanding and curr_range is not None:
-                    try:
-                        node_id = next(curr_range)
-                    except StopIteration:
-                        if next_ranges:
-                            curr_range = next_ranges.popleft()
-                        else:
-                            curr_range = None
-                        continue
-
-                    if self.tree.nodes[node_id].is_leaf():
-                        continue
-
-                    joint_contingency_vector = self.tree.get_combined_contingency_vector(node_id)
-                    child_arguments = (
-                        node_id,
-                        joint_contingency_vector,
-                        self.tree.build_joint_constraints(node_id, joint_contingency_vector)
-                    )
-                    fut = executor.submit(solve, *child_arguments)
-                    futures[fut] = child_arguments
-        return None
-    
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
         
         This method solves optimization problems at each node in the hierarchical tree to ensure
         consistency and adherence to constraints after noise has been added.
         '''
+        print(f'Running estimation phase...')
         t1 = time.time()
-        print(f'\nRunning estimation phase...')
-
-        t2 = time.time()
-        print(f'Processing root node (level 0)... ', end=' ')
-        self.root_estimation_phase()
-        print(f'{time.time() - t2:.2f} seconds.')
-
-        self.subtree_estimation_phase()
-        print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
         
-        return None
+        x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
+            contingency_vector=self.tree.nodes[0].contingency_vector,
+            id_node=self.tree.nodes[0].id,
+            constraints=self.tree.nodes[0].constraints
+        )
+        self.tree.nodes[0].contingency_vector = self.optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            id_node=self.tree.nodes[0].id,
+            constraints=self.tree.nodes[0].constraints
+        )
+
+        for node_id in range(1):
+            if not self.tree.nodes[node_id].is_leaf():
+                joint_contingency_vector = self.tree.get_combined_contingency_vector(node_id)
+                joint_constraints = self.tree.build_joint_constraints(node_id, joint_contingency_vector)
+
+                # Solve for children nodes (joint contingency vector)
+                x_tilde = self.optimizer.non_negative_real_estimation(
+                    contingency_vector=joint_contingency_vector,
+                    id_node=node_id,
+                    constraints=joint_constraints
+                )
+                joint_solution: np.ndarray = self.optimizer.rounding_estimation(
+                    x_tilde=x_tilde,
+                    id_node=node_id,
+                    constraints=joint_constraints
+                )
+
+                self.tree.set_contingency_vectors(node_id, joint_solution)
     
+        print(f'{time.time() - t1:.2f} seconds.')
+        
     def add_noise(self, node: HierarchicalNode, privacy_budget: float) -> None:
         '''Add noise to the node's contingency vector using the specified mechanism.
         Generate the same number of values as the entries in the contingency vector, 
@@ -542,8 +436,8 @@ class TopDown():
 
         self.estimation_phase()
 
-        noisy_data = self.construct_microdata()
-        return noisy_data
+        #noisy_data = self.construct_microdata()
+        #return noisy_data
     
     def check_correctness(self) -> None:
         '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
