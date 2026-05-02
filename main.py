@@ -1,3 +1,5 @@
+import argparse
+
 from topdown import TopDown
 
 # Import constraint building classes
@@ -5,7 +7,7 @@ from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import Equal, NotEqual, TrueExpression
 from constraints.logical_expressions.compound import And, Implies  
 
-def main():
+def main(process_until: str, queries: list[str], user_constraints: bool):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -24,12 +26,13 @@ def main():
     GEO_COLUMNS = ['REGION', 'PROVINCIA', 'COMUNA', 'DC', 'ZC_LOC']
 
     # We will process the data until a specific level of the tree for this test case.
-    PROCESS_UNTIL = 'COMUNA'
-    GEO_COLUMNS_TO_USE = GEO_COLUMNS[:GEO_COLUMNS.index(PROCESS_UNTIL) + 1]
+    PROCESS_UNTIL = process_until
+    PROCESS_UNTIL_idx = GEO_COLUMNS.index(PROCESS_UNTIL)
+    GEO_COLUMNS_TO_USE = GEO_COLUMNS[:PROCESS_UNTIL_idx + 1]
 
     # Define the columns to use that will be queried in each node of the tree.
     # QUERIES = ['P08', 'P09'] # Sex and Age
-    QUERIES = ['P02', 'P03A', 'P03B'] # Viviendas queries
+    QUERIES = queries
 
     ##############################
     # Input and output data path # 
@@ -142,22 +145,23 @@ def main():
     # we use a contextual constraint that will get the real total from the data at runtime (dynamically).
     real_total_constraint = SumEqualRealTotal(expression=TrueExpression())
     # 3 is the level of 'COMUNA' in the tree
-    topdown.set_constraint_to_level(3, real_total_constraint)
+    topdown.set_constraint_to_level(PROCESS_UNTIL_idx, real_total_constraint)
 
     # TODO: Study macros for a better user interface
 
-    # The Census data specifies that if a household was empty when the census was taken,
-    # then the question can't be answeredd. The value 98 is used to indicate that the question
-    # does not apply to that household. Therefore, we need to set the following constraint.
-    # if 'P02' != 1 -> ('P03A' = 98) & ('P03B' = 98) & ('P03C' = 98) & 
-    #                  ('P04' = 98) & ('P05' = 98) & ('CANT_HOG' = 0) & ('CANT_PER' = 0)
-    left_side = NotEqual('P02', 1)
-    #right_side = And(Equal('P03A', 98), Equal('P03B', 98), Equal('P03C', 98), Equal('P04', 98), Equal('P05', 98), Equal('CANT_HOG', 0), Equal('CANT_PER', 0))
-    right_side = And(Equal('P03A', 98), Equal('P03B', 98))
-    VIVIENDAS_CONSTRAINT = Implies(left_side, right_side)
+    if user_constraints: 
+        # The Census data specifies that if a household was empty when the census was taken,
+        # then the question can't be answeredd. The value 98 is used to indicate that the question
+        # does not apply to that household. Therefore, we need to set the following constraint.
+        # if 'P02' != 1 -> ('P03A' = 98) & ('P03B' = 98) & ('P03C' = 98) & 
+        #                  ('P04' = 98) & ('P05' = 98) & ('CANT_HOG' = 0) & ('CANT_PER' = 0)
+        left_side = NotEqual('P02', 1)
+        #right_side = And(Equal('P03A', 98), Equal('P03B', 98), Equal('P03C', 98), Equal('P04', 98), Equal('P05', 98), Equal('CANT_HOG', 0), Equal('CANT_PER', 0))
+        right_side = And(Equal('P03A', 98), Equal('P03B', 98))
+        VIVIENDAS_CONSTRAINT = Implies(left_side, right_side)
 
-    # We will apply this constraint to all levels of the tree.
-    topdown.set_constraint_to_tree(VIVIENDAS_CONSTRAINT)
+        # We will apply this constraint to all levels of the tree.
+        topdown.set_constraint_to_tree(VIVIENDAS_CONSTRAINT)
 
     #######################
     # Additional settings #
@@ -173,8 +177,6 @@ def main():
     DISTANCE_METRIC = None
     if DISTANCE_METRIC: topdown.set_distance_metric(DISTANCE_METRIC)
 
-
-
     # Finally, we can run the TopDown algorithm
     topdown.run()
     
@@ -183,4 +185,27 @@ def main():
     topdown.check_correctness()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--process_until",
+        help="Column of the geographic hierarchy where the tree processing stops",
+        required=True
+    )
+
+    parser.add_argument(
+        "--queries",
+        nargs="+",
+        help="Dataset columns used to create the contingency vector",
+        required=True
+    )
+
+    parser.add_argument(
+        "--user_constraints",
+        action="store_true",
+        help="Whether to consider user constraints during execution",
+    )
+
+    args = parser.parse_args()
+
+    main(args.process_until, args.queries, args.user_constraints)
