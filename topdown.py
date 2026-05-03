@@ -5,7 +5,12 @@ from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 
-from discretegauss import sample_dlaplace, sample_dgauss
+from noisy import ( 
+    sample_dgauss_fast,
+    sample_dlaplace_fast,
+    sample_dgauss_optimized,
+    sample_dlaplace_optimized
+)
 
 from typing import Callable, Dict, List
 import time
@@ -205,9 +210,8 @@ class TopDown():
         Returns:
             np.ndarray: The noisy contingency vector.
         '''
-
-        for i in range(len(contingency_vector)):
-            contingency_vector[i] += self.mechanism(privacy_budget)
+        samples = len(contingency_vector)
+        contingency_vector += self.mechanism(privacy_budget, samples)
         
         return contingency_vector
 
@@ -289,27 +293,29 @@ class TopDown():
         self.privacy_parameters = privacy_parameters
 
     
-    def discrete_gaussian(self, rho: float) -> int:
+    def discrete_gaussian(self, rho: float, samples: int) -> np.ndarray:
         '''Applies discrete Gaussian noise to the contingency vector.
         
         Args:
             rho (float): The privacy parameter.
+            samples (int): Number of samples drawn from the distribution.
         
         Returns:
-            int: The noise value to be added.
+            np.ndarray: An array containing the noisy values.
         '''
-        return sample_dgauss(rho)
+        return sample_dgauss_optimized(rho, samples)
     
-    def discrete_laplace(self, epsilon: float) -> int:
+    def discrete_laplace(self, epsilon: float, samples: int) -> np.ndarray:
         '''Applies Laplace noise to the contingency vector.
         
         Args:
-            epsilon (float): The privacy parameter.
-        
+            epsilon (float): Privacy parameter.
+            samples (int): Number of samples drawn from the distribution.
+
         Returns:
-            int: The noise value to be added.
+            np.ndarray: An array containing the noisy values. 
         '''
-        return sample_dlaplace(1/epsilon)
+        return sample_dlaplace_optimized(1/epsilon, samples)
     
     def set_mechanism(self, mechanism: str) -> None:
         '''Set the noise mechanism to use for adding noise to the data.
