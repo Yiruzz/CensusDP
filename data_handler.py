@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from collections import deque
 
 from itertools import product
 from typing import List, Optional
@@ -131,6 +132,32 @@ class DataHandler:
         contingency_vector = merged['frequency'].to_numpy(dtype=int)
         
         return contingency_vector
+    
+    def convert_tree_representation(self, root: HierarchicalNode) -> List[HierarchicalNode]:
+        '''Flatten the tree into a list using BFS and assign node_id.
+
+        Args:
+            root (HierarchicalNode): A recursive tree.
+        '''
+
+        nodes = []
+        queue = deque([root]) 
+
+        next_id = 0
+
+        while queue:
+            node = queue.popleft()
+
+            node.id = next_id
+            nodes.append(node)
+
+            for child in node.children:
+                child.parent_id = node.id
+                queue.append(child)
+
+            next_id += 1
+
+        return nodes
 
     def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
         '''Build a hierarchical tree based on the hierarchical columns.
@@ -144,6 +171,8 @@ class DataHandler:
         '''
 
         tree = HierarchicalTree()
+        root = tree.nodes[0]
+        curr_level = 0
 
         # Generate the contingency table if not already done
         if self.contingency_df is None:
@@ -151,13 +180,13 @@ class DataHandler:
         
         assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
         # Contingency vector for the root node (entire dataset)
-        tree.root.contingency_vector = self.create_contingency_vector(self.dataframe)
+        root.contingency_vector = self.create_contingency_vector(self.dataframe)
         
         # List of constraints for the root node
         root_contstraints = []
-        if constraints and 0 in constraints:
+        if constraints and curr_level in constraints:
             # Iterate over the constraints for the root node
-            for constraint in constraints[0]:
+            for constraint in constraints[curr_level]:
                 # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
                 match constraint:
                     case ContextualAggregateConstraint():
@@ -166,18 +195,19 @@ class DataHandler:
                 assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
                 root_contstraints.append(constraint.to_constraint(self.contingency_df))
 
-        tree.root.constraints = root_contstraints
+        root.constraints = root_contstraints
 
         # Construct the tree recursively and count the nodes created
-        tree._node_count = self._build_subtree(tree.root, 0, self.dataframe, constraints)
+        tree._node_count = self._build_subtree(root, curr_level, self.dataframe, constraints)
+        tree.nodes = self.convert_tree_representation(tree.nodes[0])
         return tree
     
-    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> int:
+    def _build_subtree(self, parent_node: HierarchicalNode, curr_level: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> int:
         '''Helper method to recursively build the subtree for a given parent node.
         
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
-            level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
+            curr_level (int): An iterator for the current level in the hierarchy. It has an offset of 1.
             data (pd.DataFrame): The subset of data corresponding to the parent node.
             constraints (List[Callable]): List of constraints to apply to each node.
         
@@ -185,12 +215,12 @@ class DataHandler:
             int: The number of nodes in the subtree.
         '''
         # When there are no more levels to process, return the parent node
-        if level_iterator >= len(self.hierarchical_columns):
+        if curr_level >= len(self.hierarchical_columns):
             return 0
         
         n_nodes = 1
         # Get the current hierarchical column to split on
-        current_column = self.hierarchical_columns[level_iterator]
+        current_column = self.hierarchical_columns[curr_level]
         unique_hierarchical_values = data[current_column].unique()
 
         for value in unique_hierarchical_values:
@@ -199,9 +229,9 @@ class DataHandler:
 
             # Prepare constraints for the current level
             level_constraints = []
-            if constraints and level_iterator in constraints:
+            if constraints and curr_level in constraints:
                 # Iterate over the constraints for the current level
-                for constraint in constraints[level_iterator]:
+                for constraint in constraints[curr_level]:
                     # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
                     match constraint:
                         case ContextualAggregateConstraint():
@@ -212,7 +242,7 @@ class DataHandler:
 
 
             # Create a new child node
-            child_node = HierarchicalNode(node_id=value, constraints=level_constraints)
+            child_node = HierarchicalNode(geo_id=value, constraints=level_constraints)
             parent_node.add_child(child_node)
 
             # Create and assign the contingency vector for the child node
@@ -221,7 +251,7 @@ class DataHandler:
             child_node.parent = parent_node
 
             # Recursively build the subtree for the child node
-            n_nodes += self._build_subtree(child_node, level_iterator + 1, filtered_data, constraints)
+            n_nodes += self._build_subtree(child_node, curr_level + 1, filtered_data, constraints)
 
         return n_nodes
     
