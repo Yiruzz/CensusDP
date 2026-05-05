@@ -82,7 +82,7 @@ def main():
     )
 
     # Set the queries to be answered at each node of the tree.
-    topdown.set_query_workload(QueryWorkload().value_counts(QUERY_COLUMNS))
+    topdown.set_query_workload(QueryWorkload().add(col('P02') == 1).add(col('P02') == 2).add(col('P02') == 1 or col('P02') == 2))
 
     ######################################################
     # Differential privacy budget and mechanism settings #

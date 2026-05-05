@@ -25,6 +25,7 @@ class HierarchicalNode:
             hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root
 
             contingency_vector (np.ndarray): Contingency vector for this node.
+            noisy_measurements (np.ndarray): Noisy measurements for this node (Q @ x + noise).
             constraints (List[Callable]): List of constraints for this node.
                                           The constraints are functions that take a contingency vector as input
                                           and return a boolean indicating whether the constraint is satisfied.
@@ -40,9 +41,10 @@ class HierarchicalNode:
         self.hierarchical_path: List[Any] = []
         
         # Data containers
-        self.contingency_vector: np.ndarray = np.array([])
+        self.contingency_vector: np.ndarray = np.array([])  # cell counts x, shape (n_cells,)
+        self.noisy_measurements: Optional[np.ndarray] = None  # y = Q @ x + noise, shape (n_queries,)
         self.constraints: List[Callable] = constraints
-        
+
         # This value is only used to compare distributions between different states of the data
         # e.g., original data vs noisy data
         # It is only relevant when a distance metric is defined by the user

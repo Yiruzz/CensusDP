@@ -93,16 +93,17 @@ class TopDown():
         elif not isinstance(self.Q, np.ndarray):
             # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
             self.Q = np.eye(len(self.data_handler.contingency_df))
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
+        self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         return None
 
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
-        
-        This method adds noise to the data at each node in the hierarchical tree according to the specified
-        privacy parameters and mechanism.
+
+        For each node, computes the query answers Q @ x and adds discrete noise,
+        producing noisy measurements y = Q @ x + noise stored in node.noisy_measurements.
+        The cell counts in node.contingency_vector are left unchanged.
         '''
         t1 = time.time()
         print(f'Running measurement phase...\n')
@@ -111,10 +112,11 @@ class TopDown():
             print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
             privacy_budget = self.privacy_parameters[level]
             for node in nodes:
-                self.add_noise(node.contingency_vector, privacy_budget)
+                true_answers = self.Q @ node.contingency_vector.astype(float)
+                node.noisy_measurements = self.add_noise(true_answers, privacy_budget)
             print(f'{time.time() - t2:.2f} seconds.')
         print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
-        
+
         return None
 
     def estimation_phase(self) -> None:
@@ -131,7 +133,7 @@ class TopDown():
         t2 = time.time()
         print(f'\nProcessing root node (level 0)... ', end=' ')
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=self.tree.root.contingency_vector,
+            noisy_measurements=self.tree.root.noisy_measurements,
             id_node=self.tree.root.id,
             constraints=self.tree.root.constraints,
             query_matrix=self.Q
@@ -154,8 +156,8 @@ class TopDown():
                     break
                 
                 # Solve the optimization problem for the children of the current node
-                vectors_length = self.Q.shape[1]
-                joint_noisy_measurements = np.concatenate([child.contingency_vector for child in node.children])
+                vectors_length = self.Q.shape[1]  # n_cells per child in decision-variable space
+                joint_noisy_measurements = np.concatenate([child.noisy_measurements for child in node.children])
                 # All nodes have the same length of the contingency vector
                 joint_x_length = len(node.children) * vectors_length
 
@@ -204,21 +206,18 @@ class TopDown():
         
         return None
     
-    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: float,) -> np.ndarray:
-        '''Add noise to the contingency vector using the specified mechanism.
-        
+    def add_noise(self, query_answers: np.ndarray, privacy_budget: float) -> np.ndarray:
+        '''Add noise to query answers and return a new array.
+
         Args:
-            contingency_vector (np.ndarray): The original contingency vector.
-            privacy_budget (float): The privacy budget (epsilon) for noise addition.
-        
+            query_answers (np.ndarray): True query answers y = Q @ x, shape (n_queries,).
+            privacy_budget (float): The privacy budget parameter for the noise mechanism.
+
         Returns:
-            np.ndarray: The noisy contingency vector.
+            np.ndarray: Noisy query answers y + noise, same shape as input.
         '''
-
-        for i in range(len(contingency_vector)):
-            contingency_vector[i] += self.mechanism(privacy_budget)
-
-        return contingency_vector
+        noise = np.array([self.mechanism(privacy_budget) for _ in range(len(query_answers))])
+        return query_answers + noise
 
     def construct_microdata(self) -> pd.DataFrame:
         '''Construct the differentially private microdata from the hierarchical tree.
