@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from collections import deque
 
+from multiprocessing import shared_memory
 from itertools import product
 from typing import List, Optional
 from pathlib import Path
@@ -27,6 +28,8 @@ class DataHandler:
             
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
             contingency_df (Optional[pd.DataFrame]): DataFrame to hold the contingency table.    
+            contingency_df_length: Optional[int] = Length of the contingency dataframe.
+            dtype: str = NumPy data type used for all arrays.
 
             query_columns (List[str]): List of columns to use for generating the contingency table.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
@@ -47,6 +50,8 @@ class DataHandler:
         # Used to store and have an order on each unique combination of attributes.
         # The contingency vectors will have the same order of this dataframe.
         self.contingency_df: Optional[pd.DataFrame] = None
+        self.contingency_df_length: Optional[pd.DataFrame] = None
+        self.dtype: str = 'int64'
 
         # Hierarchical columns (first value highest hierarchy, last lowest).
         self.hierarchical_columns: List[str] = []
@@ -69,6 +74,7 @@ class DataHandler:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns, nrows=nrows)
         else:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
+
         return self.dataframe
 
     def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None, cols: list[str] = None) -> None:
@@ -104,6 +110,8 @@ class DataHandler:
         self.contingency_df.sort_values(by=query_columns, inplace=True)
         self.contingency_df.reset_index(drop=True, inplace=True)
 
+        self.contingency_df_length = self.contingency_df.shape[0]
+
         print("Contingency DataFrame generated with shape:", self.contingency_df.shape, "in", end=' ')
 
         return self.contingency_df
@@ -134,13 +142,30 @@ class DataHandler:
         
         return contingency_vector
     
-    def convert_tree_representation(self, root: HierarchicalNode) -> List[HierarchicalNode]:
-        '''Flatten the tree into a list using BFS and assign node_id.
+    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int) -> tuple[list[HierarchicalNode], np.ndarray, memoryview]:
+        '''Retrieve the references of all nodes of the tree to facilitate access. 
+        Also create a shared memory space with all contingency vectors copied,
+        enabling multiprocessing without duplicating data.
 
         Args:
-            root (HierarchicalNode): A recursive tree.
-        '''
+            root (HierarchicalNode): A hierarchical tree.
+            n_nodes (int): Number of nodes, corresponding to the number of rows in the shared memory space.
 
+        Return:
+            tuple[list[HierarchicalNode], np.ndarray, memoryview]: A tuple containing all node references,
+                                                                the NumPy view over the shared memory buffer,
+                                                                and the memoryview for accessing the shared memory.
+        '''
+        shape = (n_nodes, self.contingency_df_length)
+        size = int(np.prod(shape) * np.dtype(self.dtype).itemsize)
+
+        # Create share memory space  
+        shm = shared_memory.SharedMemory(create=True, size=size)
+
+        # Create view to manipulate shared memory
+        arr = np.ndarray(shape, dtype=self.dtype, buffer=shm.buf)
+
+        # Retrieve node references
         nodes = []
         queue = deque([root]) 
 
@@ -149,7 +174,12 @@ class DataHandler:
         while queue:
             node = queue.popleft()
 
+            # Assign node IDs using BFS order
             node.id = next_id
+
+            # Copy contingency vector into corresponding shared memory row
+            arr[node.id, :] = node.contingency_vector[:]
+            del node.contingency_vector
             nodes.append(node)
 
             for child in node.children:
@@ -157,8 +187,7 @@ class DataHandler:
                 queue.append(child)
 
             next_id += 1
-
-        return nodes
+        return nodes, arr, shm
 
     def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
         '''Build a hierarchical tree based on the hierarchical columns.
@@ -182,7 +211,7 @@ class DataHandler:
         assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
         # Contingency vector for the root node (entire dataset)
         root.contingency_vector = self.create_contingency_vector(self.dataframe)
-        
+
         # List of constraints for the root node
         root_contstraints = []
         if constraints and curr_level in constraints:
@@ -199,11 +228,12 @@ class DataHandler:
         root.constraints = root_contstraints
 
         # Construct the tree recursively and count the nodes created
+        # Then change the representation to array and create a share memory space
         tree._node_count = self._build_subtree(root, curr_level, self.dataframe, constraints)
-        tree.nodes = self.convert_tree_representation(tree.nodes[0])
+        tree.nodes, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(root, tree._node_count)
         return tree
     
-    def _build_subtree(self, parent_node: HierarchicalNode, curr_level: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> int:
+    def _build_subtree(self, parent_node: HierarchicalNode, curr_level: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> None:
         '''Helper method to recursively build the subtree for a given parent node.
         
         Args:
@@ -211,15 +241,13 @@ class DataHandler:
             curr_level (int): An iterator for the current level in the hierarchy. It has an offset of 1.
             data (pd.DataFrame): The subset of data corresponding to the parent node.
             constraints (List[Callable]): List of constraints to apply to each node.
-        
-        Returns:
-            int: The number of nodes in the subtree.
         '''
+        n_nodes = 1
+
         # When there are no more levels to process, return the parent node
         if curr_level >= len(self.hierarchical_columns):
-            return 0
+            return n_nodes
         
-        n_nodes = 1
         # Get the current hierarchical column to split on
         current_column = self.hierarchical_columns[curr_level]
         unique_hierarchical_values = data[current_column].unique()
@@ -241,7 +269,6 @@ class DataHandler:
                     assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
                     level_constraints.append(constraint.to_constraint(self.contingency_df))
 
-
             # Create a new child node
             child_node = HierarchicalNode(geo_id=value, constraints=level_constraints)
             parent_node.add_child(child_node)
@@ -249,11 +276,8 @@ class DataHandler:
             # Create and assign the contingency vector for the child node
             child_node.contingency_vector = self.create_contingency_vector(filtered_data)
 
-            child_node.parent = parent_node
-
             # Recursively build the subtree for the child node
             n_nodes += self._build_subtree(child_node, curr_level + 1, filtered_data, constraints)
-
         return n_nodes
     
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
@@ -278,14 +302,14 @@ class DataHandler:
         microdata_parts = []
 
         for leaf in list(tree.iterate_by_levels())[-1][1]:
-
             # Generate rows associated with query values.
             # Select only positive frequencies.
-            nonzero_mask = leaf.contingency_vector > 0
+            contingency_vector = tree._contingency_vectors[leaf.id]
+            nonzero_mask = contingency_vector > 0
 
             # Filter combinations to avoid processing zero-frequency rows.
             filtered_query_values = query_values[nonzero_mask]
-            filtered_counts = leaf.contingency_vector[nonzero_mask]
+            filtered_counts = contingency_vector[nonzero_mask]
 
             # Repeat each combination according to its frequency.
             expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)

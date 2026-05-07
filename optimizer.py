@@ -159,5 +159,5 @@ class OptimizationModel:
         y_estimated_array = np.array([pyo.value(instance.y[i]) for i in range(n)])
 
         # Final result: floor + binary decisions
-        return x_floor + y_estimated_array
+        return (x_floor + y_estimated_array).astype(np.int64)
 

@@ -109,7 +109,7 @@ class TopDown():
             print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
             privacy_budget = self.privacy_parameters[level]
             for node in nodes:
-                self.add_noise(node.contingency_vector, privacy_budget)
+                self.add_noise(node.id, privacy_budget)
             print(f'{time.time() - t2:.2f} seconds.')
         print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
         
@@ -128,13 +128,14 @@ class TopDown():
         # Does not require consistency adjustments
         t2 = time.time()
         print(f'\nProcessing root node (level 0)... ', end=' ')
-        root = self.tree.nodes[0]
+        idx = 0
+        root = self.tree.nodes[idx]
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            contingency_vector=root.contingency_vector,
+            contingency_vector=self.tree._contingency_vectors[idx],
             id_node=root.id,
             constraints=root.constraints
         )
-        root.contingency_vector = self.optimizer.rounding_estimation(
+        self.tree._contingency_vectors[idx] = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
             id_node=root.id,
             constraints=root.constraints
@@ -152,10 +153,10 @@ class TopDown():
                     break
                 
                 # Solve the optimization problem for the children of the current node
-                joint_contingency_vector = node.combine_child_vectors()
+                joint_contingency_vector = self.tree.combine_vectors(node)
 
                 # Transform individual constraints for joint vector
-                joint_constraints = node.combine_child_constraints(joint_contingency_vector)
+                joint_constraints = self.tree.combine_child_constraints(node, joint_contingency_vector)
                     
                 # Solve for children nodes (joint contingency vector)
                 x_tilde = self.optimizer.non_negative_real_estimation(
@@ -170,27 +171,25 @@ class TopDown():
                 )
 
                 # Save the solution back to each child node
-                node.update_child_vectors(joint_solution)
+                self.tree.update_vectors(node, joint_solution)
 
             if len(nodes[0].children) != 0: print(f'{time.time() - t2:.2f} seconds.')
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
         
         return None
     
-    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: float,) -> np.ndarray:
+    def add_noise(self, node_id: int, privacy_budget: float) -> np.ndarray:
         '''Add noise to the contingency vector using the specified mechanism.
         
         Args:
-            contingency_vector (np.ndarray): The original contingency vector.
+            node_id (int): The node id to access in share memory array.
             privacy_budget (float): The privacy budget (epsilon) for noise addition.
         
         Returns:
             np.ndarray: The noisy contingency vector.
         '''
-        samples = len(contingency_vector)
-        contingency_vector += self.mechanism(privacy_budget, samples)
-        
-        return contingency_vector
+        samples = self.tree._contingency_vectors.shape[1]
+        self.tree._contingency_vectors[node_id] += self.mechanism(privacy_budget, samples)
 
     def construct_microdata(self) -> pd.DataFrame:
         '''Construct the differentially private microdata from the hierarchical tree.
@@ -343,14 +342,15 @@ class TopDown():
         '''
         if node.children:
             # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = np.sum(node.contingency_vector)
+            node_sum = sum(self.tree._contingency_vectors[node.id])
             children_sum = 0
             for child in node.children:
-                children_sum += np.sum(child.contingency_vector)
+                children_sum += np.sum(self.tree._contingency_vectors[child.id])
 
-            if node_sum != children_sum:            
+            if node_sum != children_sum:      
+                print(node_sum, children_sum)      
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {node.contingency_vector}')
+                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
                 raise ValueError('Tree correctness check failed.')
             else:
                 for child in node.children:
