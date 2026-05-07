@@ -4,7 +4,7 @@ from hierarchical_tree import HierarchicalTree
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from queries import QueryWorkload, QueryGraph
+from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
 from typing import Callable, Dict, List, Optional, Union
@@ -66,7 +66,7 @@ class TopDown():
         self.privacy_mechanism: PrivacyMechanism = privacy_mechanism
 
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
-        self.num_query_colors: int = 1  # set in initialize() once Q is materialized
+        self.query_sensitivity: int = 1  # L1 sensitivity of Q; computed in initialize() once Q is materialized
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
@@ -100,12 +100,12 @@ class TopDown():
         elif not isinstance(self.Q, np.ndarray):
             # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
             self.Q = np.eye(len(self.data_handler.contingency_df))
-        # Privacy guarantees rely on Q being binary (sensitivity 1 within disjoint color classes).
+        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
+        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
         assert np.all((self.Q == 0) | (self.Q == 1)), \
-            "Q must be binary (entries in {0,1}) for sensitivity-1 privacy guarantees."
-        # Compute number of color classes to know how to split the budget in the measurement phase.
-        self.num_query_colors = QueryGraph.compute_num_colors(self.Q)
-        print(f'\n  Query conflict graph: n_queries={self.Q.shape[0]}, num_colors={self.num_query_colors}')
+            "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+        self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
         self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
         print(f'{time.time() - t1:.2f} seconds.\n')
@@ -115,21 +115,19 @@ class TopDown():
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
 
-        For each node, computes y = Q @ x and adds discrete noise to produce noisy
-        measurements stored in node.noisy_measurements. node.contingency_vector is
-        unchanged. Noise sampling is delegated to self.privacy_mechanism, which
-        applies the per-color-class budget split (level_param / num_query_colors)
-        internally.
+        For each node, computes y = Q @ x and adds discrete noise calibrated to the 
+        sensitivity of Q (max column sum, computed once in initialize()). The noisy 
+        answers are stored in node.noisy_measurements, node.contingency_vector is unchanged.
         '''
         t1 = time.time()
-        print(f'Running measurement phase (num_query_colors={self.num_query_colors})...\n')
+        print(f'Running measurement phase (query_sensitivity={self.query_sensitivity})...\n')
         for level, nodes in self.tree.iterate_by_levels():
             t2 = time.time()
             print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
             for node in nodes:
                 true_answers = self.Q @ node.contingency_vector.astype(float)
                 noise = np.array([
-                    self.privacy_mechanism.sample_noise(level, self.num_query_colors)
+                    self.privacy_mechanism.sample_noise(level, self.query_sensitivity)
                     for _ in range(len(true_answers))
                 ])
                 node.noisy_measurements = true_answers + noise

@@ -8,7 +8,6 @@ from .expression import (
     InExpr,
 )
 from .query_workload import QueryWorkload
-from .query_graph import QueryGraph
 
 __all__ = [
     'col',
@@ -19,5 +18,4 @@ __all__ = [
     'NotExpr',
     'InExpr',
     'QueryWorkload',
-    'QueryGraph',
 ]
