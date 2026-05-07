@@ -4,7 +4,7 @@ from hierarchical_tree import HierarchicalTree
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from queries import QueryWorkload
+from queries import QueryWorkload, QueryGraph
 
 from discretegauss import sample_dlaplace, sample_dgauss
 
@@ -60,6 +60,7 @@ class TopDown():
         self.privacy_parameters: List[float] = []
         self.mechanism: Callable = lambda x: x  # Default to identity function
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
+        self.num_query_colors: int = 1  # set in initialize() once Q is materialized
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
@@ -93,6 +94,9 @@ class TopDown():
         elif not isinstance(self.Q, np.ndarray):
             # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
             self.Q = np.eye(len(self.data_handler.contingency_df))
+        # Compute number of color classes to know how to split the budget in the measurement phase.
+        self.num_query_colors = QueryGraph.compute_num_colors(self.Q)
+        print(f'\n  Query conflict graph: n_queries={self.Q.shape[0]}, num_colors={self.num_query_colors}')
         self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
@@ -104,16 +108,23 @@ class TopDown():
         For each node, computes the query answers Q @ x and adds discrete noise,
         producing noisy measurements y = Q @ x + noise stored in node.noisy_measurements.
         The cell counts in node.contingency_vector are left unchanged.
+
+        The per-level privacy budget is split evenly across the color classes of
+        the query conflict graph. Within a class queries are pairwise cell-disjoint
+        (parallel composition), across classes we compose sequentially. Each query
+        therefore receives privacy_parameters[level] / num_query_colors.
         '''
         t1 = time.time()
-        print(f'Running measurement phase...\n')
+        print(f'Running measurement phase (num_query_colors={self.num_query_colors})...\n')
         for level, nodes in self.tree.iterate_by_levels():
             t2 = time.time()
-            print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
-            privacy_budget = self.privacy_parameters[level]
+            level_budget = self.privacy_parameters[level]
+            per_query_budget = level_budget / self.num_query_colors
+            print(f'Processing level {level} with {len(nodes)} nodes '
+                  f'(level budget={level_budget:.4g}, per-query={per_query_budget:.4g})...', end=' ')
             for node in nodes:
                 true_answers = self.Q @ node.contingency_vector.astype(float)
-                node.noisy_measurements = self.add_noise(true_answers, privacy_budget)
+                node.noisy_measurements = self.add_noise(true_answers, per_query_budget)
             print(f'{time.time() - t2:.2f} seconds.')
         print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
 
@@ -211,7 +222,9 @@ class TopDown():
 
         Args:
             query_answers (np.ndarray): True query answers y = Q @ x, shape (n_queries,).
-            privacy_budget (float): The privacy budget parameter for the noise mechanism.
+            privacy_budget (float): Per-query privacy parameter. Callers (measurement_phase)
+                are responsible for splitting the per-level budget across color classes
+                of the query conflict graph before passing it here.
 
         Returns:
             np.ndarray: Noisy query answers y + noise, same shape as input.
