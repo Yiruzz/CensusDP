@@ -1,9 +1,12 @@
 from topdown import TopDown
 
+# Import privacy mechanism classes
+from privacy import PureDP, ZCDP, ApproximateDP
+
 # Import constraint building classes
 from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import Equal, NotEqual, TrueExpression
-from constraints.logical_expressions.compound import And, Implies  
+from constraints.logical_expressions.compound import And, Implies
 
 # Import query building classes
 from queries import QueryWorkload, col
@@ -70,11 +73,32 @@ def main():
     else:
         SOLVER_OPTIONS = {}
 
+    ######################################################
+    # Differential privacy budget and mechanism settings #
+    ######################################################
+
+    # The privacy budget needs to be defined for each level of the tree, using a list.
+    # The tree has len(hierarchy) + 1 levels (root + one per hierarchical column).
+    total_privacy_budget = 10
+    n_levels = len(GEO_COLUMNS_TO_USE) + 1
+
+    # We will consider and exponential allocation of the privacy budget across the levels of the tree.
+    aux = sum(2**i for i in range(n_levels))
+    # Privacy parameters for the noise generation. First value for root, last for leaves.
+    PRIVACY_PARAMETERS = [(total_privacy_budget/aux)*(2**i) for i in range(n_levels)]
+
+    # Privacy variant. Choose ONE:
+    #   - PureDP(epsilons)              ε per tree level (Laplace mechanism)
+    #   - ZCDP(rhos)                    ρ per tree level (discrete Gaussian, ρ-zCDP linear composition)
+    #   - ApproximateDP(rhos, delta=δ)  ρ per tree level + global δ (zCDP under the hood, reports (ε, δ)-DP)
+    PRIVACY_MECHANISM = PureDP(PRIVACY_PARAMETERS)
+
     # With the TopDown class instantiated, we can set all the parameters
     topdown = TopDown(
         data_path=DATA_PATH_VIVIENDAS,
         hierarchy=GEO_COLUMNS_TO_USE,
         query_columns=QUERY_COLUMNS,
+        privacy_mechanism=PRIVACY_MECHANISM,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
         optimizer=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
@@ -83,28 +107,6 @@ def main():
 
     # Set the queries to be answered at each node of the tree.
     topdown.set_query_workload(QueryWorkload().add(col('P02') == 1).add(col('P02') == 2).add(col('P02') == 1 or col('P02') == 2))
-
-    ######################################################
-    # Differential privacy budget and mechanism settings #
-    ######################################################
-
-    # The privact budget needs to be defined for each level of the tree, using a list.
-    # In this case, we will use a tree with 6 levels, so we split the total budget in 6 parts.
-    # Privacy parameter to use for the whole algorithm.
-    total_privacy_budget = 10
-    n_levels = 6
-
-    # We will consider and exponential allocation of the privacy budget across the levels of the tree.
-    aux = 0
-    for i in range(n_levels):
-        aux += (2**i)
-    # Privacy parameters for the noise generation. First value for root, last for leaves.
-    PRIVACY_PARAMETERS = [(total_privacy_budget/aux)*(2**i) for i in range(n_levels)]
-    topdown.set_privacy_parameters(PRIVACY_PARAMETERS)
-
-    # Noise mechanism to use (discrete_laplace or discrete_gaussian).
-    MECHANISM = 'discrete_laplace'
-    topdown.set_mechanism(MECHANISM)
 
     ####################
     # Edit Constraints #
