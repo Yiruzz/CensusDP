@@ -208,7 +208,7 @@ class TopDown():
 
         print(f'Writing noisy data to {self.data_handler.output_path}...', end=' ')
         t1 = time.time()
-        self.data_handler.write_data(noisy_df)
+        self.data_handler.write_data(data=noisy_df, cols=self.hierarchical_columns+self.query_columns)
         print(f'{time.time() - t1:.2f} seconds.\n')
         return noisy_df
 

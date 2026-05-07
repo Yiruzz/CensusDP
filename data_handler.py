@@ -71,14 +71,15 @@ class DataHandler:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
         return self.dataframe
 
-    def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None) -> None:
+    def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None, cols: list[str] = None) -> None:
         '''Write the processed data to the output_path.
         
         Args:
             data (pd.DataFrame): DataFrame containing the processed data to write.
             out_path (Optional[str]): Optional path to save the processed data. If None, use self.output_path.
+            cols (Optional[list[str]]): Optional columns to write. Useful to avoid reordering the DataFrame.
         '''
-        data.to_csv((out_path or self.output_path), index=False)
+        data.to_csv((out_path or self.output_path), columns=cols,  index=False)
     
     def generate_contingency_dataframe(self, query_columns: List[str]) -> pd.DataFrame:
         '''Generate a contingency dataframe from the loaded data.
@@ -267,35 +268,44 @@ class DataHandler:
         Returns:
             pd.DataFrame: The reconstructed microdata.
         '''
-        microdata_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
-        for leaf in list(tree.iterate_by_levels())[-1][1]:
-            # Create a Diccionary to store the microdata for the current node
-            leaf_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
-            
-            assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-            # TODO: See if this can be optimized further. Iterrows is slow, but since the data type can vary, it is not trivial to vectorize.
-            for index, (_, row) in enumerate(self.contingency_df.iterrows()):
-                for col in self.query_columns:
-                    # Add the value of the row[col] node.contingency_vector[index] times to the dictionary
-                    leaf_dict[col].extend(np.repeat(row[col], leaf.contingency_vector[index]))
+        
+        assert self.contingency_df is not None, ("Contingency DataFrame is not generated. Call generate_contingency_table first.")
 
-            # Add the hierarchical information for the current node
-            # Determine how many microdata rows this leaf contributes (based on query columns)
-            leaf_size = len(leaf_dict[self.query_columns[0]])
-            # Offset to track the level in the hierarchy from top to bottom
+        # Get all possible query column combinations.
+        query_values = self.contingency_df[self.query_columns].to_numpy()
+
+        # Store partial DataFrames generated for each leaf.
+        microdata_parts = []
+
+        for leaf in list(tree.iterate_by_levels())[-1][1]:
+
+            # Generate rows associated with query values.
+            # Select only positive frequencies.
+            nonzero_mask = leaf.contingency_vector > 0
+
+            # Filter combinations to avoid processing zero-frequency rows.
+            filtered_query_values = query_values[nonzero_mask]
+            filtered_counts = leaf.contingency_vector[nonzero_mask]
+
+            # Repeat each combination according to its frequency.
+            expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
+
+            # Create partial DataFrame for the current leaf.
+            leaf_df = pd.DataFrame(expanded_rows, columns=self.query_columns)
+
+            # Generate columns associated with hierarchical values.
+            # Skip the root node because all records belong to it.
             current_level = 0
-            # We do not include the root node in the hierarchical path as it is redundant in the final
-            # data because the root is the highest level of the hierarchy and all data belongs to it
             for hierarchical_value in leaf.hierarchical_path[1:]:
-                leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(hierarchical_value, leaf_size))
+                # Repeat the hierarchical value for all rows.
+                leaf_df[self.hierarchical_columns[current_level]] = hierarchical_value
+
                 current_level += 1
             
-            # Also don't forget to add the information of the leaf node itself
-            leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(leaf.id, leaf_size))
+            # Add the leaf node identifier.
+            leaf_df[self.hierarchical_columns[current_level]] = leaf.geo_id
+            microdata_parts.append(leaf_df)
 
-            # Merge the leaf_dict into microdata_dict by concatenating lists for duplicate keys
-            for key, values in leaf_dict.items():
-                microdata_dict[key].extend(values)
-
-        return pd.DataFrame(microdata_dict)
+        microdata = pd.concat(microdata_parts, ignore_index=True)
+        return microdata
 
