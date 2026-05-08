@@ -129,10 +129,17 @@ class TopDown():
                                            self.data_handler.dtype)) as executor:
             
             chunk_size = self.tree._node_count  // self.workers
+            rest = self.tree._node_count  % self.workers
             samples = self.data_handler.contingency_df_length
-            temp = list(range(0, self.tree._node_count, chunk_size))
-            temp[-1] = self.tree._node_count
-        
+            temp = []
+
+            start = 0
+            while start <= self.tree._node_count:
+                temp.append(start)
+                add = 1 if rest>0 else 0
+                start += (chunk_size+add)
+                rest -= 1
+
             futures = []
             for i in range(self.workers):
                 # TODO: Pass mechanism and privacy_parameters
