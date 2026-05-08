@@ -12,9 +12,23 @@ from noisy import (
     sample_dlaplace_optimized
 )
 
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import shared_memory, get_context
 from typing import Callable, Dict, List
 import time
 
+def attach_memory(name, shape, dtype):
+    global shm, arr
+    shm = shared_memory.SharedMemory(name)
+    arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+
+def add_noise(start, end, samples, privacy_budget):
+    idx = start
+    while idx < end:    
+        arr[idx] += sample_dgauss_optimized(privacy_budget, samples)
+        idx += 1
+    shm.close()
+    return 0
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -68,6 +82,8 @@ class TopDown():
 
         self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
         self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options, optimizer_path)
+
+        self.workers: int = 4
         
         #self.constraints: List[List[Callable]] = []
         # self.processed_data: pd.DataFrame = None
@@ -104,16 +120,31 @@ class TopDown():
         '''
         t1 = time.time()
         print(f'Running measurement phase...\n')
-        for level, nodes in self.tree.iterate_by_levels():
-            t2 = time.time()
-            print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
-            privacy_budget = self.privacy_parameters[level]
-            for node in nodes:
-                self.add_noise(node.id, privacy_budget)
-            print(f'{time.time() - t2:.2f} seconds.')
-        print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
+
+        #for node_id in range(self.tree._node_count):
+        #    self.tree._contingency_vectors[node_id] += sample_dlaplace_optimized(1.0, self.data_handler.contingency_df_length)
+        #print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
         
-        return None
+        # Create a pool with process
+        with ProcessPoolExecutor(max_workers=self.workers,  mp_context=get_context("spawn"),
+                                 initializer=attach_memory,
+                                 initargs=(self.tree._contingency_vectors_shm.name,
+                                           (self.tree._node_count, self.data_handler.contingency_df_length),
+                                           self.data_handler.dtype)) as executor:
+            
+            chunk_size = self.tree._node_count  // self.workers
+            samples = self.data_handler.contingency_df_length
+            temp = list(range(0, self.tree._node_count, chunk_size))
+            temp[-1] = self.tree._node_count
+        
+            futures = []
+            for i in range(self.workers):
+                futures.append(executor.submit(add_noise, temp[i], temp[i+1], samples, self.privacy_parameters[0]))
+            
+            for f in futures:
+                f.result()
+
+        print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -177,19 +208,6 @@ class TopDown():
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
         
         return None
-    
-    def add_noise(self, node_id: int, privacy_budget: float) -> np.ndarray:
-        '''Add noise to the contingency vector using the specified mechanism.
-        
-        Args:
-            node_id (int): The node id to access in share memory array.
-            privacy_budget (float): The privacy budget (epsilon) for noise addition.
-        
-        Returns:
-            np.ndarray: The noisy contingency vector.
-        '''
-        samples = self.tree._contingency_vectors.shape[1]
-        self.tree._contingency_vectors[node_id] += self.mechanism(privacy_budget, samples)
 
     def construct_microdata(self) -> pd.DataFrame:
         '''Construct the differentially private microdata from the hierarchical tree.
