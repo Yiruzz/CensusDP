@@ -121,10 +121,6 @@ class TopDown():
         t1 = time.time()
         print(f'Running measurement phase...\n')
 
-        #for node_id in range(self.tree._node_count):
-        #    self.tree._contingency_vectors[node_id] += sample_dlaplace_optimized(1.0, self.data_handler.contingency_df_length)
-        #print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
-        
         # Create a pool with process
         with ProcessPoolExecutor(max_workers=self.workers,  mp_context=get_context("spawn"),
                                  initializer=attach_memory,
@@ -139,6 +135,7 @@ class TopDown():
         
             futures = []
             for i in range(self.workers):
+                # TODO: Pass mechanism and privacy_parameters
                 futures.append(executor.submit(add_noise, temp[i], temp[i+1], samples, self.privacy_parameters[0]))
             
             for f in futures:
