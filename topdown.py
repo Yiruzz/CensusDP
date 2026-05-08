@@ -5,12 +5,7 @@ from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 
-from noisy import ( 
-    sample_dgauss_fast,
-    sample_dlaplace_fast,
-    sample_dgauss_optimized,
-    sample_dlaplace_optimized
-)
+import noisy
 
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import shared_memory, get_context
@@ -22,10 +17,11 @@ def attach_memory(name, shape, dtype):
     shm = shared_memory.SharedMemory(name)
     arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
 
-def add_noise(start, end, samples, privacy_budget):
+def add_noise(start, end, sampler_name, samples, privacy_budget, sensibility=1):
+    sampler = getattr(noisy,sampler_name)
     idx = start
-    while idx < end:    
-        arr[idx] += sample_dgauss_optimized(privacy_budget, samples)
+    while idx < end: 
+        arr[idx] += sampler(sensibility/privacy_budget, samples)
         idx += 1
     shm.close()
     return 0
@@ -110,8 +106,6 @@ class TopDown():
         self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
-        return None
-
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
         
@@ -128,8 +122,12 @@ class TopDown():
                                            (self.tree._node_count, self.data_handler.contingency_df_length),
                                            self.data_handler.dtype)) as executor:
             
+            # TODO: change form to construct chunks, for example, considering
+            # a constanst value of nodes like 1000. This form if occurs a exception,
+            # can repeat the chunk.
             chunk_size = self.tree._node_count  // self.workers
             rest = self.tree._node_count  % self.workers
+            sampler_name = self.mechanism.__name__
             samples = self.data_handler.contingency_df_length
             temp = []
 
@@ -142,8 +140,8 @@ class TopDown():
 
             futures = []
             for i in range(self.workers):
-                # TODO: Pass mechanism and privacy_parameters
-                futures.append(executor.submit(add_noise, temp[i], temp[i+1], samples, self.privacy_parameters[0]))
+                # TODO: Pass privacy_parameters
+                futures.append(executor.submit(add_noise, temp[i], temp[i+1], sampler_name, samples, self.privacy_parameters[0]))
             
             for f in futures:
                 f.result()
@@ -289,31 +287,6 @@ class TopDown():
             privacy_parameters (List[float]): List of privacy parameters (epsilon) for each level.
         '''
         self.privacy_parameters = privacy_parameters
-
-    
-    def discrete_gaussian(self, rho: float, samples: int) -> np.ndarray:
-        '''Applies discrete Gaussian noise to the contingency vector.
-        
-        Args:
-            rho (float): The privacy parameter.
-            samples (int): Number of samples drawn from the distribution.
-        
-        Returns:
-            np.ndarray: An array containing the noisy values.
-        '''
-        return sample_dgauss_optimized(rho, samples)
-    
-    def discrete_laplace(self, epsilon: float, samples: int) -> np.ndarray:
-        '''Applies Laplace noise to the contingency vector.
-        
-        Args:
-            epsilon (float): Privacy parameter.
-            samples (int): Number of samples drawn from the distribution.
-
-        Returns:
-            np.ndarray: An array containing the noisy values. 
-        '''
-        return sample_dlaplace_optimized(1/epsilon, samples)
     
     def set_mechanism(self, mechanism: str) -> None:
         '''Set the noise mechanism to use for adding noise to the data.
@@ -323,9 +296,9 @@ class TopDown():
         '''
         match mechanism:
             case 'discrete_laplace':
-                self.mechanism = self.discrete_laplace
+                self.mechanism = noisy.sample_dlaplace_optimized
             case 'discrete_gaussian':
-                self.mechanism = self.discrete_gaussian
+                self.mechanism = noisy.sample_dgauss_optimized
             case _:
                  raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
 
