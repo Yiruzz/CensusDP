@@ -22,21 +22,25 @@ class HierarchicalTree:
      /|\   \
      
     '''
-    def __init__(self, root_id: int = 0, constraints: list[Callable] = []) -> None:
+    def __init__(self, root_id: int = 0, level: int = 0, constraints: list[Callable] = []) -> None:
         """
         Initialize the hierarchical tree with a root node.
         
         Args:
-            root_id: ID for the root node
-            constraints: Optional constraints for the root node
+            root_id (int): ID for the root node.
+            level (int): Level of the root node.
+            constraints (int): Optional constraints for the root node.
 
         Attributes:
             nodes (List[HierarchicalNode]): The nodes of the tree.
+            _node_count (int): Number of nodes in the tree.
+            _levels (List[int]): List where each index represents a level, and the value indicates the node index where that level starts.
             _node_count (int): Internal counter to keep track of the number of nodes in the tree.
             _contingency_vectors_shm (Optional[str]): Name of the shared memory buffer where contingency vectors are stored.
         """
-        self.nodes = [HierarchicalNode(geo_id=root_id, constraints=constraints)]
+        self.nodes = [HierarchicalNode(geo_id=root_id, level=level, constraints=constraints)]
         self._node_count = 1
+        self._levels = [level]
         self._contingency_vectors = None
         self._contingency_vectors_shm = None
     

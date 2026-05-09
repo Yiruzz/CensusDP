@@ -9,7 +9,7 @@ import noisy
 
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import shared_memory, get_context
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Tuple
 import time
 
 def attach_memory(name, shape, dtype):
@@ -17,14 +17,27 @@ def attach_memory(name, shape, dtype):
     shm = shared_memory.SharedMemory(name)
     arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
 
-def add_noise(start, end, sampler_name, samples, privacy_budget, sensibility=1):
-    sampler = getattr(noisy,sampler_name)
-    idx = start
-    while idx < end: 
-        arr[idx] += sampler(sensibility/privacy_budget, samples)
-        idx += 1
+def add_noise(start: int, end: int, sampler_name: str, samples: int, privacy_budget: List[Tuple[int, float]], sensibility: int = 1) -> Tuple[int, int, float]:
+    sampler = getattr(noisy, sampler_name)
+
+    idx_privacy_budget = 0
+    next_change = (privacy_budget[idx_privacy_budget + 1][0] if len(privacy_budget) > 1 else float("inf"))
+    privacy_budget_value = privacy_budget[idx_privacy_budget][1]
+
+    t1 = time.time()
+    for idx in range(start, end):
+        if idx == next_change:
+            idx_privacy_budget += 1
+            privacy_budget_value = privacy_budget[idx_privacy_budget][1]
+
+            if idx_privacy_budget + 1 < len(privacy_budget):
+                next_change = privacy_budget[idx_privacy_budget + 1][0]
+            else:
+                next_change = float("inf")
+        arr[idx] += sampler(sensibility / privacy_budget_value, samples)
+
     shm.close()
-    return 0
+    return start, end, (time.time()-t1) 
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -115,6 +128,40 @@ class TopDown():
         t1 = time.time()
         print(f'Running measurement phase...\n')
 
+        # TODO: change form to construct chunks, for example, considering
+        # a constanst value of nodes like 1000. This form if occurs a exception,
+        # can repeat the chunk.
+        sampler_name = self.mechanism.__name__
+        samples = self.data_handler.contingency_df_length
+        chunk_size = self.tree._node_count // self.workers
+        rest = self.tree._node_count % self.workers
+
+        chunks = []
+        start = 0
+        for i in range(self.workers):
+            extra = 1 if i < rest else 0
+            end = start + chunk_size + extra
+            chunks.append((start, end))
+            start = end
+
+        privacy_parameters_chunk = []
+        max_level = 1 + len(self.hierarchical_columns)
+
+        for start, end in chunks:
+            privacy_parameters = []
+            idx = start
+            level = self.tree.nodes[idx].level
+
+            while idx < end and level < max_level:
+                privacy_parameters.append((idx, self.privacy_parameters[level]))
+
+                level += 1
+                if level >= max_level:
+                    break
+
+                idx = self.tree._levels[level]
+            privacy_parameters_chunk.append(privacy_parameters)
+
         # Create a pool with process
         with ProcessPoolExecutor(max_workers=self.workers,  mp_context=get_context("spawn"),
                                  initializer=attach_memory,
@@ -122,29 +169,15 @@ class TopDown():
                                            (self.tree._node_count, self.data_handler.contingency_df_length),
                                            self.data_handler.dtype)) as executor:
             
-            # TODO: change form to construct chunks, for example, considering
-            # a constanst value of nodes like 1000. This form if occurs a exception,
-            # can repeat the chunk.
-            chunk_size = self.tree._node_count  // self.workers
-            rest = self.tree._node_count  % self.workers
-            sampler_name = self.mechanism.__name__
-            samples = self.data_handler.contingency_df_length
-            temp = []
-
-            start = 0
-            while start <= self.tree._node_count:
-                temp.append(start)
-                add = 1 if rest>0 else 0
-                start += (chunk_size+add)
-                rest -= 1
-
+            # Send tasks
             futures = []
-            for i in range(self.workers):
-                # TODO: Pass privacy_parameters
-                futures.append(executor.submit(add_noise, temp[i], temp[i+1], sampler_name, samples, self.privacy_parameters[0]))
+            for i in range(len(chunks)):
+                futures.append(executor.submit(add_noise, *chunks[i], sampler_name, samples, privacy_parameters_chunk[i]))
             
+            # Retrive results
             for f in futures:
-                f.result()
+                start_chunk, end_chunk, time_chunk = f.result()
+                print(f"Chunk ({start_chunk}, {end_chunk}( finished in {time_chunk:.2f} seconds")
 
         print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
 

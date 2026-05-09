@@ -4,7 +4,7 @@ from collections import deque
 
 from multiprocessing import shared_memory
 from itertools import product
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 
 from constraints.constraint import Constraint
@@ -142,7 +142,7 @@ class DataHandler:
         
         return contingency_vector
     
-    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int) -> tuple[list[HierarchicalNode], np.ndarray, memoryview]:
+    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int) -> Tuple[List[HierarchicalNode], List[int], np.ndarray, memoryview]:
         '''Retrieve the references of all nodes of the tree to facilitate access. 
         Also create a shared memory space with all contingency vectors copied,
         enabling multiprocessing without duplicating data.
@@ -152,9 +152,8 @@ class DataHandler:
             n_nodes (int): Number of nodes, corresponding to the number of rows in the shared memory space.
 
         Return:
-            tuple[list[HierarchicalNode], np.ndarray, memoryview]: A tuple containing all node references,
-                                                                the NumPy view over the shared memory buffer,
-                                                                and the memoryview for accessing the shared memory.
+            tuple[list[HierarchicalNode], List[int], np.ndarray, memoryview]: A tuple containing all node references, the node index where each level starts,
+                                                                              the view over the shared memory buffer, and the memoryview used to access the shared memory.
         '''
         shape = (n_nodes, self.contingency_df_length)
         size = int(np.prod(shape) * np.dtype(self.dtype).itemsize)
@@ -171,6 +170,10 @@ class DataHandler:
 
         next_id = 0
 
+        # Retrive starts levels starting COUNTRY (ROOT)
+        levels = [0] * (1+len(self.hierarchical_columns))
+        idx = 0
+
         while queue:
             node = queue.popleft()
 
@@ -182,12 +185,16 @@ class DataHandler:
             del node.contingency_vector
             nodes.append(node)
 
+            if node.level == idx and levels[idx] == 0:
+                levels[idx] = node.id
+                idx += 1 
+
             for child in node.children:
                 child.parent_id = node.id
                 queue.append(child)
 
             next_id += 1
-        return nodes, arr, shm
+        return nodes, levels, arr, shm
 
     def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
         '''Build a hierarchical tree based on the hierarchical columns.
@@ -230,7 +237,7 @@ class DataHandler:
         # Construct the tree recursively and count the nodes created
         # Then change the representation to array and create a share memory space
         tree._node_count = self._build_subtree(root, curr_level, self.dataframe, constraints)
-        tree.nodes, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(root, tree._node_count)
+        tree.nodes, tree._levels, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(root, tree._node_count)
         return tree
     
     def _build_subtree(self, parent_node: HierarchicalNode, curr_level: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> None:
@@ -270,7 +277,7 @@ class DataHandler:
                     level_constraints.append(constraint.to_constraint(self.contingency_df))
 
             # Create a new child node
-            child_node = HierarchicalNode(geo_id=value, constraints=level_constraints)
+            child_node = HierarchicalNode(geo_id=value, level=curr_level+1, constraints=level_constraints)
             parent_node.add_child(child_node)
 
             # Create and assign the contingency vector for the child node

@@ -10,20 +10,24 @@ class HierarchicalNode:
     This class focuses solely on node specific data and operations,
     without any tree traversal or tree-wide operation logic.
     '''
-    def __init__(self, geo_id: int, constraints: List[Callable]) -> None:
+    def __init__(self, geo_id: int, level: int,  constraints: List[Callable]) -> None:
         """
         Initialize a hierarchical node.
         
         Args:
             geo_id (int): Identifier related to geography.
+            level (int): Level where the node is located.
             constraints (List[Callable]): Optional list of constraints for this node.
         
         Attributes:
             id (Optional[int]): Unique identifier for the node at its level.
             geo_id (int): Identifier related to geography.
+
             children (List[HierarchicalNode]): List of child nodes.
             parent (HierarchicalNode): Reference to the parent node.
+
             hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root.
+            level (int): Level where the node is located. Useful for determining the associated privacy parameter.
 
             contingency_vector (Optional[np.ndarray]): Contingency vector for this node.
             constraints (List[Callable]): List of constraints for this node.
@@ -40,6 +44,7 @@ class HierarchicalNode:
 
         # The path is needed to save runtime when generating data from a specific node
         self.hierarchical_path: List[Any] = []
+        self.level: int = level
         
         # Data containers
         self.contingency_vector: Optional[np.ndarray] = None
@@ -75,15 +80,7 @@ class HierarchicalNode:
             bool: True if the node is a leaf, False otherwise.
         '''
         return len(self.children) == 0
-    
-    def get_level(self) -> int:
-        '''Get the level of this node in the tree.
-        
-        Returns:
-            int: The level of the node (0 for root, 1 for children of root, ...).
-        '''
-        return len(self.hierarchical_path)
 
     def __repr__(self) -> str:
         '''String representation of the node.'''
-        return f"HierarchicalNode(id={self.node_id}, level={self.get_level()}, children={len(self.children)})"
+        return f"HierarchicalNode(id={self.id}, level={self.level}, children={len(self.children)})"
