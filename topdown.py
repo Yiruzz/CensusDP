@@ -5,9 +5,14 @@ from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 
-import noisy
+from noisy import ( 
+    sample_dgauss_fast,
+    sample_dlaplace_fast,
+    sample_dgauss_optimized,
+    sample_dlaplace_optimized
+)
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import shared_memory, get_context
 from typing import Callable, Dict, List, Tuple
 import time
@@ -16,28 +21,6 @@ def attach_memory(name, shape, dtype):
     global shm, arr
     shm = shared_memory.SharedMemory(name)
     arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-
-def add_noise(start: int, end: int, sampler_name: str, samples: int, privacy_budget: List[Tuple[int, float]], sensibility: int = 1) -> Tuple[int, int, float]:
-    sampler = getattr(noisy, sampler_name)
-
-    idx_privacy_budget = 0
-    next_change = (privacy_budget[idx_privacy_budget + 1][0] if len(privacy_budget) > 1 else float("inf"))
-    privacy_budget_value = privacy_budget[idx_privacy_budget][1]
-
-    t1 = time.time()
-    for idx in range(start, end):
-        if idx == next_change:
-            idx_privacy_budget += 1
-            privacy_budget_value = privacy_budget[idx_privacy_budget][1]
-
-            if idx_privacy_budget + 1 < len(privacy_budget):
-                next_change = privacy_budget[idx_privacy_budget + 1][0]
-            else:
-                next_change = float("inf")
-        arr[idx] += sampler(sensibility / privacy_budget_value, samples)
-
-    shm.close()
-    return start, end, (time.time()-t1) 
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -119,6 +102,33 @@ class TopDown():
         self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
+    def add_noise_to_chunk(self, start: int, end: int) -> Tuple[int, int, float]:
+        '''Apply noise to a chunk of contingency vectors.
+
+        Args:
+            start (int): Starting index of the chunk.
+            end (int): Ending index of the chunk (exclusive).
+
+        Returns:
+            Tuple[int, int, float]: The start index, end index, and execution time for processing the chunk.
+        '''
+        t1 = time.time()
+        for idx in range(start, end):
+            self.add_noise(self.tree._contingency_vectors[idx], self.privacy_parameters[self.tree.nodes[idx].level])
+        
+        t2 = time.time()-t1
+        return start, end, t2
+        
+    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: float) -> None:
+        '''Add noise to the contingency vector using the specified mechanism modifiyn in-place.
+        
+        Args:
+            contingency_vector (np.ndarray): The original contingency vector.
+            privacy_budget (float): The privacy budget (epsilon) for noise addition.
+        '''
+        samples = len(contingency_vector)
+        contingency_vector += self.mechanism(privacy_budget, samples)
+
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
         
@@ -128,58 +138,38 @@ class TopDown():
         t1 = time.time()
         print(f'Running measurement phase...\n')
 
-        # TODO: change form to construct chunks, for example, considering
-        # a constanst value of nodes like 1000. This form if occurs a exception,
-        # can repeat the chunk.
-        sampler_name = self.mechanism.__name__
-        samples = self.data_handler.contingency_df_length
-        chunk_size = self.tree._node_count // self.workers
-        rest = self.tree._node_count % self.workers
+        # Create chunks to distribute among workers.
+        # Since the data is independent, workers do not require synchronization.
+        num_chunks = self.workers
+        base_chunk_size = self.tree._node_count // num_chunks
+        remaining_nodes = self.tree._node_count % num_chunks
 
         chunks = []
         start = 0
-        for i in range(self.workers):
-            extra = 1 if i < rest else 0
-            end = start + chunk_size + extra
+
+        for i in range(num_chunks):
+            extra = 1 if i < remaining_nodes else 0
+            end = start + base_chunk_size + extra
             chunks.append((start, end))
             start = end
 
-        privacy_parameters_chunk = []
-        max_level = 1 + len(self.hierarchical_columns)
-
-        for start, end in chunks:
-            privacy_parameters = []
-            idx = start
-            level = self.tree.nodes[idx].level
-
-            while idx < end and level < max_level:
-                privacy_parameters.append((idx, self.privacy_parameters[level]))
-
-                level += 1
-                if level >= max_level:
-                    break
-
-                idx = self.tree._levels[level]
-            privacy_parameters_chunk.append(privacy_parameters)
-
-        # Create a pool with process
-        with ProcessPoolExecutor(max_workers=self.workers,  mp_context=get_context("spawn"),
-                                 initializer=attach_memory,
-                                 initargs=(self.tree._contingency_vectors_shm.name,
-                                           (self.tree._node_count, self.data_handler.contingency_df_length),
-                                           self.data_handler.dtype)) as executor:
-            
-            # Send tasks
+        # Create a thread pool.
+        # Each worker receives a chunk.
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
             futures = []
-            for i in range(len(chunks)):
-                futures.append(executor.submit(add_noise, *chunks[i], sampler_name, samples, privacy_parameters_chunk[i]))
-            
-            # Retrive results
-            for f in futures:
-                start_chunk, end_chunk, time_chunk = f.result()
-                print(f"Chunk ({start_chunk}, {end_chunk}( finished in {time_chunk:.2f} seconds")
+            for chunk in chunks:
+                print(f"Processing nodes {chunk[0]} until {chunk[1]}...")
+                futures.append(executor.submit(self.add_noise_to_chunk, *chunk))
 
-        print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
+            print("\n", end="")
+
+            # The vectors are modified in-place,
+            # so only execution time is returned for logging purposes.
+            for future in as_completed(futures):
+                start, end, finished_time = future.result()
+                print(f"Finshed chunk nodes {start} until {end} in {finished_time:.2f} seconds")
+            
+        print(f"\nMeasurement phase completed in {time.time() - t1:.2f} seconds.\n")
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -321,6 +311,30 @@ class TopDown():
         '''
         self.privacy_parameters = privacy_parameters
     
+    def discrete_gaussian(self, rho: float, samples: int) -> np.ndarray:
+        '''Applies discrete Gaussian noise to the contingency vector.
+        
+        Args:
+            rho (float): The privacy parameter.
+            samples (int): Number of samples drawn from the distribution.
+        
+        Returns:
+            np.ndarray: An array containing the noisy values.
+        '''
+        return sample_dgauss_optimized(rho, samples)
+    
+    def discrete_laplace(self, epsilon: float, samples: int) -> np.ndarray:
+        '''Applies Laplace noise to the contingency vector.
+        
+        Args:
+            epsilon (float): Privacy parameter.
+            samples (int): Number of samples drawn from the distribution.
+
+        Returns:
+            np.ndarray: An array containing the noisy values. 
+        '''
+        return sample_dlaplace_optimized(1/epsilon, samples)
+    
     def set_mechanism(self, mechanism: str) -> None:
         '''Set the noise mechanism to use for adding noise to the data.
         
@@ -329,9 +343,9 @@ class TopDown():
         '''
         match mechanism:
             case 'discrete_laplace':
-                self.mechanism = noisy.sample_dlaplace_optimized
+                self.mechanism = self.discrete_laplace
             case 'discrete_gaussian':
-                self.mechanism = noisy.sample_dgauss_optimized
+                self.mechanism = self.discrete_gaussian
             case _:
                  raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
 
