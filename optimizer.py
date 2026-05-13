@@ -48,7 +48,10 @@ class OptimizationModel:
         else:
             raise RuntimeError(f"Solver termination failed for node {id_node}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
 
-    def non_negative_real_estimation(self, contingency_vector: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
+    def non_negative_real_estimation(self, contingency_vector: np.ndarray,
+                                     node_id: int,
+                                     constraints: List[Callable]) -> np.ndarray:
+                                     
         '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
 
         Args:
@@ -62,7 +65,7 @@ class OptimizationModel:
         n = len(contingency_vector)
 
         # Create a ConcreteModel directly
-        instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{id_node}')
+        instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{node_id}')
 
         # Set of indices
         instance.I = pyo.RangeSet(0, n - 1)
@@ -95,12 +98,12 @@ class OptimizationModel:
                 raise e
 
         # Solve the model
-        self._solve_pyomo_model(instance, id_node)
+        self._solve_pyomo_model(instance, node_id)
 
         # Extract results
         return np.array([pyo.value(instance.x[i]) for i in range(n)])
 
-    def rounding_estimation(self, x_tilde: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[Callable]) -> np.ndarray:
         '''Rounding estimation of the contingency vector using Pyomo ConcreteModel.
 
         Args:
@@ -116,7 +119,7 @@ class OptimizationModel:
         residual_round = x_tilde - x_floor
 
         # Create a ConcreteModel directly
-        instance = pyo.ConcreteModel(name=f'RoundingEstimation_NodeID_{id_node}')
+        instance = pyo.ConcreteModel(name=f'RoundingEstimation_NodeID_{node_id}')
 
         # Set of indices
         instance.I = pyo.RangeSet(0, n - 1)
@@ -153,7 +156,7 @@ class OptimizationModel:
                 raise e
 
         # Solve the model
-        self._solve_pyomo_model(instance, id_node)
+        self._solve_pyomo_model(instance, node_id)
 
         # Extract results
         y_estimated_array = np.array([pyo.value(instance.y[i]) for i in range(n)])

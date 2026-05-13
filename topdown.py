@@ -12,15 +12,12 @@ from noisy import (
     sample_dlaplace_optimized
 )
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from multiprocessing import shared_memory, get_context
+from parallel import init_process, solve
+
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import Callable, Dict, List, Tuple
 import time
-
-def attach_memory(name, shape, dtype):
-    global shm, arr
-    shm = shared_memory.SharedMemory(name)
-    arr = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -73,7 +70,7 @@ class TopDown():
         self.constraints: Dict[int, List[Constraint]] = {}
 
         self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
-        self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options, optimizer_path)
+        self.optimizer = (optimizer, solver_options, optimizer_path)
 
         self.workers: int = 4
         
@@ -171,6 +168,112 @@ class TopDown():
             
         print(f"\nMeasurement phase completed in {time.time() - t1:.2f} seconds.\n")
 
+    def root_estimation_phase(self, index: int = 0) -> None:
+        '''Perform the estimation phase of the TopDown algorithm for root node.
+        '''
+        optimizer = OptimizationModel(*self.optimizer)
+        root = self.tree.nodes[index]
+        x_tilde = optimizer.non_negative_real_estimation(
+            contingency_vector=self.tree._contingency_vectors[index],
+            node_id=root.id,
+            constraints=root.constraints
+        )
+        self.tree._contingency_vectors[index] = optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=root.id,
+            constraints=root.constraints
+        )
+        return None
+
+    def subtree_estimation_phase(self) -> None:
+        '''Allows solving optimization models in parallel once their contingency vectors are updated.
+        
+        This means that it is not necessary to wait for an entire level to finish before moving to the next,
+        because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
+        '''
+        vector_length = self.data_handler.contingency_df_length
+        root = self.tree.nodes[0]
+        children = [child.id for child in root.children]
+        child_constraints = root.combine_child_constraints(vector_length)
+        
+        root_arguments = (
+            root.id,
+            children, 
+            child_constraints
+        )
+
+        max_workers = 3
+        buffer = 2
+        max_outstanding = max_workers + buffer
+
+        # Retrieve solver configuration and shared memory information.
+        # Each process initializes its own solver instance and attaches
+        # to the shared memory space on first execution.
+        solver_name = self.optimizer[0]
+        solver_options = self.optimizer[1]
+        optimizer_path = self.optimizer[2]
+        shared_memory_name = self.tree._contingency_vectors_shm.name
+        shared_array_shape = self.tree._contingency_vectors.shape
+        shared_array_dtype = str(self.tree._contingency_vectors.dtype)
+
+        args = (
+            solver_name,
+            solver_options,
+            optimizer_path,
+            shared_memory_name,
+            shared_array_shape,
+            shared_array_dtype,
+        )
+
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=init_process, initargs=args) as executor:
+            next_ranges = deque()
+            curr_range = None
+
+            # Submit root
+            futures = {
+                executor.submit(solve, *root_arguments): root_arguments
+            }
+
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+
+                # Process completed tasks
+                for fut in done:
+                    futures.pop(fut)
+                    node_id = fut.result()
+                    print(node_id)
+                    node = self.tree.nodes[node_id]
+
+                    # Add children range
+                    next_ranges.append(iter(node.children)) 
+
+                    # Initialize current range if needed
+                    if curr_range is None and next_ranges:
+                        curr_range = next_ranges.popleft()
+
+                # Fill available slots
+                while len(futures) < max_outstanding and curr_range is not None:
+                    try:
+                        node = next(curr_range)
+                    except StopIteration:
+                        if next_ranges:
+                            curr_range = next_ranges.popleft()
+                        else:
+                            curr_range = None
+                        continue
+
+                    if node.is_leaf():
+                        continue
+
+                    child_arguments = (
+                        node.id,
+                        [child.id for child in node.children],
+                        node.combine_child_constraints(vector_length)
+                    )
+                    fut = executor.submit(solve, *child_arguments)
+                    futures[fut] = child_arguments
+        return None
+
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
         
@@ -178,62 +281,18 @@ class TopDown():
         consistency and adherence to constraints after noise has been added.
         '''
         t1 = time.time()
-        print(f'Running estimation phase...')
+        print(f'\nRunning estimation phase...')
 
-        # Root estimation (level 0)
-        # Does not require consistency adjustments
         t2 = time.time()
-        print(f'\nProcessing root node (level 0)... ', end=' ')
-        idx = 0
-        root = self.tree.nodes[idx]
-        x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            contingency_vector=self.tree._contingency_vectors[idx],
-            id_node=root.id,
-            constraints=root.constraints
-        )
-        self.tree._contingency_vectors[idx] = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            id_node=root.id,
-            constraints=root.constraints
-        )
+        print(f'Processing root node (level 0)... ', end=' ')
+        self.root_estimation_phase()
         print(f'{time.time() - t2:.2f} seconds.')
 
-        # Now process the rest of the tree level by level
-        for level, nodes in self.tree.iterate_by_levels():
-            t2 = time.time()
-            if len(nodes[0].children) != 0: print(f'Processing level {level+1}...', end=' ')
-            for node in nodes:
-                # If the node is a leaf, no need to solve optimization
-                # NOTE: With a break we assume that all leaves are at the same level
-                if len(node.children) == 0:
-                    break
-                
-                # Solve the optimization problem for the children of the current node
-                joint_contingency_vector = self.tree.combine_vectors(node)
-
-                # Transform individual constraints for joint vector
-                joint_constraints = self.tree.combine_child_constraints(node, joint_contingency_vector)
-                    
-                # Solve for children nodes (joint contingency vector)
-                x_tilde = self.optimizer.non_negative_real_estimation(
-                    contingency_vector=joint_contingency_vector,
-                    id_node=node.id,
-                    constraints=joint_constraints
-                )
-                joint_solution: np.ndarray = self.optimizer.rounding_estimation(
-                    x_tilde=x_tilde,
-                    id_node=node.id,
-                    constraints=joint_constraints
-                )
-
-                # Save the solution back to each child node
-                self.tree.update_vectors(node, joint_solution)
-
-            if len(nodes[0].children) != 0: print(f'{time.time() - t2:.2f} seconds.')
+        self.subtree_estimation_phase()
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
         
         return None
-
+    
     def construct_microdata(self) -> pd.DataFrame:
         '''Construct the differentially private microdata from the hierarchical tree.
         
