@@ -80,7 +80,7 @@ class HierarchicalNode:
             bool: True if the node is a leaf, False otherwise.
         '''
         return len(self.children) == 0
-
+    
     def __repr__(self) -> str:
         '''String representation of the node.'''
         return f"HierarchicalNode(id={self.id}, level={self.level}, children={len(self.children)})"

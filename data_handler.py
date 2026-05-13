@@ -28,8 +28,8 @@ class DataHandler:
             
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
             contingency_df (Optional[pd.DataFrame]): DataFrame to hold the contingency table.    
-            contingency_df_length: Optional[int] = Length of the contingency dataframe.
-            dtype: str = NumPy data type used for all arrays.
+            contingency_df_length: Optional[int]: Length of the contingency dataframe.
+            dtype (str): NumPy data type used for all arrays.
 
             query_columns (List[str]): List of columns to use for generating the contingency table.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
@@ -308,7 +308,8 @@ class DataHandler:
         # Store partial DataFrames generated for each leaf.
         microdata_parts = []
 
-        for leaf in list(tree.iterate_by_levels())[-1][1]:
+        start_node_idx = tree._levels[-1]
+        for leaf in tree.nodes[start_node_idx:]:
             # Generate rows associated with query values.
             # Select only positive frequencies.
             contingency_vector = tree._contingency_vectors[leaf.id]

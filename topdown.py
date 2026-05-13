@@ -194,8 +194,8 @@ class TopDown():
         vector_length = self.data_handler.contingency_df_length
         root = self.tree.nodes[0]
         children = [child.id for child in root.children]
-        child_constraints = root.combine_child_constraints(vector_length)
-        
+        child_constraints = {child.id: child.constraints for child in root.children}
+    
         root_arguments = (
             root.id,
             children, 
@@ -241,7 +241,6 @@ class TopDown():
                 for fut in done:
                     futures.pop(fut)
                     node_id = fut.result()
-                    print(node_id)
                     node = self.tree.nodes[node_id]
 
                     # Add children range
@@ -268,7 +267,7 @@ class TopDown():
                     child_arguments = (
                         node.id,
                         [child.id for child in node.children],
-                        node.combine_child_constraints(vector_length)
+                        {child.id: child.constraints for child in node.children}
                     )
                     fut = executor.submit(solve, *child_arguments)
                     futures[fut] = child_arguments
@@ -281,10 +280,10 @@ class TopDown():
         consistency and adherence to constraints after noise has been added.
         '''
         t1 = time.time()
-        print(f'\nRunning estimation phase...')
+        print(f'Running estimation phase...')
 
         t2 = time.time()
-        print(f'Processing root node (level 0)... ', end=' ')
+        print(f'\nProcessing root node (level 0)... ', end=' ')
         self.root_estimation_phase()
         print(f'{time.time() - t2:.2f} seconds.')
 
