@@ -1,4 +1,6 @@
 import pyomo.environ as pyo
+import gurobipy as gp
+
 import numpy as np
 from typing import List, Callable, Any
 
@@ -18,7 +20,7 @@ class OptimizationModel:
             solver_options (dict): Dictionary of options to pass to the solver.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
         '''
-        self.solver = pyo.SolverFactory(solver_name)
+        self.solver = pyo.SolverFactory(solver_name, manage_env= True) 
         self.solver_options = solver_options
         if optimizer_path is not None:
             self.solver.set_executable(optimizer_path)
