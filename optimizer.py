@@ -1,168 +1,222 @@
-import pyomo.environ as pyo
-import gurobipy as gp
+"""Per-node optimization for the TopDown estimation phase.
+
+Writes an LP file to a per-process temp path and hands it to gurobipy.read, so
+all model materialization happens in Gurobi's C parser rather than building a
+Pyomo / gurobipy expression graph in Python.
+"""
+from __future__ import annotations
+
+import io
+import os
+import tempfile
+from typing import List
 
 import numpy as np
-from typing import List, Callable, Any
+import gurobipy as gp
+
+from constraints.constraint import SparseRow
+
 
 class OptimizationModel:
-    '''
-    Represents the Pyomo model that is used to do the estimation of the contingency vectors.
+    """LP-file backed optimizer. One instance per worker process; reuses one Gurobi env."""
 
-    Pyomo builds the model and is an interface over the actual optimization engine that solves the problem (e.g. Gurobi).
-    Uses ConcreteModels for direct model construction.
-    '''
-
-    def __init__(self, solver_name='gurobi', solver_options={}, optimizer_path=None) -> None:
-        '''Constructor for the OptimizationModel class.
-
-        Args:
-            solver_name (str): The name of the solver to use. Defaults to 'gurobi'.
-            solver_options (dict): Dictionary of options to pass to the solver.
-            optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
-        '''
-        self.solver = pyo.SolverFactory(solver_name, manage_env= True) 
-        self.solver_options = solver_options
-        if optimizer_path is not None:
-            self.solver.set_executable(optimizer_path)
-
-    def _solve_pyomo_model(self, instance: pyo.ConcreteModel, id_node: int) -> Any:
-        '''Auxiliar function to solve the instance of the model and handle infeasibility.
-
-        Args:
-            instance (ConcreteModel): The concrete model instance to solve.
-            id_node (int): The id of the node being solved.
-
-        Returns:
-            SolverResults: The results from the solver.
-        '''
-        # Use the solver options provided during initialization
-        results = self.solver.solve(instance, tee=False, options=self.solver_options)
-
-        # Check termination conditions
-        if results.solver.termination_condition == pyo.TerminationCondition.optimal or \
-           results.solver.termination_condition == pyo.TerminationCondition.locallyOptimal:
-            return results
-        elif results.solver.termination_condition == pyo.TerminationCondition.infeasible:
-            # Write model for debugging
-            filename = f"infeasible_model_node_{id_node}.nl"
-            instance.write(filename)
-            raise ValueError(f'Model is infeasible for node {id_node}. See {filename} file for debugging.')
-        else:
-            raise RuntimeError(f"Solver termination failed for node {id_node}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
-
-    def non_negative_real_estimation(self, contingency_vector: np.ndarray,
-                                     node_id: int,
-                                     constraints: List[Callable]) -> np.ndarray:
-                                     
-        '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
-
-        Args:
-            contingency_vector (np.ndarray): The contingency vector with noisy counts.
-            id_node (int): The ID of the node for which the estimation is being performed.
-            constraints (List[Callable]): List of additional constraints to apply to the model.
-
-        Returns:
-            np.ndarray: Estimated contingency vector with non-negative real values.
-        '''
-        n = len(contingency_vector)
-
-        # Create a ConcreteModel directly
-        instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{node_id}')
-
-        # Set of indices
-        instance.I = pyo.RangeSet(0, n - 1)
-
-        # Parameter: contingency vector
-        instance.c = pyo.Param(instance.I, initialize={i: contingency_vector[i] for i in range(n)})
-
-        # Decision variable: non-negative real values
-        instance.x = pyo.Var(instance.I, domain=pyo.NonNegativeReals)
-
-        # Objective: minimize L2 norm
-        def objective_rule(model):
-            return sum((model.x[i] - model.c[i])**2 for i in model.I)
-
-        instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
-
-        # Add constraints
-        instance.ConstraintList = pyo.ConstraintList()
-        for i, constraint_func in enumerate(constraints):
+    def __init__(self, solver_name: str = 'gurobi', solver_options: dict | None = None,
+                 optimizer_path: str | None = None) -> None:
+        if solver_name != 'gurobi':
+            raise ValueError(f"This OptimizationModel only supports 'gurobi'; got {solver_name!r}.")
+        self.options = dict(solver_options or {})
+        self.env = gp.Env(empty=True)
+        for k, v in self.options.items():
             try:
-                pyomo_expression = constraint_func(instance.x)
-                # Skip trivially true constraints (e.g. from empty index sets)
-                if isinstance(pyomo_expression, bool):
-                    if not pyomo_expression:
-                        raise ValueError(f"Constraint {i} is statically infeasible (evaluates to False).")
-                    continue
-                instance.ConstraintList.add(pyomo_expression)
-            except Exception as e:
-                print(f"Error adding constraint {i}: {e}. Ensure the constraint function accepts Pyomo's Var and returns a Pyomo expression.")
-                raise e
+                self.env.setParam(k, v)
+            except gp.GurobiError:
+                # Model-only parameter; will be re-applied after read.
+                pass
+        self.env.start()
 
-        # Solve the model
-        self._solve_pyomo_model(instance, node_id)
+    def non_negative_real_estimation(self, contingency_vector: np.ndarray, node_id: int,
+                                     constraints: List[SparseRow]) -> np.ndarray:
+        """L2 projection onto non-negative reals subject to sparse linear rows."""
+        n = len(contingency_vector)
+        path = _mkstemp_lp()
+        try:
+            _write_real_lp(path, contingency_vector, constraints, n)
+            return self._solve(path, n, node_id, var_prefix='x')
+        finally:
+            _safe_unlink(path)
 
-        # Extract results
-        return np.array([pyo.value(instance.x[i]) for i in range(n)])
-
-    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[Callable]) -> np.ndarray:
-        '''Rounding estimation of the contingency vector using Pyomo ConcreteModel.
-
-        Args:
-            x_tilde (np.ndarray): The contingency vector from the previous optimization step.
-            id_node (int): The ID of the node for which the estimation is being performed.
-            constraints (List[Callable]): List of additional constraints to apply to the model.
-
-        Returns:
-            np.ndarray: Estimated contingency vector with non-negative integer values.
-        '''
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int,
+                            constraints: List[SparseRow]) -> np.ndarray:
+        """Discrete rounding step: pick y in {0,1}^n that minimizes ||residual - y||^2 under
+        the same sparse rows, then return floor(x_tilde) + y as integers."""
         n = len(x_tilde)
         x_floor = np.floor(x_tilde)
-        residual_round = x_tilde - x_floor
+        residual = x_tilde - x_floor
+        path = _mkstemp_lp()
+        try:
+            _write_round_lp(path, residual, x_floor, constraints, n)
+            y = self._solve(path, n, node_id, var_prefix='y')
+            return (x_floor + np.round(y)).astype(np.int64)
+        finally:
+            _safe_unlink(path)
 
-        # Create a ConcreteModel directly
-        instance = pyo.ConcreteModel(name=f'RoundingEstimation_NodeID_{node_id}')
-
-        # Set of indices
-        instance.I = pyo.RangeSet(0, n - 1)
-
-        # Parameters: residual and floor values
-        instance.r = pyo.Param(instance.I, initialize={i: residual_round[i] for i in range(n)})
-        instance.f = pyo.Param(instance.I, initialize={i: x_floor[i] for i in range(n)})
-
-        # Decision variable: binary
-        instance.y = pyo.Var(instance.I, domain=pyo.Binary)
-
-        # Objective: minimize L2 norm of residuals
-        def objective_rule(model):
-            return sum((model.r[i] - model.y[i])**2 for i in model.I)
-
-        instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
-
-        # Define rounded vector expression for constraints
-        x_rounded = {i: instance.f[i] + instance.y[i] for i in instance.I}
-
-        # Add constraints
-        instance.ConstraintList = pyo.ConstraintList()
-        for i, constraint_func in enumerate(constraints):
+    def _solve(self, lp_path: str, n: int, node_id: int, var_prefix: str) -> np.ndarray:
+        model = gp.read(lp_path, env=self.env)
+        for k, v in self.options.items():
             try:
-                pyomo_expression = constraint_func(x_rounded)
-                # Skip trivially true constraints (e.g. from empty index sets)
-                if isinstance(pyomo_expression, bool):
-                    if not pyomo_expression:
-                        raise ValueError(f"Constraint {i} is statically infeasible (evaluates to False).")
-                    continue
-                instance.ConstraintList.add(pyomo_expression)
-            except Exception as e:
-                print(f"Error adding constraint {i}: {e}. Ensure the constraint function accepts Pyomo's expression dict and returns a Pyomo expression.")
-                raise e
+                model.setParam(k, v)
+            except gp.GurobiError:
+                pass
+        model.optimize()
+        status = model.Status
+        if status == gp.GRB.INFEASIBLE:
+            keep = f'infeasible_model_node_{node_id}.lp'
+            model.write(keep)
+            raise ValueError(f"Model is infeasible for node {node_id}. See {keep} for debugging.")
+        if status not in (gp.GRB.OPTIMAL, gp.GRB.SUBOPTIMAL):
+            raise RuntimeError(f"Solver finished with status {status} for node {node_id}.")
+        return _read_solution(model, var_prefix, n)
 
-        # Solve the model
-        self._solve_pyomo_model(instance, node_id)
 
-        # Extract results
-        y_estimated_array = np.array([pyo.value(instance.y[i]) for i in range(n)])
+# ----- LP-file generation -----------------------------------------------------
 
-        # Final result: floor + binary decisions
-        return (x_floor + y_estimated_array).astype(np.int64)
+def _mkstemp_lp() -> str:
+    fd, path = tempfile.mkstemp(suffix='.lp', prefix='topdown_')
+    os.close(fd)
+    return path
 
+
+def _safe_unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _read_solution(model: gp.Model, var_prefix: str, n: int) -> np.ndarray:
+    """Read variable values by name; one C call per .X via attribute access."""
+    by_name = {v.VarName: v.X for v in model.getVars()}
+    return np.fromiter((by_name[f'{var_prefix}_{i}'] for i in range(n)),
+                       dtype=np.float64, count=n)
+
+
+def _coef_term(coef: float, var: str) -> str:
+    """Format ' + 3 x' / ' - x' / '' (zero suppressed). Sign-leading so terms compose freely."""
+    if coef == 0.0:
+        return ''
+    if coef == 1.0:
+        return f'+ {var}'
+    if coef == -1.0:
+        return f'- {var}'
+    if coef > 0.0:
+        return f'+ {coef:.17g} {var}'
+    return f'- {-coef:.17g} {var}'
+
+
+def _write_row(buf: io.StringIO, row: SparseRow, var_prefix: str, name: str) -> None:
+    parts = [f' {name}:']
+    first = True
+    for idx, coef in zip(row.indices.tolist(), row.coefs.tolist()):
+        term = _coef_term(float(coef), f'{var_prefix}_{int(idx)}')
+        if not term:
+            continue
+        if first:
+            parts.append(term[2:] if term.startswith('+ ') else term)
+            first = False
+        else:
+            parts.append(term)
+    if first:
+        parts.append('0')
+    parts.append(row.sense)
+    parts.append(f'{float(row.rhs):.17g}')
+    buf.write(' '.join(parts) + '\n')
+
+
+def _write_real_lp(path: str, c: np.ndarray, rows: List[SparseRow], n: int) -> None:
+    """min sum (x_i - c_i)^2 = sum x_i^2 - 2 sum c_i x_i (constant dropped).
+
+    Gurobi LP quadratic syntax uses [ ... ] / 2, so for a coefficient 1 on x_i^2 the
+    bracketed term is `2 x_i ^ 2`.
+    """
+    buf = io.StringIO()
+    buf.write('Minimize\n obj:')
+
+    # Linear part: -2 c_i x_i, omit zero-c_i terms.
+    wrote_linear = False
+    for i in range(n):
+        ci = float(c[i])
+        if ci == 0.0:
+            continue
+        term = _coef_term(-2.0 * ci, f'x_{i}')
+        if term:
+            buf.write(' ' + term)
+            wrote_linear = True
+
+    # Quadratic part: always emit one term per variable so every var is registered.
+    quad_terms = [f'2 x_{i} ^ 2' for i in range(n)]
+    quad_body = ' + '.join(quad_terms)
+    if wrote_linear:
+        buf.write(' + ')
+    else:
+        buf.write(' ')
+    buf.write(f'[ {quad_body} ] / 2\n')
+
+    buf.write('Subject To\n')
+    for j, row in enumerate(rows):
+        _write_row(buf, row, var_prefix='x', name=f'r_{j}')
+
+    # Bounds: LP defaults are x >= 0 (continuous), which is exactly what we need.
+    # Explicit bounds keep variables that were skipped from the linear part registered.
+    buf.write('Bounds\n')
+    for i in range(n):
+        buf.write(f' x_{i} >= 0\n')
+
+    buf.write('End\n')
+
+    with open(path, 'w') as f:
+        f.write(buf.getvalue())
+
+
+def _write_round_lp(path: str, r: np.ndarray, x_floor: np.ndarray,
+                    rows: List[SparseRow], n: int) -> None:
+    """min sum (r_i - y_i)^2 with y_i in {0,1}.
+
+    y_i^2 = y_i since binary, so the objective collapses to linear:
+        sum_i (1 - 2 r_i) y_i + const
+    and each row sum_k coef_k * x_{idx_k} <sense> rhs becomes
+        sum_k coef_k * y_{idx_k} <sense> rhs - sum_k coef_k * x_floor[idx_k].
+    """
+    buf = io.StringIO()
+    buf.write('Minimize\n obj:')
+
+    first = True
+    for i in range(n):
+        coef = 1.0 - 2.0 * float(r[i])
+        if coef == 0.0:
+            continue
+        term = _coef_term(coef, f'y_{i}')
+        if first:
+            buf.write(' ' + (term[2:] if term.startswith('+ ') else term))
+            first = False
+        else:
+            buf.write(' ' + term)
+    if first:
+        # Make sure there is at least one term so the file is well-formed.
+        buf.write(' 0 y_0')
+    buf.write('\n')
+
+    buf.write('Subject To\n')
+    for j, row in enumerate(rows):
+        shift = float(np.dot(row.coefs, x_floor[row.indices]))
+        shifted = SparseRow(indices=row.indices, coefs=row.coefs, sense=row.sense, rhs=row.rhs - shift)
+        _write_row(buf, shifted, var_prefix='y', name=f'r_{j}')
+
+    # Declare every variable as binary so all are registered, even those absent from obj/rows.
+    buf.write('Binary\n')
+    for i in range(n):
+        buf.write(f' y_{i}\n')
+
+    buf.write('End\n')
+
+    with open(path, 'w') as f:
+        f.write(buf.getvalue())

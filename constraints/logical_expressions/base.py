@@ -1,63 +1,30 @@
 import pandas as pd
-from functools import partial
-from typing import Callable, List
+import numpy as np
 from abc import ABC, abstractmethod
 
-from constraints.constraint import Constraint
+from constraints.constraint import Constraint, SparseRow
+
 
 class LogicalExpression(Constraint, ABC):
     """Base class for all logical expressions.
 
     Implementations must provide `reduce(contingency_df)` which returns a
     boolean `pd.Series` mask aligned with `contingency_df.index`.
+
+    A standalone logical expression added as a constraint enforces that no row
+    where the expression evaluates to False has positive count. That is encoded
+    as a SparseRow: sum_{i in negated} x[i] == 0.
     """
 
     @abstractmethod
     def reduce(self, contingency_df: pd.DataFrame) -> pd.Series:
-        """Reduce the constraint to a boolean Series aligned with `contingency_df`.
-
-        Args:
-            contingency_df: Pandas DataFrame used as the domain for evaluation.
-        Returns:
-            pd.Series: boolean mask where True indicates membership.
-        """
+        """Reduce the expression to a boolean Series aligned with `contingency_df`."""
         raise NotImplementedError()
-    
-    @staticmethod
-    def no_true_constraint(contingency_var: pd.Series, indices: List[int]) -> bool:
-        """Check that selected indices in the contingency variable are False.
 
-        Args:
-            contingency_var (pd.Series): A Series containing boolean values.
-            indices (List[int]): Indices in contingency_var that must all be zero.
-        Returns:
-            bool: True if all selected indices are zero (False), otherwise False.
-        """
-        return sum(contingency_var[i] for i in indices) == 0
-    
-    def to_constraint(self, contingency_df: pd.DataFrame) -> Callable:
-        """Convert the logical expression into a constraint function.
-
-        Args:
-            contingency_df: Pandas DataFrame used as the domain for evaluation.
-        Returns:
-            Callable: A function that takes a pd.Series and returns a boolean Series.
-        """
-        # Get reduced series
-        reduced_series = self.reduce(contingency_df)
-
-        # NOTE: The constraint will ensure that the resultant data holds the constraint as True
-        # That means if we have something like A -> B, then the combinations that have A=True
-        # must also have B=True. In other words, there should be no cases where A=True and B=False.
-        # To enforce this, we can create a constraint that checks that the sum of the values
-        # where the constraint is False is zero. Hence, we negate the reduced series.
-        negated_series = ~reduced_series
-
-        # Get the indices where the constraint is True
-        indices = negated_series[negated_series].index
-
-        # Return a function that checks if there are no True values in the negated indices.
-        # This will be the function used as a constraint in the optimizer.
-        return partial(LogicalExpression.no_true_constraint, indices=indices)
-
-
+    def to_sparse_row(self, contingency_df: pd.DataFrame) -> SparseRow:
+        # The expression must hold for the produced data. Equivalent to forcing the count
+        # of rows that violate the expression (negated mask) to be zero.
+        negated = ~self.reduce(contingency_df)
+        indices = np.asarray(negated[negated].index, dtype=np.int64)
+        coefs = np.ones_like(indices, dtype=np.float64)
+        return SparseRow(indices=indices, coefs=coefs, sense='=', rhs=0.0)

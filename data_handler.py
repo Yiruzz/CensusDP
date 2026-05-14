@@ -230,7 +230,7 @@ class DataHandler:
                         constraint.apply_aggregation_function(self.dataframe)
                 # Append the constraint function to the root constraints list
                 assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-                root_contstraints.append(constraint.to_constraint(self.contingency_df))
+                root_contstraints.append(constraint.to_sparse_row(self.contingency_df))
 
         root.constraints = root_contstraints
 
@@ -274,7 +274,7 @@ class DataHandler:
                             constraint.apply_aggregation_function(filtered_data)
                     # Append the constraint function to the level constraints list
                     assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-                    level_constraints.append(constraint.to_constraint(self.contingency_df))
+                    level_constraints.append(constraint.to_sparse_row(self.contingency_df))
 
             # Create a new child node
             child_node = HierarchicalNode(geo_id=value, level=curr_level+1, constraints=level_constraints)
