@@ -1,0 +1,120 @@
+[
+  {
+    "label": "baseline-pyomo-nl",
+    "timestamp": "2026-05-14T17:21:01",
+    "git": {
+      "sha": "dce9b469fc1889b785a8a8144b6ca35f9e82ff3f",
+      "branch": "shared-memory",
+      "dirty": true
+    },
+    "config": {
+      "process_until": "COMUNA",
+      "queries": [
+        "P01",
+        "P02",
+        "P03A",
+        "P03B"
+      ],
+      "user_constraints": false,
+      "runs": 3,
+      "sampler_interval_s": 0.05
+    },
+    "runs": [
+      {
+        "t_initialize_s": 3.1202928330749273,
+        "t_measurement_s": 2.4568644580431283,
+        "t_estimation_s": 15.087064999854192,
+        "rss_before_estimation_bytes": 1325645824,
+        "rss_peak_total_bytes": 2402926592,
+        "rss_peak_main_bytes": 1338064896,
+        "rss_peak_children_bytes": 1126596608,
+        "rss_delta_from_before_bytes": 1077280768,
+        "sampler_samples": 247,
+        "run_index": 0
+      },
+      {
+        "t_initialize_s": 3.0113879169803113,
+        "t_measurement_s": 2.4068490001372993,
+        "t_estimation_s": 15.050089749973267,
+        "rss_before_estimation_bytes": 2192523264,
+        "rss_peak_total_bytes": 2885255168,
+        "rss_peak_main_bytes": 2192785408,
+        "rss_peak_children_bytes": 1081802752,
+        "rss_delta_from_before_bytes": 692731904,
+        "sampler_samples": 247,
+        "run_index": 1
+      },
+      {
+        "t_initialize_s": 3.1258909590542316,
+        "t_measurement_s": 2.2395190831739455,
+        "t_estimation_s": 14.957633124897256,
+        "rss_before_estimation_bytes": 1964425216,
+        "rss_peak_total_bytes": 2653962240,
+        "rss_peak_main_bytes": 1964736512,
+        "rss_peak_children_bytes": 1095237632,
+        "rss_delta_from_before_bytes": 689537024,
+        "sampler_samples": 244,
+        "run_index": 2
+      }
+    ]
+  },
+  {
+    "label": "lp-writer-python",
+    "timestamp": "2026-05-14T17:30:02",
+    "git": {
+      "sha": "dce9b469fc1889b785a8a8144b6ca35f9e82ff3f",
+      "branch": "shared-memory",
+      "dirty": true
+    },
+    "config": {
+      "process_until": "COMUNA",
+      "queries": [
+        "P01",
+        "P02",
+        "P03A",
+        "P03B"
+      ],
+      "user_constraints": false,
+      "runs": 3,
+      "sampler_interval_s": 0.05
+    },
+    "runs": [
+      {
+        "t_initialize_s": 3.219064334174618,
+        "t_measurement_s": 2.42594908317551,
+        "t_estimation_s": 3.6934121248777956,
+        "rss_before_estimation_bytes": 1710637056,
+        "rss_peak_total_bytes": 2422816768,
+        "rss_peak_main_bytes": 1717616640,
+        "rss_peak_children_bytes": 744144896,
+        "rss_delta_from_before_bytes": 712179712,
+        "sampler_samples": 60,
+        "run_index": 0
+      },
+      {
+        "t_initialize_s": 3.0079659579787403,
+        "t_measurement_s": 2.3912138750310987,
+        "t_estimation_s": 3.6926829998847097,
+        "rss_before_estimation_bytes": 2261893120,
+        "rss_peak_total_bytes": 3043540992,
+        "rss_peak_main_bytes": 2262958080,
+        "rss_peak_children_bytes": 780582912,
+        "rss_delta_from_before_bytes": 781647872,
+        "sampler_samples": 61,
+        "run_index": 1
+      },
+      {
+        "t_initialize_s": 2.9749632079619914,
+        "t_measurement_s": 2.42209987482056,
+        "t_estimation_s": 3.6439743749797344,
+        "rss_before_estimation_bytes": 2146353152,
+        "rss_peak_total_bytes": 2776727552,
+        "rss_peak_main_bytes": 2146484224,
+        "rss_peak_children_bytes": 737935360,
+        "rss_delta_from_before_bytes": 630374400,
+        "sampler_samples": 60,
+        "run_index": 2
+      }
+    ]
+  }
+]
