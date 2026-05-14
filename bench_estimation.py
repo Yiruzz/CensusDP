@@ -223,6 +223,9 @@ def main() -> None:
     p.add_argument('--out', default='bench_results.json')
     p.add_argument('--sampler_interval', type=float, default=0.05)
     p.add_argument('--compare', action='store_true', help="Print stored results and exit without running.")
+    p.add_argument('--backend', choices=['lp', 'mps', 'matrix'],
+                   help="Optimizer back end. Sets TOPDOWN_OPTIMIZER_BACKEND for spawn workers. "
+                        "Omit to use the optimizer's default ('lp').")
     args = p.parse_args()
 
     out_path = Path(args.out)
@@ -234,6 +237,10 @@ def main() -> None:
     if not args.label:
         sys.stderr.write("--label is required when running a benchmark (omit only with --compare).\n")
         sys.exit(2)
+
+    if args.backend:
+        os.environ['TOPDOWN_OPTIMIZER_BACKEND'] = args.backend
+        print(f"backend: {args.backend} (TOPDOWN_OPTIMIZER_BACKEND set)")
 
     if not Path(DATA_PATH).exists():
         sys.stderr.write(f"data file not found: {DATA_PATH}\n")

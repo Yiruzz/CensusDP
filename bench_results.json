@@ -116,5 +116,123 @@
         "run_index": 2
       }
     ]
+  },
+  {
+    "label": "mps-writer-python",
+    "timestamp": "2026-05-14T17:43:54",
+    "git": {
+      "sha": "b6b3403201719b7e5b960c111e219410dc0c44c2",
+      "branch": "lp-writer-optimizer",
+      "dirty": true
+    },
+    "config": {
+      "process_until": "COMUNA",
+      "queries": [
+        "P01",
+        "P02",
+        "P03A",
+        "P03B"
+      ],
+      "user_constraints": false,
+      "runs": 3,
+      "sampler_interval_s": 0.05
+    },
+    "runs": [
+      {
+        "t_initialize_s": 3.1337349170353264,
+        "t_measurement_s": 2.298197250114754,
+        "t_estimation_s": 4.324836208019406,
+        "rss_before_estimation_bytes": 1864286208,
+        "rss_peak_total_bytes": 2415738880,
+        "rss_peak_main_bytes": 1870495744,
+        "rss_peak_children_bytes": 816185344,
+        "rss_delta_from_before_bytes": 551452672,
+        "sampler_samples": 71,
+        "run_index": 0
+      },
+      {
+        "t_initialize_s": 3.062758707907051,
+        "t_measurement_s": 2.2538010829593986,
+        "t_estimation_s": 4.36717470898293,
+        "rss_before_estimation_bytes": 2311766016,
+        "rss_peak_total_bytes": 3035234304,
+        "rss_peak_main_bytes": 2312945664,
+        "rss_peak_children_bytes": 772866048,
+        "rss_delta_from_before_bytes": 723468288,
+        "sampler_samples": 73,
+        "run_index": 1
+      },
+      {
+        "t_initialize_s": 2.946195791941136,
+        "t_measurement_s": 2.320029125083238,
+        "t_estimation_s": 4.305129749933258,
+        "rss_before_estimation_bytes": 2376712192,
+        "rss_peak_total_bytes": 3216293888,
+        "rss_peak_main_bytes": 2377039872,
+        "rss_peak_children_bytes": 839254016,
+        "rss_delta_from_before_bytes": 839581696,
+        "sampler_samples": 72,
+        "run_index": 2
+      }
+    ]
+  },
+  {
+    "label": "matrix-direct",
+    "timestamp": "2026-05-14T17:44:26",
+    "git": {
+      "sha": "b6b3403201719b7e5b960c111e219410dc0c44c2",
+      "branch": "lp-writer-optimizer",
+      "dirty": true
+    },
+    "config": {
+      "process_until": "COMUNA",
+      "queries": [
+        "P01",
+        "P02",
+        "P03A",
+        "P03B"
+      ],
+      "user_constraints": false,
+      "runs": 3,
+      "sampler_interval_s": 0.05
+    },
+    "runs": [
+      {
+        "t_initialize_s": 3.0769521249458194,
+        "t_measurement_s": 2.4144633340183645,
+        "t_estimation_s": 2.0318204581271857,
+        "rss_before_estimation_bytes": 1866006528,
+        "rss_peak_total_bytes": 2525364224,
+        "rss_peak_main_bytes": 1873149952,
+        "rss_peak_children_bytes": 779288576,
+        "rss_delta_from_before_bytes": 659357696,
+        "sampler_samples": 34,
+        "run_index": 0
+      },
+      {
+        "t_initialize_s": 3.0669687080662698,
+        "t_measurement_s": 2.4242302500642836,
+        "t_estimation_s": 2.0161158749833703,
+        "rss_before_estimation_bytes": 2097233920,
+        "rss_peak_total_bytes": 2749644800,
+        "rss_peak_main_bytes": 2098593792,
+        "rss_peak_children_bytes": 801112064,
+        "rss_delta_from_before_bytes": 652410880,
+        "sampler_samples": 34,
+        "run_index": 1
+      },
+      {
+        "t_initialize_s": 3.006457250099629,
+        "t_measurement_s": 2.394976875046268,
+        "t_estimation_s": 2.0143626669887453,
+        "rss_before_estimation_bytes": 2139832320,
+        "rss_peak_total_bytes": 2934308864,
+        "rss_peak_main_bytes": 2140012544,
+        "rss_peak_children_bytes": 794296320,
+        "rss_delta_from_before_bytes": 794476544,
+        "sampler_samples": 34,
+        "run_index": 2
+      }
+    ]
   }
 ]
