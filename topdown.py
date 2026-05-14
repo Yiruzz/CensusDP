@@ -12,9 +12,10 @@ from noisy import (
     sample_dlaplace_optimized
 )
 
-from parallel import init_process, solve
+from parallel_utils import init_process, solve
 
 from collections import deque
+from multiprocessing import get_context
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import Callable, Dict, List, Tuple
 import time
@@ -191,18 +192,16 @@ class TopDown():
         This means that it is not necessary to wait for an entire level to finish before moving to the next,
         because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
         '''
-        vector_length = self.data_handler.contingency_df_length
+    
         root = self.tree.nodes[0]
-        children = [child.id for child in root.children]
         child_constraints = {child.id: child.constraints for child in root.children}
     
         root_arguments = (
             root.id,
-            children, 
             child_constraints
         )
 
-        max_workers = 3
+        max_workers = self.workers
         buffer = 2
         max_outstanding = max_workers + buffer
 
@@ -225,7 +224,11 @@ class TopDown():
             shared_array_dtype,
         )
 
-        with ProcessPoolExecutor(max_workers=max_workers, initializer=init_process, initargs=args) as executor:
+        nodes_per_level = [abs(self.tree._levels[i] - self.tree._levels[i + 1])for i in range(len(self.tree._levels) - 1)]
+        time_per_level = np.zeros(len(self.hierarchical_columns))
+
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn"),
+                                 initializer=init_process, initargs=args) as executor:
             next_ranges = deque()
             curr_range = None
 
@@ -240,8 +243,13 @@ class TopDown():
                 # Process completed tasks
                 for fut in done:
                     futures.pop(fut)
-                    node_id = fut.result()
+                    node_id, elapsed_time = fut.result()
                     node = self.tree.nodes[node_id]
+
+                    time_per_level[node.level] += elapsed_time
+                    nodes_per_level[node.level] -= 1
+
+                    if nodes_per_level[node.level] == 0: print(f"Level {node.level} processed in {time_per_level[node.level]:.2f} seconds.")
 
                     # Add children range
                     next_ranges.append(iter(node.children)) 
@@ -261,16 +269,15 @@ class TopDown():
                             curr_range = None
                         continue
 
-                    if node.is_leaf():
-                        continue
+                    if node.is_leaf(): continue
 
                     child_arguments = (
                         node.id,
-                        [child.id for child in node.children],
                         {child.id: child.constraints for child in node.children}
                     )
                     fut = executor.submit(solve, *child_arguments)
                     futures[fut] = child_arguments
+
         return None
 
     def estimation_phase(self) -> None:
@@ -280,13 +287,8 @@ class TopDown():
         consistency and adherence to constraints after noise has been added.
         '''
         t1 = time.time()
-        print(f'Running estimation phase...')
-
-        t2 = time.time()
-        print(f'\nProcessing root node (level 0)... ', end=' ')
+        print(f'Running estimation phase...\n')
         self.root_estimation_phase()
-        print(f'{time.time() - t2:.2f} seconds.')
-
         self.subtree_estimation_phase()
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
         

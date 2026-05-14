@@ -59,7 +59,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
 
     # Define solver-specific options
     if SOLVER_NAME == 'gurobi':
-        SOLVER_OPTIONS = {'OutputFlag': 0}  # Suppress Gurobi output
+        SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1}  # Suppress Gurobi output
     elif SOLVER_NAME == 'cplex':
         SOLVER_OPTIONS = {'timelimit': 300}  # Example CPLEX options
     elif SOLVER_NAME == 'glpk':
