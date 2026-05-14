@@ -44,7 +44,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     # https://www.ine.gob.cl/estadisticas/sociales/censos-de-poblacion-y-vivienda/censo-de-poblacion-y-vivienda
 
     # DATA_PATH_PERSONAS = 'data/csv-personas-censo-2017/microdato_censo2017-personas/Microdato_Censo2017-Personas.csv'
-    DATA_PATH_VIVIENDAS= 'data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/Microdato_Censo2017-Viviendas.csv'
+    DATA_PATH_VIVIENDAS= 'data/csv-viviendas-censo-2017/Microdato_Censo2017-Viviendas.csv'
 
     OUTPUT_PATH = 'data/out/'
     OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
