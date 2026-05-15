@@ -55,7 +55,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     DATA_PATH_VIVIENDAS= 'data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/Microdato_Censo2017-Viviendas.csv'
 
     OUTPUT_PATH = 'data/out/'
-    OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERY_COLUMNS) + '.csv'
+    OUTPUT_FILE = 'viviendas_noisy_microdata_' + PROCESS_UNTIL + '_' + '_'.join(QUERIES) + '.csv'
 
     #######################
     # Solver configuration #
@@ -99,7 +99,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     topdown = TopDown(
         data_path=DATA_PATH_VIVIENDAS,
         hierarchy=GEO_COLUMNS_TO_USE,
-        query_columns=QUERY_COLUMNS,
+        query_columns=QUERIES,
         privacy_mechanism=PRIVACY_MECHANISM,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
         optimizer=SOLVER_NAME,
@@ -108,7 +108,10 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     )
 
     # Set the queries to be answered at each node of the tree.
-    topdown.set_query_workload(QueryWorkload().add(col('P02') == 1).add(col('P02') == 2).add(col('P02') == 1 or col('P02') == 2))
+    topdown.set_query_workload(QueryWorkload()
+                               .add(col('P02') == 1)
+                               .add(col('P02') == 2)
+                               .add(col('P02') == 1 or col('P02') == 2))
 
     ####################
     # Edit Constraints #

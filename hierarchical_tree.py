@@ -42,6 +42,14 @@ class HierarchicalTree:
         self._levels = [level]
         self._contingency_vectors_shm = None
 
+        # Logical sizes of the per-node contingency vector across pipeline stages.
+        # _contingency_vectors rows are physically sized to vector_length = max(n_queries, n_cells),
+        # so a single allocation accommodates both the noisy measurement y (length n_queries) and
+        # the estimated cell counts x_hat (length n_cells). Set by DataHandler.build_hierarchical_tree.
+        self.n_queries: int = 0
+        self.n_cells: int = 0
+        self.vector_length: int = 0
+
     
     def iterate_by_levels(self) -> Generator[Tuple[int, List[HierarchicalNode]], None, None]:
         """

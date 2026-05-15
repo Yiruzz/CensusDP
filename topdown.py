@@ -7,13 +7,6 @@ from constraints.constraint import Constraint
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from noisy import ( 
-    sample_dgauss_fast,
-    sample_dlaplace_fast,
-    sample_dgauss_optimized,
-    sample_dlaplace_optimized
-)
-
 from parallel_utils import init_process, solve
 
 from collections import deque
@@ -134,25 +127,24 @@ class TopDown():
             Tuple[int, int, float]: The start index, end index, and execution time for processing the chunk.
         '''
         t1 = time.time()
+        # Only the first n_queries slots of each row hold the live measurement y; the
+        # trailing slots (when vector_length > n_queries) are reserved padding for x_hat
+        # and must not be touched in this phase.
+        n_queries = self.tree.n_queries
         for idx in range(start, end):
-            self.add_noise(self.tree._contingency_vectors[idx], self.tree.nodes[idx].level])
-   
+            self.add_noise(self.tree._contingency_vectors[idx, :n_queries], self.tree.nodes[idx].level)
+
         t2 = time.time()-t1
         return start, end, t2
         
     def add_noise(self, contingency_vector: np.ndarray, level: int) -> None:
-        '''Add noise to the contingency vector using the specified mechanism modifiyn in-place.
-        
+        '''Add noise to the contingency vector using the configured privacy mechanism, in place.
+
         Args:
-            contingency_vector (np.ndarray): The original contingency vector.
-            level (int)
+            contingency_vector (np.ndarray): The vector to be noised (modified in place).
+            level (int): Tree level — selects the per-level privacy parameter inside the mechanism.
         '''
-        samples = len(contingency_vector)
-        noise = np.array([
-                    self.privacy_mechanism.sample_noise(level, self.query_sensitivity)
-                    for _ in range(samples)
-                ])
-        contingency_vector += noise
+        self.privacy_mechanism.add_noise(contingency_vector, level, self.query_sensitivity)
 
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
@@ -198,15 +190,21 @@ class TopDown():
 
     def root_estimation_phase(self, index: int = 0) -> None:
         '''Perform the estimation phase of the TopDown algorithm for root node.
+
+        Reads the noisy measurement y from the first n_queries slots of the row, then
+        overwrites the first n_cells slots with x_hat. The row stays the same physical size.
         '''
         optimizer = OptimizationModel(*self.optimizer)
         root = self.tree.nodes[index]
+        n_queries = self.tree.n_queries
+        n_cells = self.tree.n_cells
         x_tilde = optimizer.non_negative_real_estimation(
-            contingency_vector=self.tree._contingency_vectors[index],
+            noisy_measurements=self.tree._contingency_vectors[index, :n_queries],
             node_id=root.id,
-            constraints=root.constraints
+            constraints=root.constraints,
+            query_matrix=self.Q
         )
-        self.tree._contingency_vectors[index] = optimizer.rounding_estimation(
+        self.tree._contingency_vectors[index, :n_cells] = optimizer.rounding_estimation(
             x_tilde=x_tilde,
             node_id=root.id,
             constraints=root.constraints
@@ -225,7 +223,7 @@ class TopDown():
     
         root_arguments = (
             root.id,
-            child_constraints
+            child_constraints,
         )
 
         max_workers = self.workers
@@ -249,6 +247,9 @@ class TopDown():
             shared_memory_name,
             shared_array_shape,
             shared_array_dtype,
+            self.tree.n_queries,
+            self.tree.n_cells,
+            self.Q,
         )
 
         nodes_per_level = [abs(self.tree._levels[i] - self.tree._levels[i + 1])for i in range(len(self.tree._levels) - 1)]
@@ -300,7 +301,7 @@ class TopDown():
 
                     child_arguments = (
                         node.id,
-                        {child.id: child.constraints for child in node.children}
+                        {child.id: child.constraints for child in node.children},
                     )
                     fut = executor.submit(solve, *child_arguments)
                     futures[fut] = child_arguments
@@ -441,16 +442,19 @@ class TopDown():
             node (HierarchicalNode): The node to check.
         '''
         if node.children:
-            # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = sum(self.tree._contingency_vectors[node.id])
+            # After estimation, only the first n_cells slots of each row hold x_hat; the
+            # trailing slots (if vector_length > n_cells) are unused padding and would
+            # spuriously inflate the sum if included.
+            n_cells = self.tree.n_cells
+            node_sum = int(self.tree._contingency_vectors[node.id, :n_cells].sum())
             children_sum = 0
             for child in node.children:
-                children_sum += np.sum(self.tree._contingency_vectors[child.id])
+                children_sum += int(self.tree._contingency_vectors[child.id, :n_cells].sum())
 
-            if node_sum != children_sum:      
-                print(node_sum, children_sum)      
+            if node_sum != children_sum:
+                print(node_sum, children_sum)
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
+                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id, :n_cells]}')
                 raise ValueError('Tree correctness check failed.')
             else:
                 for child in node.children:

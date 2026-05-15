@@ -142,31 +142,42 @@ class DataHandler:
         
         return contingency_vector
     
-    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int) -> Tuple[List[HierarchicalNode], List[int], np.ndarray, memoryview]:
-        '''Retrieve the references of all nodes of the tree to facilitate access. 
+    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int,
+                                    n_queries: int, vector_length: int) -> Tuple[List[HierarchicalNode], List[int], np.ndarray, memoryview]:
+        '''Retrieve the references of all nodes of the tree to facilitate access.
         Also create a shared memory space with all contingency vectors copied,
         enabling multiprocessing without duplicating data.
+
+        Each row is sized to vector_length = max(n_queries, n_cells) so the same slot holds
+        both the noisy measurement y (length n_queries, written here) and later the estimated
+        cell counts x_hat (length n_cells, written by the estimation phase). The unused
+        trailing slots are zero-initialized and ignored until estimation overwrites them.
 
         Args:
             root (HierarchicalNode): A hierarchical tree.
             n_nodes (int): Number of nodes, corresponding to the number of rows in the shared memory space.
+            n_queries (int): Length of the measurement vector y currently held by each node.
+            vector_length (int): Physical row length = max(n_queries, n_cells).
 
         Return:
             tuple[list[HierarchicalNode], List[int], np.ndarray, memoryview]: A tuple containing all node references, the node index where each level starts,
                                                                               the view over the shared memory buffer, and the memoryview used to access the shared memory.
         '''
-        shape = (n_nodes,  len(node.contingency_vector)
+        shape = (n_nodes, vector_length)
         size = int(np.prod(shape) * np.dtype(self.dtype).itemsize)
 
-        # Create share memory space  
+        # Create share memory space
         shm = shared_memory.SharedMemory(create=True, size=size)
 
-        # Create view to manipulate shared memory
+        # View over the shared buffer. shared_memory contents are uninitialized, so zero the
+        # whole array — the trailing slots beyond n_queries must start at 0, since the
+        # measurement phase only writes the first n_queries entries.
         arr = np.ndarray(shape, dtype=self.dtype, buffer=shm.buf)
+        arr.fill(0)
 
         # Retrieve node references
         nodes = []
-        queue = deque([root]) 
+        queue = deque([root])
 
         next_id = 0
 
@@ -180,14 +191,14 @@ class DataHandler:
             # Assign node IDs using BFS order
             node.id = next_id
 
-            # Copy contingency vector into corresponding shared memory row
-            arr[node.id, :] = node.contingency_vector[:]
+            # Copy the node's noisy-measurement-sized vector into the first n_queries slots.
+            arr[node.id, :n_queries] = node.contingency_vector[:]
             del node.contingency_vector
             nodes.append(node)
 
             if node.level == idx and levels[idx] == 0:
                 levels[idx] = node.id
-                idx += 1 
+                idx += 1
 
             for child in node.children:
                 child.parent_id = node.id
@@ -224,7 +235,7 @@ class DataHandler:
 
         assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
         # Query answers for the root node (entire dataset). Raw x is discarded after the multiply.
-        tree.root.contingency_vector = query_matrix @ self.create_contingency_vector(self.dataframe)
+        root.contingency_vector = query_matrix @ self.create_contingency_vector(self.dataframe)
 
         # List of constraints for the root node
         root_contstraints = []
@@ -243,8 +254,18 @@ class DataHandler:
 
         # Construct the tree recursively and count the nodes created
         # Then change the representation to array and create a share memory space
-        tree._node_count = self._build_subtree(tree.root, 0, self.dataframe, constraints, query_matrix)
-        tree.nodes, tree._levels, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(root, tree._node_count)
+        tree._node_count = self._build_subtree(root, 0, self.dataframe, constraints, query_matrix)
+
+        # Single-buffer sizing: rows of max(n_queries, n_cells) hold both y (n_queries) before
+        # estimation and x_hat (n_cells) after, so the same allocation serves both phases.
+        n_queries, n_cells = query_matrix.shape
+        tree.n_queries = n_queries
+        tree.n_cells = n_cells
+        tree.vector_length = max(n_queries, n_cells)
+
+        tree.nodes, tree._levels, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(
+            root, tree._node_count, n_queries, tree.vector_length
+        )
         return tree
 
     def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> int:
@@ -252,7 +273,7 @@ class DataHandler:
 
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
-            curr_level (int): An iterator for the current level in the hierarchy. It has an offset of 1.
+            level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
             data (pd.DataFrame): The subset of data corresponding to the parent node.
             constraints (List[Callable]): List of constraints to apply to each node.
             query_matrix (np.ndarray): Query matrix Q applied to each child's raw cell counts.
@@ -263,11 +284,11 @@ class DataHandler:
         n_nodes = 1
 
         # When there are no more levels to process, return the parent node
-        if curr_level >= len(self.hierarchical_columns):
+        if level_iterator >= len(self.hierarchical_columns):
             return n_nodes
         
         # Get the current hierarchical column to split on
-        current_column = self.hierarchical_columns[curr_level]
+        current_column = self.hierarchical_columns[level_iterator]
         unique_hierarchical_values = data[current_column].unique()
 
         for value in unique_hierarchical_values:
@@ -276,9 +297,9 @@ class DataHandler:
 
             # Prepare constraints for the current level
             level_constraints = []
-            if constraints and curr_level in constraints:
+            if constraints and level_iterator in constraints:
                 # Iterate over the constraints for the current level
-                for constraint in constraints[curr_level]:
+                for constraint in constraints[level_iterator]:
                     # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
                     match constraint:
                         case ContextualAggregateConstraint():
@@ -288,7 +309,7 @@ class DataHandler:
                     level_constraints.append(constraint.to_constraint(self.contingency_df))
 
             # Create a new child node
-            child_node = HierarchicalNode(geo_id=value, level=curr_level+1, constraints=level_constraints)
+            child_node = HierarchicalNode(geo_id=value, level=level_iterator+1, constraints=level_constraints)
             parent_node.add_child(child_node)
 
             # Store query answers Q @ x; raw cell counts x are not retained.
@@ -330,7 +351,9 @@ class DataHandler:
         for leaf in tree.nodes[start_node_idx:]:
             # Generate rows associated with query values.
             # Select only positive frequencies.
-            contingency_vector = tree._contingency_vectors[leaf.id]
+            # After estimation, only the first n_cells slots of the row hold the x_hat values;
+            # the trailing slots (if vector_length > n_cells) are unused padding.
+            contingency_vector = tree._contingency_vectors[leaf.id][:tree.n_cells]
             nonzero_mask = contingency_vector > 0
 
             # Filter combinations to avoid processing zero-frequency rows.
