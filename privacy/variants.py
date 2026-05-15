@@ -22,7 +22,7 @@ from typing import List
 
 import numpy as np
 
-from noisy import sample_dgauss_optimized, sample_dlaplace_optimized
+from .noisy import sample_dgauss_optimized, sample_dlaplace_optimized
 
 
 class PrivacyMechanism(ABC):
