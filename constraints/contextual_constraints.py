@@ -1,6 +1,6 @@
 import pandas as pd
-
-from typing import Callable
+from functools import partial
+from typing import Callable, List
 
 from constraints.logical_expressions.base import LogicalExpression
 from .aggregate_constraints import AggregateConstraint
@@ -55,6 +55,19 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         
         # The true total is the count of rows in the node's context
         super().__init__(expression=expression, aggregation_function=get_real_total)
+
+    @staticmethod
+    def check_sum(contingency_var: pd.Series, sum_val: int, indices: List[int]) -> bool:
+        """Check that the sum of selected indices in the contingency variable equals a target value.
+        
+        Args:
+            contingency_var (pd.Series): A series containing numeric values.
+            sum_val (int): The expected sum of the selected elements.
+            indices (List[int]): Indices in contingency_var whose values will be summed.
+        Returns:
+            bool: True if the sum of the selected elements equals sum_val, otherwise False.
+        """
+        return sum(contingency_var[i] for i in indices) == sum_val
     
     def to_constraint(self, contingency_df):
         # Get reduced series
@@ -62,7 +75,7 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         # Get indices where the expression is True
         indices = reduced_series[reduced_series].index
         # Return a function that checks if the sum of the contingency variable equals the value
-        return lambda contingency_var, sum_val=self.value, _indices=indices: sum(contingency_var[i] for i in _indices) == sum_val
-
+        return partial(SumEqualRealTotal.check_sum, sum_val=self.value, indices=indices)
+    
 # NOTE: Add more aggregate expressions as needed
 

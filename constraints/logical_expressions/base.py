@@ -1,5 +1,6 @@
 import pandas as pd
-from typing import Callable
+from functools import partial
+from typing import Callable, List
 from abc import ABC, abstractmethod
 
 from constraints.constraint import Constraint
@@ -21,6 +22,18 @@ class LogicalExpression(Constraint, ABC):
             pd.Series: boolean mask where True indicates membership.
         """
         raise NotImplementedError()
+    
+    @staticmethod
+    def no_true_constraint(contingency_var: pd.Series, indices: List[int]) -> bool:
+        """Check that selected indices in the contingency variable are False.
+
+        Args:
+            contingency_var (pd.Series): A Series containing boolean values.
+            indices (List[int]): Indices in contingency_var that must all be zero.
+        Returns:
+            bool: True if all selected indices are zero (False), otherwise False.
+        """
+        return sum(contingency_var[i] for i in indices) == 0
     
     def to_constraint(self, contingency_df: pd.DataFrame) -> Callable:
         """Convert the logical expression into a constraint function.
@@ -45,6 +58,6 @@ class LogicalExpression(Constraint, ABC):
 
         # Return a function that checks if there are no True values in the negated indices.
         # This will be the function used as a constraint in the optimizer.
-        return lambda contingency_var, _indices=indices: sum(contingency_var[i] for i in _indices) == 0
+        return partial(LogicalExpression.no_true_constraint, indices=indices)
 
 

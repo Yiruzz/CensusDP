@@ -7,9 +7,20 @@ from constraints.constraint import Constraint
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from typing import Callable, Dict, List, Optional, Union
-import time
+from noisy import ( 
+    sample_dgauss_fast,
+    sample_dlaplace_fast,
+    sample_dgauss_optimized,
+    sample_dlaplace_optimized
+)
 
+from parallel_utils import init_process, solve
+
+from collections import deque
+from multiprocessing import get_context
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from typing import Callable, Dict, List, Tuple, Optional, Union
+import time
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
@@ -71,7 +82,9 @@ class TopDown():
         self.constraints: Dict[int, List[Constraint]] = {}
 
         self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
-        self.optimizer: OptimizationModel = OptimizationModel(optimizer, solver_options, optimizer_path)
+        self.optimizer = (optimizer, solver_options, optimizer_path)
+
+        self.workers: int = 4
         
         #self.constraints: List[List[Callable]] = []
         # self.processed_data: pd.DataFrame = None
@@ -110,7 +123,36 @@ class TopDown():
         self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
-        return None
+    def add_noise_to_chunk(self, start: int, end: int) -> Tuple[int, int, float]:
+        '''Apply noise to a chunk of contingency vectors.
+
+        Args:
+            start (int): Starting index of the chunk.
+            end (int): Ending index of the chunk (exclusive).
+
+        Returns:
+            Tuple[int, int, float]: The start index, end index, and execution time for processing the chunk.
+        '''
+        t1 = time.time()
+        for idx in range(start, end):
+            self.add_noise(self.tree._contingency_vectors[idx], self.tree.nodes[idx].level])
+   
+        t2 = time.time()-t1
+        return start, end, t2
+        
+    def add_noise(self, contingency_vector: np.ndarray, level: int) -> None:
+        '''Add noise to the contingency vector using the specified mechanism modifiyn in-place.
+        
+        Args:
+            contingency_vector (np.ndarray): The original contingency vector.
+            level (int)
+        '''
+        samples = len(contingency_vector)
+        noise = np.array([
+                    self.privacy_mechanism.sample_noise(level, self.query_sensitivity)
+                    for _ in range(samples)
+                ])
+        contingency_vector += noise
 
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
@@ -119,18 +161,149 @@ class TopDown():
         This phase adds discrete noise calibrated to the sensitivity of Q in place: y <- y + noise.
         '''
         t1 = time.time()
-        print(f'Running measurement phase (query_sensitivity={self.query_sensitivity})...\n')
-        for level, nodes in self.tree.iterate_by_levels():
-            t2 = time.time()
-            print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
-            for node in nodes:
-                noise = np.array([
-                    self.privacy_mechanism.sample_noise(level, self.query_sensitivity)
-                    for _ in range(len(node.contingency_vector))
-                ])
-                node.contingency_vector = node.contingency_vector + noise
-            print(f'{time.time() - t2:.2f} seconds.')
-        print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
+        print(f'Running measurement phase...\n')
+
+        # Create chunks to distribute among workers.
+        # Since the data is independent, workers do not require synchronization.
+        num_chunks = self.workers
+        base_chunk_size = self.tree._node_count // num_chunks
+        remaining_nodes = self.tree._node_count % num_chunks
+
+        chunks = []
+        start = 0
+
+        for i in range(num_chunks):
+            extra = 1 if i < remaining_nodes else 0
+            end = start + base_chunk_size + extra
+            chunks.append((start, end))
+            start = end
+
+        # Create a thread pool.
+        # Each worker receives a chunk.
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            futures = []
+            for chunk in chunks:
+                print(f"Processing nodes {chunk[0]} until {chunk[1]}...")
+                futures.append(executor.submit(self.add_noise_to_chunk, *chunk))
+
+            print("\n", end="")
+
+            # The vectors are modified in-place,
+            # so only execution time is returned for logging purposes.
+            for future in as_completed(futures):
+                start, end, finished_time = future.result()
+                print(f"Finshed chunk nodes {start} until {end} in {finished_time:.2f} seconds")
+            
+        print(f"\nMeasurement phase completed in {time.time() - t1:.2f} seconds.\n")
+
+    def root_estimation_phase(self, index: int = 0) -> None:
+        '''Perform the estimation phase of the TopDown algorithm for root node.
+        '''
+        optimizer = OptimizationModel(*self.optimizer)
+        root = self.tree.nodes[index]
+        x_tilde = optimizer.non_negative_real_estimation(
+            contingency_vector=self.tree._contingency_vectors[index],
+            node_id=root.id,
+            constraints=root.constraints
+        )
+        self.tree._contingency_vectors[index] = optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=root.id,
+            constraints=root.constraints
+        )
+        return None
+
+    def subtree_estimation_phase(self) -> None:
+        '''Allows solving optimization models in parallel once their contingency vectors are updated.
+        
+        This means that it is not necessary to wait for an entire level to finish before moving to the next,
+        because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
+        '''
+    
+        root = self.tree.nodes[0]
+        child_constraints = {child.id: child.constraints for child in root.children}
+    
+        root_arguments = (
+            root.id,
+            child_constraints
+        )
+
+        max_workers = self.workers
+        buffer = 2
+        max_outstanding = max_workers + buffer
+
+        # Retrieve solver configuration and shared memory information.
+        # Each process initializes its own solver instance and attaches
+        # to the shared memory space on first execution.
+        solver_name = self.optimizer[0]
+        solver_options = self.optimizer[1]
+        optimizer_path = self.optimizer[2]
+        shared_memory_name = self.tree._contingency_vectors_shm.name
+        shared_array_shape = self.tree._contingency_vectors.shape
+        shared_array_dtype = str(self.tree._contingency_vectors.dtype)
+
+        args = (
+            solver_name,
+            solver_options,
+            optimizer_path,
+            shared_memory_name,
+            shared_array_shape,
+            shared_array_dtype,
+        )
+
+        nodes_per_level = [abs(self.tree._levels[i] - self.tree._levels[i + 1])for i in range(len(self.tree._levels) - 1)]
+        time_per_level = np.zeros(len(self.hierarchical_columns))
+
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn"),
+                                 initializer=init_process, initargs=args) as executor:
+            next_ranges = deque()
+            curr_range = None
+
+            # Submit root
+            futures = {
+                executor.submit(solve, *root_arguments): root_arguments
+            }
+
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+
+                # Process completed tasks
+                for fut in done:
+                    futures.pop(fut)
+                    node_id, elapsed_time = fut.result()
+                    node = self.tree.nodes[node_id]
+
+                    time_per_level[node.level] += elapsed_time
+                    nodes_per_level[node.level] -= 1
+
+                    if nodes_per_level[node.level] == 0: print(f"Level {node.level} processed in {time_per_level[node.level]:.2f} seconds.")
+
+                    # Add children range
+                    next_ranges.append(iter(node.children)) 
+
+                    # Initialize current range if needed
+                    if curr_range is None and next_ranges:
+                        curr_range = next_ranges.popleft()
+
+                # Fill available slots
+                while len(futures) < max_outstanding and curr_range is not None:
+                    try:
+                        node = next(curr_range)
+                    except StopIteration:
+                        if next_ranges:
+                            curr_range = next_ranges.popleft()
+                        else:
+                            curr_range = None
+                        continue
+
+                    if node.is_leaf(): continue
+
+                    child_arguments = (
+                        node.id,
+                        {child.id: child.constraints for child in node.children}
+                    )
+                    fut = executor.submit(solve, *child_arguments)
+                    futures[fut] = child_arguments
 
         return None
 
@@ -146,83 +319,9 @@ class TopDown():
         guarantees parents are converted to x_hat before their children are read.
         '''
         t1 = time.time()
-        print(f'Running estimation phase...')
-
-        # Root estimation (level 0)
-        # Does not require consistency adjustments
-        t2 = time.time()
-        print(f'\nProcessing root node (level 0)... ', end=' ')
-        x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=self.tree.root.contingency_vector,
-            id_node=self.tree.root.id,
-            constraints=self.tree.root.constraints,
-            query_matrix=self.Q
-        )
-        self.tree.root.contingency_vector = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            id_node=self.tree.root.id,
-            constraints=self.tree.root.constraints
-        )
-        print(f'{time.time() - t2:.2f} seconds.')
-
-        # Now process the rest of the tree level by level
-        for level, nodes in self.tree.iterate_by_levels():
-            t2 = time.time()
-            if len(nodes[0].children) != 0: print(f'Processing level {level+1}...', end=' ')
-            for node in nodes:
-                # If the node is a leaf, no need to solve optimization
-                # NOTE: With a break we assume that all leaves are at the same level
-                if len(node.children) == 0:
-                    break
-
-                # Solve the optimization problem for the children of the current node
-                vectors_length = self.Q.shape[1]  # n_cells per child in decision-variable space
-                # Children still hold y = Q @ x + noise in their slot at this point.
-                joint_noisy_measurements = np.concatenate([child.contingency_vector for child in node.children])
-                # All nodes have the same length of the contingency vector
-                joint_x_length = len(node.children) * vectors_length
-
-                # Transform individual constraints for joint vector
-                joint_constraints: List[Callable] = []
-                start = 0
-                for child in node.children:
-                    end = start + vectors_length
-                    for constraint in child.constraints:
-                        # NOTE: We use default arguments to avoid late binding issues in lambdas
-                        # This can lead to all constraints using the last values saved of start and end
-                        # Build a sub-dict with keys 0..(e-s-1) so the constraint's indices still match
-                        joint_constraints.append(lambda joint_array, s=start, e=end, c=constraint: c({i - s: joint_array[i] for i in range(s, e)}))
-                    start = end
-
-                # Consistency constraint: sum of children = parent
-                for index in range(vectors_length):
-                    # Parent's contingency vector value at 'index' must equal sum of children's values at 'index'
-                    # Precompute the indices to sum to avoid slice notation incompatible with Pyomo vars
-                    indices_to_sum = list(range(index, joint_x_length, vectors_length))
-                    joint_constraints.append(lambda joint_array, idxs=indices_to_sum, value=node.contingency_vector[index]:
-                                             sum(joint_array[j] for j in idxs) == value)
-
-                # Solve for children nodes
-                x_tilde = self.optimizer.non_negative_real_estimation(
-                    noisy_measurements=joint_noisy_measurements,
-                    id_node=node.id,
-                    constraints=joint_constraints,
-                    query_matrix=self.Q
-                )
-                joint_solution: np.ndarray = self.optimizer.rounding_estimation(
-                    x_tilde=x_tilde,
-                    id_node=node.id,
-                    constraints=joint_constraints
-                )
-
-                # Save the solution back to each child node
-                start = 0
-                for child in node.children:
-                    end = start + vectors_length
-                    child.contingency_vector = joint_solution[start:end]
-                    start = end
-
-            if len(nodes[0].children) != 0: print(f'{time.time() - t2:.2f} seconds.')
+        print(f'Running estimation phase...\n')
+        self.root_estimation_phase()
+        self.subtree_estimation_phase()
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
         
         return None
@@ -243,7 +342,7 @@ class TopDown():
 
         print(f'Writing noisy data to {self.data_handler.output_path}...', end=' ')
         t1 = time.time()
-        self.data_handler.write_data(noisy_df)
+        self.data_handler.write_data(data=noisy_df, cols=self.hierarchical_columns+self.query_columns)
         print(f'{time.time() - t1:.2f} seconds.\n')
         return noisy_df
 
@@ -326,10 +425,11 @@ class TopDown():
     def check_correctness(self) -> None:
         '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
         '''
-        if self.tree.root is not None:
+        root = self.tree.nodes[0]
+        if root is not None:
             print(f'Checking correctness of the tree...')
             time1 = time.time()
-            self._check_correctness_node(self.tree.root)
+            self._check_correctness_node(root)
             time2 = time.time()
             print(f'Finished checking correctness in {time2-time1} seconds.\n')
 
@@ -342,14 +442,15 @@ class TopDown():
         '''
         if node.children:
             # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = np.sum(node.contingency_vector)
+            node_sum = sum(self.tree._contingency_vectors[node.id])
             children_sum = 0
             for child in node.children:
-                children_sum += np.sum(child.contingency_vector)
+                children_sum += np.sum(self.tree._contingency_vectors[child.id])
 
-            if node_sum != children_sum:            
+            if node_sum != children_sum:      
+                print(node_sum, children_sum)      
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {node.contingency_vector}')
+                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
                 raise ValueError('Tree correctness check failed.')
             else:
                 for child in node.children:

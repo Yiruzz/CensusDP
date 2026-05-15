@@ -1,9 +1,9 @@
+import numpy as np
+
 from hierarchical_node import HierarchicalNode
 
 from collections import deque
 from typing import List, Callable, Tuple, Generator
-
-
 
 class HierarchicalTree:
     r'''Represents a hierarchical tree structure. Each node is a HierarchicalNode.
@@ -22,20 +22,26 @@ class HierarchicalTree:
      /|\   \
      
     '''
-    def __init__(self, root_id: int = 0, constraints: List[Callable] = []) -> None:
+    def __init__(self, root_id: int = 0, level: int = 0, constraints: list[Callable] = []) -> None:
         """
         Initialize the hierarchical tree with a root node.
         
         Args:
-            root_id: ID for the root node
-            constraints: Optional constraints for the root node
+            root_id (int): ID for the root node.
+            level (int): Level of the root node.
+            constraints (int): Optional constraints for the root node.
 
         Attributes:
-            root (HierarchicalNode): The root node of the tree
-            _node_count (int): Internal counter to keep track of the number of nodes in the tree
+            nodes (List[HierarchicalNode]): The nodes of the tree.
+            _node_count (int): Number of nodes in the tree.
+            _levels (List[int]): List where each index represents a level, and the value indicates the node index where that level starts.
+            _contingency_vectors_shm (Optional[str]): Name of the shared memory buffer where contingency vectors are stored.
         """
-        self.root = HierarchicalNode(root_id, constraints)
+        self.nodes = [HierarchicalNode(geo_id=root_id, level=level, constraints=constraints)]
         self._node_count = 1
+        self._levels = [level]
+        self._contingency_vectors_shm = None
+
     
     def iterate_by_levels(self) -> Generator[Tuple[int, List[HierarchicalNode]], None, None]:
         """
@@ -44,10 +50,7 @@ class HierarchicalTree:
         Yields:
             Tuples of (level, list of nodes at that level)
         """
-        if not self.root:
-            raise ValueError("The tree has no root node.")
-
-        queue = deque([(self.root, 0)])
+        queue = deque([(self.nodes[0], 0)])
         current_level = 0
         level_nodes: List[HierarchicalNode] = []
 
@@ -68,15 +71,14 @@ class HierarchicalTree:
         if level_nodes:
             yield current_level, level_nodes
 
-    def apply(self, operation: Callable[[HierarchicalNode], None]) -> None:
+    def apply(self, operation: Callable[[HierarchicalNode], None], level: int = None) -> None:
         """
         Apply a function to each node in the tree considering BFS traversal.
         
         Args:
             operation: Function that takes a HierarchicalNode as input and returns None
+            level: 
         """
-        bfs_traversal = self.iterate_by_levels()
-        for _, nodes in bfs_traversal:
-            for node in nodes:
-                operation(node)
+        for node in self.nodes:
+            operation(node)
     

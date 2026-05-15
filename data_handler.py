@@ -1,8 +1,10 @@
 import pandas as pd
 import numpy as np
+from collections import deque
 
+from multiprocessing import shared_memory
 from itertools import product
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 
 from constraints.constraint import Constraint
@@ -26,6 +28,8 @@ class DataHandler:
             
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
             contingency_df (Optional[pd.DataFrame]): DataFrame to hold the contingency table.    
+            contingency_df_length: Optional[int]: Length of the contingency dataframe.
+            dtype (str): NumPy data type used for all arrays.
 
             query_columns (List[str]): List of columns to use for generating the contingency table.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
@@ -46,6 +50,8 @@ class DataHandler:
         # Used to store and have an order on each unique combination of attributes.
         # The contingency vectors will have the same order of this dataframe.
         self.contingency_df: Optional[pd.DataFrame] = None
+        self.contingency_df_length: Optional[pd.DataFrame] = None
+        self.dtype: str = 'int64'
 
         # Hierarchical columns (first value highest hierarchy, last lowest).
         self.hierarchical_columns: List[str] = []
@@ -68,16 +74,18 @@ class DataHandler:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns, nrows=nrows)
         else:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
+
         return self.dataframe
 
-    def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None) -> None:
+    def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None, cols: list[str] = None) -> None:
         '''Write the processed data to the output_path.
         
         Args:
             data (pd.DataFrame): DataFrame containing the processed data to write.
             out_path (Optional[str]): Optional path to save the processed data. If None, use self.output_path.
+            cols (Optional[list[str]]): Optional columns to write. Useful to avoid reordering the DataFrame.
         '''
-        data.to_csv((out_path or self.output_path), index=False)
+        data.to_csv((out_path or self.output_path), columns=cols,  index=False)
     
     def generate_contingency_dataframe(self, query_columns: List[str]) -> pd.DataFrame:
         '''Generate a contingency dataframe from the loaded data.
@@ -101,6 +109,8 @@ class DataHandler:
         # Sort by the columns to ensure a consistent order
         self.contingency_df.sort_values(by=query_columns, inplace=True)
         self.contingency_df.reset_index(drop=True, inplace=True)
+
+        self.contingency_df_length = self.contingency_df.shape[0]
 
         print("Contingency DataFrame generated with shape:", self.contingency_df.shape, "in", end=' ')
 
@@ -131,6 +141,60 @@ class DataHandler:
         contingency_vector = merged['frequency'].to_numpy(dtype=int)
         
         return contingency_vector
+    
+    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int) -> Tuple[List[HierarchicalNode], List[int], np.ndarray, memoryview]:
+        '''Retrieve the references of all nodes of the tree to facilitate access. 
+        Also create a shared memory space with all contingency vectors copied,
+        enabling multiprocessing without duplicating data.
+
+        Args:
+            root (HierarchicalNode): A hierarchical tree.
+            n_nodes (int): Number of nodes, corresponding to the number of rows in the shared memory space.
+
+        Return:
+            tuple[list[HierarchicalNode], List[int], np.ndarray, memoryview]: A tuple containing all node references, the node index where each level starts,
+                                                                              the view over the shared memory buffer, and the memoryview used to access the shared memory.
+        '''
+        shape = (n_nodes,  len(node.contingency_vector)
+        size = int(np.prod(shape) * np.dtype(self.dtype).itemsize)
+
+        # Create share memory space  
+        shm = shared_memory.SharedMemory(create=True, size=size)
+
+        # Create view to manipulate shared memory
+        arr = np.ndarray(shape, dtype=self.dtype, buffer=shm.buf)
+
+        # Retrieve node references
+        nodes = []
+        queue = deque([root]) 
+
+        next_id = 0
+
+        # Retrive starts levels starting COUNTRY (ROOT)
+        levels = [0] * (1+len(self.hierarchical_columns))
+        idx = 0
+
+        while queue:
+            node = queue.popleft()
+
+            # Assign node IDs using BFS order
+            node.id = next_id
+
+            # Copy contingency vector into corresponding shared memory row
+            arr[node.id, :] = node.contingency_vector[:]
+            del node.contingency_vector
+            nodes.append(node)
+
+            if node.level == idx and levels[idx] == 0:
+                levels[idx] = node.id
+                idx += 1 
+
+            for child in node.children:
+                child.parent_id = node.id
+                queue.append(child)
+
+            next_id += 1
+        return nodes, levels, arr, shm
 
     def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> HierarchicalTree:
         '''Build a hierarchical tree based on the hierarchical columns.
@@ -151,6 +215,8 @@ class DataHandler:
         '''
 
         tree = HierarchicalTree()
+        root = tree.nodes[0]
+        curr_level = 0
 
         # Generate the contingency table if not already done
         if self.contingency_df is None:
@@ -162,9 +228,9 @@ class DataHandler:
 
         # List of constraints for the root node
         root_contstraints = []
-        if constraints and 0 in constraints:
+        if constraints and curr_level in constraints:
             # Iterate over the constraints for the root node
-            for constraint in constraints[0]:
+            for constraint in constraints[curr_level]:
                 # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
                 match constraint:
                     case ContextualAggregateConstraint():
@@ -173,10 +239,12 @@ class DataHandler:
                 assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
                 root_contstraints.append(constraint.to_constraint(self.contingency_df))
 
-        tree.root.constraints = root_contstraints
+        root.constraints = root_contstraints
 
         # Construct the tree recursively and count the nodes created
+        # Then change the representation to array and create a share memory space
         tree._node_count = self._build_subtree(tree.root, 0, self.dataframe, constraints, query_matrix)
+        tree.nodes, tree._levels, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(root, tree._node_count)
         return tree
 
     def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> int:
@@ -184,7 +252,7 @@ class DataHandler:
 
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
-            level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
+            curr_level (int): An iterator for the current level in the hierarchy. It has an offset of 1.
             data (pd.DataFrame): The subset of data corresponding to the parent node.
             constraints (List[Callable]): List of constraints to apply to each node.
             query_matrix (np.ndarray): Query matrix Q applied to each child's raw cell counts.
@@ -192,13 +260,14 @@ class DataHandler:
         Returns:
             int: The number of nodes in the subtree.
         '''
-        # When there are no more levels to process, return the parent node
-        if level_iterator >= len(self.hierarchical_columns):
-            return 0
-
         n_nodes = 1
+
+        # When there are no more levels to process, return the parent node
+        if curr_level >= len(self.hierarchical_columns):
+            return n_nodes
+        
         # Get the current hierarchical column to split on
-        current_column = self.hierarchical_columns[level_iterator]
+        current_column = self.hierarchical_columns[curr_level]
         unique_hierarchical_values = data[current_column].unique()
 
         for value in unique_hierarchical_values:
@@ -207,9 +276,9 @@ class DataHandler:
 
             # Prepare constraints for the current level
             level_constraints = []
-            if constraints and level_iterator in constraints:
+            if constraints and curr_level in constraints:
                 # Iterate over the constraints for the current level
-                for constraint in constraints[level_iterator]:
+                for constraint in constraints[curr_level]:
                     # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
                     match constraint:
                         case ContextualAggregateConstraint():
@@ -219,13 +288,11 @@ class DataHandler:
                     level_constraints.append(constraint.to_constraint(self.contingency_df))
 
             # Create a new child node
-            child_node = HierarchicalNode(node_id=value, constraints=level_constraints)
+            child_node = HierarchicalNode(geo_id=value, level=curr_level+1, constraints=level_constraints)
             parent_node.add_child(child_node)
 
             # Store query answers Q @ x; raw cell counts x are not retained.
             child_node.contingency_vector = query_matrix @ self.create_contingency_vector(filtered_data)
-
-            child_node.parent = parent_node
 
             # Recursively build the subtree for the child node
             n_nodes += self._build_subtree(child_node, level_iterator + 1, filtered_data, constraints, query_matrix)
@@ -250,35 +317,45 @@ class DataHandler:
         Returns:
             pd.DataFrame: The reconstructed microdata.
         '''
-        microdata_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
-        for leaf in list(tree.iterate_by_levels())[-1][1]:
-            # Create a Diccionary to store the microdata for the current node
-            leaf_dict: dict[str, list] = {col: [] for col in self.hierarchical_columns+self.query_columns}
-            
-            assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-            # TODO: See if this can be optimized further. Iterrows is slow, but since the data type can vary, it is not trivial to vectorize.
-            for index, (_, row) in enumerate(self.contingency_df.iterrows()):
-                for col in self.query_columns:
-                    # Add the value of the row[col] node.contingency_vector[index] times to the dictionary
-                    leaf_dict[col].extend(np.repeat(row[col], leaf.contingency_vector[index]))
+        
+        assert self.contingency_df is not None, ("Contingency DataFrame is not generated. Call generate_contingency_table first.")
 
-            # Add the hierarchical information for the current node
-            # Determine how many microdata rows this leaf contributes (based on query columns)
-            leaf_size = len(leaf_dict[self.query_columns[0]])
-            # Offset to track the level in the hierarchy from top to bottom
+        # Get all possible query column combinations.
+        query_values = self.contingency_df[self.query_columns].to_numpy()
+
+        # Store partial DataFrames generated for each leaf.
+        microdata_parts = []
+
+        start_node_idx = tree._levels[-1]
+        for leaf in tree.nodes[start_node_idx:]:
+            # Generate rows associated with query values.
+            # Select only positive frequencies.
+            contingency_vector = tree._contingency_vectors[leaf.id]
+            nonzero_mask = contingency_vector > 0
+
+            # Filter combinations to avoid processing zero-frequency rows.
+            filtered_query_values = query_values[nonzero_mask]
+            filtered_counts = contingency_vector[nonzero_mask]
+
+            # Repeat each combination according to its frequency.
+            expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
+
+            # Create partial DataFrame for the current leaf.
+            leaf_df = pd.DataFrame(expanded_rows, columns=self.query_columns)
+
+            # Generate columns associated with hierarchical values.
+            # Skip the root node because all records belong to it.
             current_level = 0
-            # We do not include the root node in the hierarchical path as it is redundant in the final
-            # data because the root is the highest level of the hierarchy and all data belongs to it
             for hierarchical_value in leaf.hierarchical_path[1:]:
-                leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(hierarchical_value, leaf_size))
+                # Repeat the hierarchical value for all rows.
+                leaf_df[self.hierarchical_columns[current_level]] = hierarchical_value
+
                 current_level += 1
             
-            # Also don't forget to add the information of the leaf node itself
-            leaf_dict[self.hierarchical_columns[current_level]] = list(np.repeat(leaf.id, leaf_size))
+            # Add the leaf node identifier.
+            leaf_df[self.hierarchical_columns[current_level]] = leaf.geo_id
+            microdata_parts.append(leaf_df)
 
-            # Merge the leaf_dict into microdata_dict by concatenating lists for duplicate keys
-            for key, values in leaf_dict.items():
-                microdata_dict[key].extend(values)
-
-        return pd.DataFrame(microdata_dict)
+        microdata = pd.concat(microdata_parts, ignore_index=True)
+        return microdata
 

@@ -10,19 +10,24 @@ class HierarchicalNode:
     This class focuses solely on node specific data and operations,
     without any tree traversal or tree-wide operation logic.
     '''
-    def __init__(self, node_id: int, constraints: List[Callable]) -> None:
+    def __init__(self, geo_id: int, level: int,  constraints: List[Callable]) -> None:
         """
         Initialize a hierarchical node.
 
         Args:
-            node_id (int): Unique identifier for this hierarchical node
-            constraints (List[Callable]): Optional list of constraints for this node
-
+            geo_id (int): Identifier related to geography.
+            level (int): Level where the node is located.
+            constraints (List[Callable]): Optional list of constraints for this node.
+        
         Attributes:
-            id (int): Unique identifier for the node at its level
-            children (List[HierarchicalNode]): List of child nodes
-            parent (HierarchicalNode): Reference to the parent node
-            hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root
+            id (Optional[int]): Unique identifier for the node at its level.
+            geo_id (int): Identifier related to geography.
+
+            children (List[HierarchicalNode]): List of child nodes.
+            parent (HierarchicalNode): Reference to the parent node.
+
+            hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root.
+            level (int): Level where the node is located. Useful for determining the associated privacy parameter.
 
             contingency_vector (np.ndarray): Single slot holding the node's current data.
                 Its semantics change across pipeline stages to keep memory low:
@@ -37,14 +42,16 @@ class HierarchicalNode:
 
             comparative_vector (np.ndarray): Optional vector for this node. Used to compare distributions.
         """
-        self.id: int = node_id
+        self.id: Optional[int] = None
+        self.geo_id: int = geo_id
 
-        self.children: List['HierarchicalNode'] = []
-        self.parent: Optional['HierarchicalNode'] = None
+        self.children: List[HierarchicalNode] = []
+        self.parent: Optional[HierarchicalNode] = None
 
         # The path is needed to save runtime when generating data from a specific node
         self.hierarchical_path: List[Any] = []
-
+        self.level: int = level
+        
         # Data container (time-varying — see class docstring)
         self.contingency_vector: np.ndarray = np.array([])
         self.constraints: List[Callable] = constraints
@@ -55,43 +62,31 @@ class HierarchicalNode:
         self.comparative_vector: Optional[np.ndarray] = None
 
     def add_child(self, child_node: 'HierarchicalNode') -> None:
-        """
-        Add a child node to this node.
+        '''Add a child node to this node.
         
         Args:
             child_node (HierarchicalNode): The child node to add.
-        """
+        '''
         child_node.parent = self
-        child_node.hierarchical_path = self.hierarchical_path + [self.id]
+        child_node.hierarchical_path = self.hierarchical_path + [self.geo_id]
         self.children.append(child_node)
 
-    def is_leaf(self) -> bool:
-        """
-        Check if the node is a leaf (no children).
-        
-        Returns:
-            bool: True if the node is a leaf, False otherwise.
-        """
-        return len(self.children) == 0
-    
-    def get_level(self) -> int:
-        """
-        Get the level of this node in the tree.
-        
-        Returns:
-            int: The level of the node (0 for root, 1 for children of root, ...).
-        """
-        return len(self.hierarchical_path)
-    
     def is_root(self) -> bool:
-        """
-        Check if the node is the root (no parent).
+        '''Check if the node is the root (no parent).
         
         Returns:
             bool: True if the node is the root, False otherwise.
-        """
+        '''
         return self.parent is None
+    
+    def is_leaf(self) -> bool:
+        '''Check if the node is a leaf (no children).
+        
+        Returns:
+            bool: True if the node is a leaf, False otherwise.
+        '''
+        return len(self.children) == 0
     
     def __repr__(self) -> str:
         '''String representation of the node.'''
-        return f"HierarchicalNode(id={self.id}, level={self.get_level()}, children={len(self.children)})"
+        return f"HierarchicalNode(id={self.id}, level={self.level}, children={len(self.children)})"

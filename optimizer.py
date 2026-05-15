@@ -1,4 +1,6 @@
 import pyomo.environ as pyo
+import gurobipy as gp
+
 import numpy as np
 from typing import List, Callable, Any
 
@@ -18,17 +20,17 @@ class OptimizationModel:
             solver_options (dict): Dictionary of options to pass to the solver.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
         '''
-        self.solver = pyo.SolverFactory(solver_name)
+        self.solver = pyo.SolverFactory(solver_name, manage_env= True) 
         self.solver_options = solver_options
         if optimizer_path is not None:
             self.solver.set_executable(optimizer_path)
 
-    def _solve_pyomo_model(self, instance: pyo.ConcreteModel, id_node: int) -> Any:
+    def _solve_pyomo_model(self, instance: pyo.ConcreteModel, node_id: int) -> Any:
         '''Auxiliar function to solve the instance of the model and handle infeasibility.
 
         Args:
             instance (ConcreteModel): The concrete model instance to solve.
-            id_node (int): The id of the node being solved.
+            node_id (int): The id of the node being solved.
 
         Returns:
             SolverResults: The results from the solver.
@@ -42,13 +44,13 @@ class OptimizationModel:
             return results
         elif results.solver.termination_condition == pyo.TerminationCondition.infeasible:
             # Write model for debugging
-            filename = f"infeasible_model_node_{id_node}.nl"
+            filename = f"infeasible_model_node_{node_id}.nl"
             instance.write(filename)
-            raise ValueError(f'Model is infeasible for node {id_node}. See {filename} file for debugging.')
+            raise ValueError(f'Model is infeasible for node {node_id}. See {filename} file for debugging.')
         else:
-            raise RuntimeError(f"Solver termination failed for node {id_node}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
+            raise RuntimeError(f"Solver termination failed for node {node_id}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
 
-    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, id_node: int, constraints: List[Callable], query_matrix: np.ndarray) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, node_id: int, constraints: List[Callable], query_matrix: np.ndarray) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
 
         Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is the concatenation
@@ -61,7 +63,7 @@ class OptimizationModel:
 
         Args:
             noisy_measurements (np.ndarray): Concatenated noisy query answers y = Q @ x + noise.
-            id_node (int): The ID of the node for which the estimation is being performed.
+            node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[Callable]): List of additional constraints to apply to the model.
             query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells).
 
@@ -73,7 +75,10 @@ class OptimizationModel:
         n_children = len(noisy_measurements) // n_queries
         n = n_children * n_cells
 
-        instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{id_node}')
+        # Create a ConcreteModel directly
+        instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{node_id}')
+
+        # Set of indices
         instance.I = pyo.RangeSet(0, n - 1)
         instance.x = pyo.Var(instance.I, domain=pyo.NonNegativeReals)
 
@@ -105,17 +110,17 @@ class OptimizationModel:
                 raise e
 
         # Solve the model
-        self._solve_pyomo_model(instance, id_node)
+        self._solve_pyomo_model(instance, node_id)
 
         # Extract results
         return np.array([pyo.value(instance.x[i]) for i in range(n)])
 
-    def rounding_estimation(self, x_tilde: np.ndarray, id_node: int, constraints: List[Callable]) -> np.ndarray:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[Callable]) -> np.ndarray:
         '''Rounding estimation of the contingency vector using Pyomo ConcreteModel.
 
         Args:
             x_tilde (np.ndarray): The contingency vector from the previous optimization step.
-            id_node (int): The ID of the node for which the estimation is being performed.
+            node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[Callable]): List of additional constraints to apply to the model.
 
         Returns:
@@ -126,7 +131,7 @@ class OptimizationModel:
         residual_round = x_tilde - x_floor
 
         # Create a ConcreteModel directly
-        instance = pyo.ConcreteModel(name=f'RoundingEstimation_NodeID_{id_node}')
+        instance = pyo.ConcreteModel(name=f'RoundingEstimation_NodeID_{node_id}')
 
         # Set of indices
         instance.I = pyo.RangeSet(0, n - 1)
@@ -163,11 +168,12 @@ class OptimizationModel:
                 raise e
 
         # Solve the model
-        self._solve_pyomo_model(instance, id_node)
+        self._solve_pyomo_model(instance, node_id)
 
         # Extract results
         y_estimated_array = np.array([pyo.value(instance.y[i]) for i in range(n)])
 
         # Final result: floor + binary decisions
-        return x_floor + y_estimated_array
+        # TODO: Data Handler should cast type
+        return (x_floor + y_estimated_array).astype(np.int64)
 
