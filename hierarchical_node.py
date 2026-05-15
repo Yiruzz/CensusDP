@@ -13,7 +13,7 @@ class HierarchicalNode:
     def __init__(self, geo_id: int, level: int,  constraints: List[Callable]) -> None:
         """
         Initialize a hierarchical node.
-        
+
         Args:
             geo_id (int): Identifier related to geography.
             level (int): Level where the node is located.
@@ -29,11 +29,17 @@ class HierarchicalNode:
             hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root.
             level (int): Level where the node is located. Useful for determining the associated privacy parameter.
 
-            contingency_vector (Optional[np.ndarray]): Contingency vector for this node.
+            contingency_vector (np.ndarray): Single slot holding the node's current data.
+                Its semantics change across pipeline stages to keep memory low:
+                  - after tree build:   y = Q @ x          (shape (n_queries,))
+                  - after measurement:  y = Q @ x + noise  (shape (n_queries,))
+                  - after estimation:   x_hat              (shape (n_cells,))
+                Before each stage reads this slot, the previous stage's content is no
+                longer needed, so it is overwritten in place.
             constraints (List[Callable]): List of constraints for this node.
                                           The constraints are functions that take a contingency vector as input
                                           and return a boolean indicating whether the constraint is satisfied.
-            
+
             comparative_vector (np.ndarray): Optional vector for this node. Used to compare distributions.
         """
         self.id: Optional[int] = None
@@ -46,10 +52,10 @@ class HierarchicalNode:
         self.hierarchical_path: List[Any] = []
         self.level: int = level
         
-        # Data containers
-        self.contingency_vector: Optional[np.ndarray] = None
+        # Data container (time-varying — see class docstring)
+        self.contingency_vector: np.ndarray = np.array([])
         self.constraints: List[Callable] = constraints
-        
+
         # This value is only used to compare distributions between different states of the data
         # e.g., original data vs noisy data
         # It is only relevant when a distance metric is defined by the user

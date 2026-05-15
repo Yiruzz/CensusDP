@@ -4,6 +4,8 @@ from hierarchical_tree import HierarchicalTree
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
+from queries import QueryWorkload
+from privacy import PrivacyMechanism
 
 from noisy import ( 
     sample_dgauss_fast,
@@ -17,7 +19,7 @@ from parallel_utils import init_process, solve
 from collections import deque
 from multiprocessing import get_context
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, Optional, Union
 import time
 
 class TopDown():
@@ -28,14 +30,18 @@ class TopDown():
     finally it solves optimization problems to ensure consistency across the tree and adherence to 
     specified constraints by the user.
     '''
-    def __init__(self, data_path: str, hierarchy: List[str], queries: List[str], out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
+    def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
+                 privacy_mechanism: PrivacyMechanism,
+                 out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
         '''
         Initialize the TopDown algorithm.
 
         Args:
             data_path (str): Path to the input data file.
             hierarchy (List[str]): List of columns representing the hierarchy levels.
-            queries (List[str]): List of columns to be queried and aggregated.
+            query_columns (List[str]): List of columns to be queried and aggregated.
+            privacy_mechanism (PrivacyMechanism): DP variant carrying per-level parameters.
+                Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-column levels).
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
             optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
@@ -47,26 +53,31 @@ class TopDown():
             hierarchical_columns (List[str]): List of columns representing the hierarchy levels.
             query_columns (List[str]): List of columns to be queried and aggregated.
 
-            privacy_parameters (List[float]): List of privacy parameters for each level of the tree.
-            mechanism (str): The noise mechanism to use ('discrete_laplace' or 'discrete_gaussian').
+            privacy_mechanism (PrivacyMechanism): The DP variant + per-level parameters.
 
             tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
             optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
 
             constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints
-
-
-
         '''
+        n_levels = len(hierarchy) + 1
+        if len(privacy_mechanism.level_params) != n_levels:
+            raise ValueError(
+                f"privacy_mechanism has {len(privacy_mechanism.level_params)} per-level params; "
+                f"expected {n_levels} (= len(hierarchy) + 1)."
+            )
+
         self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
         self.hierarchical_columns: List[str] = hierarchy
-        self.query_columns: List[str] = queries
+        self.query_columns: List[str] = query_columns
 
         self.data_handler.hierarchical_columns = hierarchy
-        self.data_handler.query_columns = queries
+        self.data_handler.query_columns = query_columns
 
-        self.privacy_parameters: List[float] = []
-        self.mechanism: Callable = lambda x: x  # Default to identity function
+        self.privacy_mechanism: PrivacyMechanism = privacy_mechanism
+
+        self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
+        self.query_sensitivity: int = 1  # L1 sensitivity of Q; computed in initialize() once Q is materialized
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
@@ -97,7 +108,19 @@ class TopDown():
 
         t1 = time.time()
         print(f'Building hierarchical tree...', end=' ')
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
+        if isinstance(self.Q, QueryWorkload):
+            self.Q = self.Q.build(self.data_handler.contingency_df)
+        elif not isinstance(self.Q, np.ndarray):
+            # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
+            self.Q = np.eye(len(self.data_handler.contingency_df))
+        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
+        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
+        assert np.all((self.Q == 0) | (self.Q == 1)), \
+            "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+        self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
+        print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
     def add_noise_to_chunk(self, start: int, end: int) -> Tuple[int, int, float]:
@@ -112,26 +135,30 @@ class TopDown():
         '''
         t1 = time.time()
         for idx in range(start, end):
-            self.add_noise(self.tree._contingency_vectors[idx], self.privacy_parameters[self.tree.nodes[idx].level])
-        
+            self.add_noise(self.tree._contingency_vectors[idx], self.tree.nodes[idx].level])
+   
         t2 = time.time()-t1
         return start, end, t2
         
-    def add_noise(self, contingency_vector: np.ndarray, privacy_budget: float) -> None:
+    def add_noise(self, contingency_vector: np.ndarray, level: int) -> None:
         '''Add noise to the contingency vector using the specified mechanism modifiyn in-place.
         
         Args:
             contingency_vector (np.ndarray): The original contingency vector.
-            privacy_budget (float): The privacy budget (epsilon) for noise addition.
+            level (int)
         '''
         samples = len(contingency_vector)
-        contingency_vector += self.mechanism(privacy_budget, samples)
+        noise = np.array([
+                    self.privacy_mechanism.sample_noise(level, self.query_sensitivity)
+                    for _ in range(samples)
+                ])
+        contingency_vector += noise
 
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
-        
-        This method adds noise to the data at each node in the hierarchical tree according to the specified
-        privacy parameters and mechanism.
+
+        Each node's contingency_vector already holds y = Q @ x from tree construction.
+        This phase adds discrete noise calibrated to the sensitivity of Q in place: y <- y + noise.
         '''
         t1 = time.time()
         print(f'Running measurement phase...\n')
@@ -282,9 +309,14 @@ class TopDown():
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
-        
+
         This method solves optimization problems at each node in the hierarchical tree to ensure
         consistency and adherence to constraints after noise has been added.
+
+        Reads node.contingency_vector as the noisy measurement y (shape (n_queries,)) for any
+        node whose parent has already been estimated, and overwrites it with x_hat
+        (shape (n_cells,)) once that node is itself estimated. Top-down level order
+        guarantees parents are converted to x_hat before their children are read.
         '''
         t1 = time.time()
         print(f'Running estimation phase...\n')
@@ -363,51 +395,17 @@ class TopDown():
     #     if node is not None:
     #         node.constraints.append(constraint)
 
-    def set_privacy_parameters(self, privacy_parameters: List[float]) -> None:
-        '''Set the privacy parameters for each level of the hierarchical tree.
-        
-        Args:
-            privacy_parameters (List[float]): List of privacy parameters (epsilon) for each level.
-        '''
-        self.privacy_parameters = privacy_parameters
-    
-    def discrete_gaussian(self, rho: float, samples: int) -> np.ndarray:
-        '''Applies discrete Gaussian noise to the contingency vector.
-        
-        Args:
-            rho (float): The privacy parameter.
-            samples (int): Number of samples drawn from the distribution.
-        
-        Returns:
-            np.ndarray: An array containing the noisy values.
-        '''
-        return sample_dgauss_optimized(rho, samples)
-    
-    def discrete_laplace(self, epsilon: float, samples: int) -> np.ndarray:
-        '''Applies Laplace noise to the contingency vector.
-        
-        Args:
-            epsilon (float): Privacy parameter.
-            samples (int): Number of samples drawn from the distribution.
+    def set_query_workload(self, query_matrix: Union[QueryWorkload, np.ndarray]) -> None:
+        '''Set the workload query matrix Q.
 
-        Returns:
-            np.ndarray: An array containing the noisy values. 
-        '''
-        return sample_dlaplace_optimized(1/epsilon, samples)
-    
-    def set_mechanism(self, mechanism: str) -> None:
-        '''Set the noise mechanism to use for adding noise to the data.
-        
+        Q is applied during tree construction: each node stores Q @ x instead of x.
+        If not called, initialize() constructs np.eye(n_cells) as the default.
+
         Args:
-            mechanism (str): The noise mechanism to use ('discrete_laplace' or 'discrete_gaussian').
+            query_matrix: Either a QueryWorkload (DSL object, built lazily at initialize() time)
+                          or a pre-built numpy ndarray of shape (n_queries, n_cells).
         '''
-        match mechanism:
-            case 'discrete_laplace':
-                self.mechanism = self.discrete_laplace
-            case 'discrete_gaussian':
-                self.mechanism = self.discrete_gaussian
-            case _:
-                 raise ValueError("Mechanism must be either 'discrete_laplace' or 'discrete_gaussian'.")
+        self.Q = query_matrix
 
     def run(self) -> pd.DataFrame:
         '''Run the TopDown algorithm end-to-end.

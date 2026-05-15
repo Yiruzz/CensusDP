@@ -155,7 +155,7 @@ class DataHandler:
             tuple[list[HierarchicalNode], List[int], np.ndarray, memoryview]: A tuple containing all node references, the node index where each level starts,
                                                                               the view over the shared memory buffer, and the memoryview used to access the shared memory.
         '''
-        shape = (n_nodes, self.contingency_df_length)
+        shape = (n_nodes,  len(node.contingency_vector)
         size = int(np.prod(shape) * np.dtype(self.dtype).itemsize)
 
         # Create share memory space  
@@ -196,13 +196,20 @@ class DataHandler:
             next_id += 1
         return nodes, levels, arr, shm
 
-    def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]]) -> HierarchicalTree:
+    def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> HierarchicalTree:
         '''Build a hierarchical tree based on the hierarchical columns.
         It creates a contingency vector for each node in the tree.
-        
+
+        Each node stores y = Q @ x (shape (n_queries,)) — the noiseless query answers.
+        The measurement phase adds noise in place; the estimation phase later overwrites
+        this slot with the estimated cell-counts x_hat (shape (n_cells,)). Keeping a
+        single slot avoids retaining both x and y simultaneously.
+
         Args:
             constraints (Dict[int, List[Callable]]): Dictionary mapping tree levels to their constraints.
-        
+            query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells), applied to each
+                node's raw cell counts so the slot holds Q @ x instead of x.
+
         Returns:
             HierarchicalTree: The constructed hierarchical tree.
         '''
@@ -214,10 +221,10 @@ class DataHandler:
         # Generate the contingency table if not already done
         if self.contingency_df is None:
             self.generate_contingency_dataframe(self.query_columns)
-        
+
         assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
-        # Contingency vector for the root node (entire dataset)
-        root.contingency_vector = self.create_contingency_vector(self.dataframe)
+        # Query answers for the root node (entire dataset). Raw x is discarded after the multiply.
+        tree.root.contingency_vector = query_matrix @ self.create_contingency_vector(self.dataframe)
 
         # List of constraints for the root node
         root_contstraints = []
@@ -236,18 +243,22 @@ class DataHandler:
 
         # Construct the tree recursively and count the nodes created
         # Then change the representation to array and create a share memory space
-        tree._node_count = self._build_subtree(root, curr_level, self.dataframe, constraints)
+        tree._node_count = self._build_subtree(tree.root, 0, self.dataframe, constraints, query_matrix)
         tree.nodes, tree._levels, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(root, tree._node_count)
         return tree
-    
-    def _build_subtree(self, parent_node: HierarchicalNode, curr_level: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]]) -> None:
+
+    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> int:
         '''Helper method to recursively build the subtree for a given parent node.
-        
+
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
             curr_level (int): An iterator for the current level in the hierarchy. It has an offset of 1.
             data (pd.DataFrame): The subset of data corresponding to the parent node.
             constraints (List[Callable]): List of constraints to apply to each node.
+            query_matrix (np.ndarray): Query matrix Q applied to each child's raw cell counts.
+
+        Returns:
+            int: The number of nodes in the subtree.
         '''
         n_nodes = 1
 
@@ -280,13 +291,20 @@ class DataHandler:
             child_node = HierarchicalNode(geo_id=value, level=curr_level+1, constraints=level_constraints)
             parent_node.add_child(child_node)
 
-            # Create and assign the contingency vector for the child node
-            child_node.contingency_vector = self.create_contingency_vector(filtered_data)
+            # Store query answers Q @ x; raw cell counts x are not retained.
+            child_node.contingency_vector = query_matrix @ self.create_contingency_vector(filtered_data)
 
             # Recursively build the subtree for the child node
-            n_nodes += self._build_subtree(child_node, curr_level + 1, filtered_data, constraints)
+            n_nodes += self._build_subtree(child_node, level_iterator + 1, filtered_data, constraints, query_matrix)
+
         return n_nodes
     
+    # NOTE: This method will not work if the query matrix contains any workload that is not a simple count of the contingency cells.
+    # TODO: Make a more complete version of construction of output data, it does not need to be microdata.
+    #       For example it can be just aggregate data, where each count have the information of the query that produces it:
+    #       (df['Sex'] == 'Male') & (df['Age'] == 30) -> 10
+    #       (df['Sex'] == 'Female') & (df['Age'] == 30) -> 15
+    #       ... and so on on the other queries.
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.
         
