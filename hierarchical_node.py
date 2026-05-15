@@ -13,23 +13,28 @@ class HierarchicalNode:
     def __init__(self, node_id: int, constraints: List[Callable]) -> None:
         """
         Initialize a hierarchical node.
-        
+
         Args:
             node_id (int): Unique identifier for this hierarchical node
             constraints (List[Callable]): Optional list of constraints for this node
-        
+
         Attributes:
             id (int): Unique identifier for the node at its level
             children (List[HierarchicalNode]): List of child nodes
             parent (HierarchicalNode): Reference to the parent node
             hierarchical_path (List[Any]): List of hierarchical nodes visited to reach this node from the root
 
-            contingency_vector (np.ndarray): Contingency vector for this node.
-            noisy_measurements (np.ndarray): Noisy measurements for this node (Q @ x + noise).
+            contingency_vector (np.ndarray): Single slot holding the node's current data.
+                Its semantics change across pipeline stages to keep memory low:
+                  - after tree build:   y = Q @ x          (shape (n_queries,))
+                  - after measurement:  y = Q @ x + noise  (shape (n_queries,))
+                  - after estimation:   x_hat              (shape (n_cells,))
+                Before each stage reads this slot, the previous stage's content is no
+                longer needed, so it is overwritten in place.
             constraints (List[Callable]): List of constraints for this node.
                                           The constraints are functions that take a contingency vector as input
                                           and return a boolean indicating whether the constraint is satisfied.
-            
+
             comparative_vector (np.ndarray): Optional vector for this node. Used to compare distributions.
         """
         self.id: int = node_id
@@ -39,10 +44,9 @@ class HierarchicalNode:
 
         # The path is needed to save runtime when generating data from a specific node
         self.hierarchical_path: List[Any] = []
-        
-        # Data containers
-        self.contingency_vector: np.ndarray = np.array([])  # cell counts x, shape (n_cells,)
-        self.noisy_measurements: Optional[np.ndarray] = None  # y = Q @ x + noise, shape (n_queries,)
+
+        # Data container (time-varying — see class docstring)
+        self.contingency_vector: np.ndarray = np.array([])
         self.constraints: List[Callable] = constraints
 
         # This value is only used to compare distributions between different states of the data

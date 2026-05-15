@@ -107,7 +107,7 @@ class TopDown():
         self.query_sensitivity = int(self.Q.sum(axis=0).max())
         print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints)
+        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         return None
@@ -115,9 +115,8 @@ class TopDown():
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
 
-        For each node, computes y = Q @ x and adds discrete noise calibrated to the 
-        sensitivity of Q (max column sum, computed once in initialize()). The noisy 
-        answers are stored in node.noisy_measurements, node.contingency_vector is unchanged.
+        Each node's contingency_vector already holds y = Q @ x from tree construction.
+        This phase adds discrete noise calibrated to the sensitivity of Q in place: y <- y + noise.
         '''
         t1 = time.time()
         print(f'Running measurement phase (query_sensitivity={self.query_sensitivity})...\n')
@@ -125,12 +124,11 @@ class TopDown():
             t2 = time.time()
             print(f'Processing level {level} with {len(nodes)} nodes...', end=' ')
             for node in nodes:
-                true_answers = self.Q @ node.contingency_vector.astype(float)
                 noise = np.array([
                     self.privacy_mechanism.sample_noise(level, self.query_sensitivity)
-                    for _ in range(len(true_answers))
+                    for _ in range(len(node.contingency_vector))
                 ])
-                node.noisy_measurements = true_answers + noise
+                node.contingency_vector = node.contingency_vector + noise
             print(f'{time.time() - t2:.2f} seconds.')
         print(f'Measurement phase completed in {time.time() - t1:.2f} seconds.\n')
 
@@ -138,9 +136,14 @@ class TopDown():
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
-        
+
         This method solves optimization problems at each node in the hierarchical tree to ensure
         consistency and adherence to constraints after noise has been added.
+
+        Reads node.contingency_vector as the noisy measurement y (shape (n_queries,)) for any
+        node whose parent has already been estimated, and overwrites it with x_hat
+        (shape (n_cells,)) once that node is itself estimated. Top-down level order
+        guarantees parents are converted to x_hat before their children are read.
         '''
         t1 = time.time()
         print(f'Running estimation phase...')
@@ -150,7 +153,7 @@ class TopDown():
         t2 = time.time()
         print(f'\nProcessing root node (level 0)... ', end=' ')
         x_tilde: np.ndarray = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=self.tree.root.noisy_measurements,
+            noisy_measurements=self.tree.root.contingency_vector,
             id_node=self.tree.root.id,
             constraints=self.tree.root.constraints,
             query_matrix=self.Q
@@ -171,10 +174,11 @@ class TopDown():
                 # NOTE: With a break we assume that all leaves are at the same level
                 if len(node.children) == 0:
                     break
-                
+
                 # Solve the optimization problem for the children of the current node
                 vectors_length = self.Q.shape[1]  # n_cells per child in decision-variable space
-                joint_noisy_measurements = np.concatenate([child.noisy_measurements for child in node.children])
+                # Children still hold y = Q @ x + noise in their slot at this point.
+                joint_noisy_measurements = np.concatenate([child.contingency_vector for child in node.children])
                 # All nodes have the same length of the contingency vector
                 joint_x_length = len(node.children) * vectors_length
 
