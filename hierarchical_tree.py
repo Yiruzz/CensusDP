@@ -6,7 +6,7 @@ from typing import List, Callable, Tuple, Generator
 
 
 class HierarchicalTree:
-    '''Represents a hierarchical tree structure. Each node is a HierarchicalNode.
+    r'''Represents a hierarchical tree structure. Each node is a HierarchicalNode.
 
     This class is responsible for tree structure management, traversal,
     and operations that need to be applied across multiple nodes.
