@@ -3,7 +3,7 @@ import argparse
 from topdown import TopDown
 
 # Import privacy mechanism classes
-from privacy import PureDP, ZCDP, ApproximateDP
+from privacy import PureDP, ZCDP, ApproximateDP, RenyiDP
 
 # Import constraint building classes
 from constraints.contextual_constraints import SumEqualRealTotal
@@ -93,7 +93,9 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     #   - PureDP(epsilons)              ε per tree level (Laplace mechanism)
     #   - ZCDP(rhos)                    ρ per tree level (discrete Gaussian, ρ-zCDP linear composition)
     #   - ApproximateDP(rhos, delta=δ)  ρ per tree level + global δ (zCDP under the hood, reports (ε, δ)-DP)
-    PRIVACY_MECHANISM = PureDP(PRIVACY_PARAMETERS)
+    #   - RenyiDP(epsilons, delta=δ)    ε per tree level + global δ, optimised discrete Gaussian calibration,
+    #                                   it considers the total budget to calibrate the noise of each level
+    PRIVACY_MECHANISM = ZCDP(PRIVACY_PARAMETERS)
 
     # With the TopDown class instantiated, we can set all the parameters
     topdown = TopDown(
@@ -198,6 +200,9 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     # This method can be used to check the correctness of the results.
     # Also used for testing purposes.
     topdown.check_correctness()
+
+    # Privacy garantee
+    print(topdown.privacy_mechanism.report_guarantee())
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
