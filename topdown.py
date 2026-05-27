@@ -442,19 +442,16 @@ class TopDown():
             node (HierarchicalNode): The node to check.
         '''
         if node.children:
-            # After estimation, only the first n_cells slots of each row hold x_hat; the
-            # trailing slots (if vector_length > n_cells) are unused padding and would
-            # spuriously inflate the sum if included.
-            n_cells = self.tree.n_cells
-            node_sum = int(self.tree._contingency_vectors[node.id, :n_cells].sum())
+            # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
+            node_sum = sum(self.tree._contingency_vectors[node.id])
             children_sum = 0
             for child in node.children:
-                children_sum += int(self.tree._contingency_vectors[child.id, :n_cells].sum())
+                children_sum += np.sum(self.tree._contingency_vectors[child.id])
 
-            if node_sum != children_sum:
-                print(node_sum, children_sum)
+            if node_sum != children_sum:      
+                print(node_sum, children_sum)      
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id, :n_cells]}')
+                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
                 raise ValueError('Tree correctness check failed.')
             else:
                 for child in node.children:

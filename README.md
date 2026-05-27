@@ -24,18 +24,22 @@ The main algorithm is implemented in the `TopDown` class located in `topdown.py`
 
 ```python
 from topdown import TopDown
+from privacy import PureDP, ZCDP, ApproximateDP, RenyiDP
 from constraints.logical_expressions.atomic import GreaterThan
 from constraints.aggregate_constraints import SumEqual
 
-# Instantiate with path to raw microdata, hierarchy columns, query columns and optional output path
-td = TopDown(data_path='data/microdata.csv', hierarchy=['REGION','STATE'], queries=['AGE','SEX'], out_path='noisy_microdata.csv')
+# Build a privacy mechanism with one parameter per tree level (root + one per hierarchical column).
+# Choose one of: PureDP (ε via discrete Laplace), ZCDP (ρ via discrete Gaussian),
+# ApproximateDP (ρ + global δ, reports (ε, δ)-DP) or RenyiDP (ε + δ, joint-α calibration).
+mechanism = PureDP([0.5, 0.3, 0.2])
+
+# Instantiate with path to raw microdata, hierarchy columns, query columns and the mechanism.
+td = TopDown(data_path='data/microdata.csv',
+             hierarchy=['REGION', 'STATE'],
+             query_columns=['AGE', 'SEX'],
+             privacy_mechanism=mechanism,
+             out_path='noisy_microdata.csv')
 # Note that the hierarchy does not include the root level (NATIONAL). The root is implicitly defined as the aggregation of all data.
-
-# Set privacy parameters per level (list length must match number of levels of the tree)
-td.set_privacy_parameters([0.5, 0.3, 0.2])
-
-# Choose mechanism: 'discrete_laplace' or 'discrete_gaussian'
-td.set_mechanism('discrete_laplace')
 
 # Add constraints (see Constraints section below)
 my_constraint = SumEqual(GreaterThan('AGE', 99), 0)
@@ -44,7 +48,7 @@ td.set_constraint_to_tree(my_constraint)
 # td.set_constraint_to_level(1, my_constraint)
 
 # Run
-noisy_df = td.run()
+td.run()
 ```
 
 Notes:
@@ -63,10 +67,15 @@ Notes:
 
 ## Parameter configuration
 
-- **Data path & columns**: Provided when instantiating `TopDown(data_path, hierarchy, queries, out_path)` or using `DataHandler` directly.
-- **Privacy parameters**: Use `td.set_privacy_parameters([...])`. The list index corresponds to tree level (level 0 = root).
-- **Noise mechanism**: Use `td.set_mechanism('discrete_laplace')` or `td.set_mechanism('discrete_gaussian')`. Under the hood these call `sample_dlaplace` / `sample_dgauss` from `discretegauss.py`.
-- **Constraints**: Constraints are objects conforming to the `Constraint` interface (see `constraints/constraint.py`). Use `td.set_constraint_to_tree(constraint)` to add a constraint to all levels, or `td.set_constraint_to_level(level, constraint)` to apply to a particular level (applies to that level and higher levels during building). Constraints are evaluated and converted to callable constraint functions during tree construction in `DataHandler.build_hierarchical_tree()`.
+- **Data path & columns**: Provided when instantiating `TopDown(data_path, hierarchy, query_columns, privacy_mechanism, out_path)` or using `DataHandler` directly.
+- **Privacy mechanism and budget**: Pass an instance of a `PrivacyMechanism` subclass to `TopDown(..., privacy_mechanism=...)`. The mechanism carries one budget parameter per tree level (index 0 = root, last = leaves), and its length must equal `len(hierarchy) + 1`. Available variants in `privacy.variants`:
+  - `PureDP(epsilons)` — ε-DP per level via the discrete Laplace mechanism.
+  - `ZCDP(rhos)` — ρ-zCDP per level via the discrete Gaussian mechanism.
+  - `ApproximateDP(rhos, delta)` — ρ-zCDP under the hood; reports an equivalent (ε, δ)-DP guarantee via the Bun–Steinke inequality.
+  - `RenyiDP(epsilons, delta)` — (ε, δ)-DP via joint-α Rényi-DP composition over the discrete Gaussian (the δ→ε conversion cost is paid once for the whole tree).
+  Call `td.privacy_mechanism.report_guarantee()` after `td.run()` to print the resulting guarantee in human-readable form.
+- **Query workload**: Use `td.set_query_workload(QueryWorkload()...)` (see `queries.py`) or pass a binary numpy matrix directly. The L1 sensitivity Δ is computed once as the max column sum of the resulting binary `Q`.
+- **Constraints**: Constraints are objects conforming to the `Constraint` interface (see `constraints/constraint.py`). Use `td.set_constraint_to_tree(constraint)` to add a constraint to all levels, or `td.set_constraint_to_level(level, constraint)` to apply to a particular level. Constraints are evaluated and converted to callable constraint functions during tree construction in `DataHandler.build_hierarchical_tree()`.
 
 ## Constraints
 
@@ -124,10 +133,10 @@ It is important that the constraints keep the optimization problem feasible. Add
 
 Implemented in `TopDown.measurement_phase()`. For each level the algorithm:
 
-- Retrieves the privacy budget from `TopDown.privacy_parameters[level]`.
-- Calls `TopDown.add_noise(node.contingency_vector, budget)` which applies the configured noise mechanism element-wise to the contingency vector.
+- Delegates to `self.privacy_mechanism.add_noise(noisy_vector, level, sensitivity)`, which selects the discrete-noise distribution (Laplace or Gaussian) and the scale derived from the per-level privacy parameter and the workload sensitivity.
+- Distributes nodes across worker processes via `ProcessPoolExecutor` to parallelise the per-node noise draws.
 
-Noise functions live in `discretegauss.py` (`sample_dgauss`, `sample_dlaplace`).
+The actual integer-noise samplers live in `privacy/noisy.py` (`sample_dgauss_optimized`, `sample_dlaplace_optimized`) and are thin, cached wrappers around the [OpenDP](https://docs.opendp.org/) `make_gaussian` / `make_geometric` mechanisms — caching avoids rebuilding an OpenDP mechanism object on every node.
 
 ## Estimation phase
 
@@ -151,9 +160,11 @@ The optimizer uses Pyomo as an interface over optimization solvers (defaulting t
 
 - `topdown.py`: main `TopDown` implementation and pipeline control.
 - `data_handler.py`: reading data, generating contingency domain, building hierarchical tree, and microdata reconstruction.
-- `hierarchical_node.py`, `hierarchical_tree.py` — hierarchical tree data structures.
+- `hierarchical_node.py`, `hierarchical_tree.py`: hierarchical tree data structures.
 - `optimizer.py`: optimization model wrappers (non-negative estimation, rounding).
-- `discretegauss.py`: implementations of discrete Laplace / discrete Gaussian samplers.
+- `privacy/`: DP variants (`variants.py` — `PureDP`, `ZCDP`, `ApproximateDP`, `RenyiDP`) and the OpenDP-backed integer-noise samplers (`noisy.py`).
+- `queries.py`: small DSL (`QueryWorkload`, `col`) for building the binary query matrix `Q`.
 - `constraints/`: constraint API (logical expressions, aggregate constraints, contextual constraints).
-- `main.py`: optional script (if present) showing example runs.
+- `parallel_utils.py`: process-pool helpers used during the estimation phase.
+- `main.py`: example driver showing a full configuration on the 2017 Chilean Census data.
 
