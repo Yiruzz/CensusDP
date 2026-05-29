@@ -2,6 +2,9 @@
 data/
 extra/
 
+# Generated experiment artifacts — derived from data/ (which is already gitignored)
+tests/out/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

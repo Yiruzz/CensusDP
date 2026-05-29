@@ -1,0 +1,52 @@
+# Configuration for the CensusDP empirical evaluation framework.
+#
+# Two top-level tables:
+#   [defaults]      — values used by every experiment when no CLI flag is given.
+#   [datasets.X]    — describe one dataset per table. CLI uses --dataset X to pick.
+#
+# CLI flags override config values. Config values override built-in fallbacks.
+# Point an experiment at a different config file with `--config path/to/other.toml`.
+
+
+# ─── Defaults ────────────────────────────────────────────────────────────────
+
+[defaults]
+dataset       = "viviendas"     # name of a [datasets.X] table below
+process_until = "COMUNA"        # deepest hierarchy column to process
+mechanism     = "ZCDP"          # PureDP / ZCDP / ApproximateDP / RenyiDP
+delta         = 1e-10           # used by ApproximateDP / RenyiDP and iso-(eps,delta) conversion
+allocation    = "exp_leaves"    # equal / exp_leaves / exp_root / square_leaves
+trials        = 5               # independent trials per configuration
+extension     = "png"           # png / pdf / svg
+solver_name   = "gurobi"        # gurobi / glpk / ...
+
+# Per-mechanism default budgets, calibrated so every mechanism encodes the same
+# (epsilon=10, delta=1e-10)-DP guarantee. PureDP and RenyiDP use epsilon natively;
+# ZCDP and ApproximateDP use rho = inverse-Bun-Steinke(10, 1e-10) ≈ 0.8993.
+# Used as `cfg.total_budget` when --budget is not supplied. If you change delta,
+# recompute the rho values (epsilon_to_rho in tests/common.py).
+[defaults.budgets]
+PureDP        = 10.0            # epsilon
+ZCDP          = 0.8993          # rho — iso-(eps=10, delta=1e-10)
+ApproximateDP = 0.8993          # rho — iso-(eps=10, delta=1e-10)
+RenyiDP       = 10.0            # epsilon
+
+[defaults.solver_options]
+OutputFlag = 0                  # Gurobi-specific: silence solver chatter
+Threads    = 1
+
+
+# ─── Datasets ────────────────────────────────────────────────────────────────
+# Add a new dataset by adding a new [datasets.NAME] table.
+
+[datasets.viviendas]
+path             = "data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/Microdato_Censo2017-Viviendas.csv"
+hierarchy        = ["REGION", "PROVINCIA", "COMUNA", "DC", "ZC_LOC"]
+sep              = ";"
+default_queries  = ["P01", "P02"]
+
+[datasets.personas]
+path             = "data/csv-personas-censo-2017/microdato_censo2017-personas/Microdato_Censo2017-Personas.csv"
+hierarchy        = ["REGION", "PROVINCIA", "COMUNA", "DC", "ZC_LOC"]
+sep              = ";"
+default_queries  = ["P08", "P09"]    # P08 = sex, P09 = age band
