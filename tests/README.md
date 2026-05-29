@@ -16,7 +16,7 @@ config snapshots for reproducibility.
    pip install -r requirements.txt
    ```
 
-   Requires Python 3.11+ (stdlib `tomllib` is used to read the config).
+   Requires Python 3.11+ (stdlib `tomllib` is used to read the config). `exp10_memory_profile` additionally needs `psutil` (in `requirements.txt`) for RSS-based memory measurement; it exits with a `pip install psutil` hint if the package is missing.
 
 3. **Solver.** The default is Gurobi (commercial license required). Free alternatives that handle both QP and the rounding MIP: GLPK, CBC, HiGHS — switch via `solver_name` in `tests/config.toml`. IPOPT is **not** compatible because it can't handle the binary variables in `rounding_estimation`.
 
@@ -85,6 +85,7 @@ tests/
 ├── exp7_mechanisms.py           # Compare PureDP / ZCDP / ApproximateDP / RenyiDP at iso-(ε, δ)
 ├── exp8_correlation.py          # Real vs private Cramér's V / Pearson heatmaps + diff
 ├── exp9_matrix_size.py          # Runtime vs n_queries (Q rows) at fixed query columns
+├── exp10_memory_profile.py      # Peak-RSS memory scaling + per-phase memory profiling
 ├── _replot.py                   # Regenerate plots from existing CSVs without re-running
 └── out/                         # All outputs (graphs, CSVs, JSON config snapshots)
     └── ...
@@ -147,6 +148,7 @@ Exception: exp5 has its own `--workloads` (plural) flag — that script's whole 
 * **exp7**: `--mechanisms`, plus `--budgets_pure / _zcdp / _approx / _renyi` to override the auto iso-(ε, δ) budget for a specific mechanism. The override unit is ε for PureDP/RenyiDP, ρ for ZCDP/ApproximateDP.
 * **exp8**: `--metric {cramer,pearson}` (default `cramer` for categorical census data), `--include_geo` (add hierarchical geographic columns to the matrix).
 * **exp9**: `--n_queries_sweep 10 50 100 250 500 1000` (rows of Q to sweep), `--random_density 0.1`. When `--process_until` is omitted, exp9 uses the **root-most column** of the selected dataset's hierarchy (2 tree levels) so the matrix-size effect is isolated from tree-traversal cost. Pass `--process_until <deeper_level>` if you want to see both effects together. The workload is fixed to random binary; the `--workload` flag is intentionally absent.
+* **exp10**: `--tests {matrix,cells,profile}+` (default all three), `--n_queries_sweep` (matrix), `--cells_query_pool P01 P02 P03A P03B` + `--cells_n_queries 50` (cells), `--sample_interval_ms 25` (RSS sampler period), `--top_allocators 15` (profile). Like exp9 it defaults `--process_until` to the dataset's root-most column (2 levels) to keep the sweeps fast; push `--process_until` deeper for the `profile` test. The `profile` test uses the standard `--workload` flag (default `random`) and is the only test that constructs microdata, so it is the slowest. **Requires `psutil`** (see Prerequisites).
 
 ## Example invocations
 
@@ -203,6 +205,19 @@ Runtime vs query-matrix size (rows of Q only, REGION depth by default):
 python -m tests.exp9_matrix_size --queries P02 P03A --n_queries_sweep 10 50 100 250 500 1000 --trials 3
 ```
 
+Memory usage — all three sub-tests (fast smoke at REGION depth):
+
+```powershell
+python -m tests.exp10_memory_profile --dataset viviendas --process_until REGION --queries P01 P02 --tests matrix cells profile --trials 1 --n_queries_sweep 10 50 --cells_query_pool P01 P02 --cells_n_queries 20
+```
+
+Full memory characterization (cells sweep over a wider column pool, deeper profile):
+
+```powershell
+python -m tests.exp10_memory_profile --queries P02 P03A --tests cells --cells_query_pool P02 P03A P03B P04 --cells_n_queries 50 --trials 3
+python -m tests.exp10_memory_profile --queries P02 P03A --tests profile --process_until COMUNA --workload random --n_random_queries 200
+```
+
 ## Truth cache
 
 The per-cell truth tensor for each `(dataset, hierarchy, queries, process_until)` combo is
@@ -231,6 +246,14 @@ using the current plotting functions. No mechanism calls, no Pyomo solves.
 * Each experiment skips `construct_microdata()` except for **exp8**, which needs the
   reconstructed microdata to compute pairwise correlation. exp8 is therefore noticeably
   slower than the others.
+* **exp10 memory methodology.** The primary metric is **peak RSS of the process tree**
+  (this process + its recursive children), sampled by a background thread. RSS is used
+  rather than `tracemalloc` because the memory here is dominated by numpy data buffers, the
+  `multiprocessing.shared_memory` block backing the contingency vectors, and the estimation
+  worker subprocesses — none of which `tracemalloc` sees (it tracks only Python allocations in
+  the current process). RSS also works on Windows, where `resource.getrusage` does not. The
+  `profile` test adds a `tracemalloc` table for per-function Python-level attribution; its
+  caveat is that estimation worker memory appears in the RSS delta but **not** in that table.
 * For exp4 and exp7, `--budget` is the **target ε** at the given `--delta`. The script
   converts to ρ via inverse Bun–Steinke (ρ = ε² / (c + √(c² + ε))², c = √log(1/δ)) for
   ZCDP and ApproximateDP, so all mechanisms operate under the same (ε, δ)-DP guarantee

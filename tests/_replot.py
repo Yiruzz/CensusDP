@@ -178,6 +178,55 @@ def replot_exp9():
     print(f"[exp9] replotted -> {d}")
 
 
+def replot_exp10():
+    from tests.exp10_memory_profile import _plot_scaling, _plot_phase_breakdown, _plot_timeline
+    # Three independent CSVs share one config snapshot; replot whichever exist. The
+    # tracemalloc allocator table (exp10_phase_allocators.csv) is not a plot, so it is skipped.
+    d = ROOT / "exp10_memory_profile"
+    cfg_name = "exp10_memory_profile_config"
+    rebuilt = []
+    try:
+        df, cfg, extras, d = _load("exp10_memory_profile", "exp10_matrix", cfg_name)
+        n_cells = extras.get("matrix", {}).get("n_cells", "?")
+        sweep = extras.get("matrix", {}).get("n_queries_sweep", [])
+        footer = experiment_footer(cfg, extra=f"n_cells={n_cells} | n_queries sweep: {sweep}")
+        _plot_scaling(df, "n_queries", f"n_queries  (rows of Q; n_cells={n_cells} held fixed)",
+                      "Peak memory vs query-matrix size", d, cfg.extension,
+                      "peak_rss_vs_n_queries", footer=footer)
+        rebuilt.append("matrix")
+    except FileNotFoundError:
+        pass
+    try:
+        df, cfg, extras, d = _load("exp10_memory_profile", "exp10_cells", cfg_name)
+        pool = extras.get("cells", {}).get("query_pool", [])
+        footer = experiment_footer(cfg, extra=f"query pool: {pool}")
+        _plot_scaling(df, "n_cells", "n_cells  (contingency vector length; Q rows held fixed)",
+                      "Peak memory vs contingency-vector size", d, cfg.extension,
+                      "peak_rss_vs_n_cells", footer=footer)
+        rebuilt.append("cells")
+    except FileNotFoundError:
+        pass
+    try:
+        df, cfg, extras, d = _load("exp10_memory_profile", "exp10_phase", cfg_name)
+        prof = extras.get("profile", {})
+        footer = experiment_footer(cfg, extra=(
+            f"Workload: {prof.get('workload', '?')} (Q.shape={tuple(prof.get('Q_shape', []))}, "
+            f"Δ={prof.get('sensitivity', '?')})"))
+        _plot_phase_breakdown(df, d, cfg.extension, footer=footer)
+        tdf_path = d / "exp10_phase_timeline.csv"
+        if tdf_path.exists():
+            _plot_timeline(pd.read_csv(tdf_path), d, cfg.extension, footer=footer)
+        rebuilt.append("profile")
+    except FileNotFoundError:
+        pass
+    if rebuilt:
+        print(f"[exp10] replotted -> {d}  ({', '.join(rebuilt)})")
+    else:
+        raise FileNotFoundError(
+            f"no exp10 run found at {ROOT / 'exp10_memory_profile'} — "
+            f"run `python -m tests.exp10_memory_profile` first.")
+
+
 def main():
     set_plot_style()
     if not ROOT.exists():
@@ -185,7 +234,7 @@ def main():
               f"(e.g. `python -m tests.exp1_runtime --help`).")
         return
     for fn in (replot_exp1, replot_exp2, replot_exp3, replot_exp4, replot_exp5,
-               replot_exp6, replot_exp7, replot_exp9):
+               replot_exp6, replot_exp7, replot_exp9, replot_exp10):
         try:
             fn()
         except FileNotFoundError as e:
