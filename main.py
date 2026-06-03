@@ -104,7 +104,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
         query_columns=QUERIES,
         privacy_mechanism=PRIVACY_MECHANISM,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
-        optimizer=SOLVER_NAME,
+        solver_name=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
         optimizer_path=OPT_PATH
     )

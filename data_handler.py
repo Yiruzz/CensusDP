@@ -57,7 +57,7 @@ class DataHandler:
         # Query columns (not considered for the hierarchy).
         self.query_columns: List[str] = []
 
-    def _initialize_output_file(self) -> None:
+    def initialize_output_file(self) -> None:
         '''Initialize the output CSV file with column headers.'''
         # Create empty DataFrame with the expected columns
         empty_df = pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)

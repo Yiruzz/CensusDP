@@ -25,7 +25,8 @@ class TopDown():
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism,
-                 out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
+                 out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
+                 solver_options: dict = None, optimizer_path: str = None) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -36,7 +37,7 @@ class TopDown():
             privacy_mechanism (PrivacyMechanism): DP variant carrying per-level parameters.
                 Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-column levels).
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
-            optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
+            solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
 
@@ -60,10 +61,11 @@ class TopDown():
                 f"expected {n_levels} (= len(hierarchy) + 1)."
             )
 
-        self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
+        
         self.hierarchical_columns: List[str] = hierarchy
         self.query_columns: List[str] = query_columns
 
+        self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
         self.data_handler.hierarchical_columns = hierarchy
         self.data_handler.query_columns = query_columns
 
@@ -75,11 +77,18 @@ class TopDown():
         self.constraints: Dict[int, List[Constraint]] = {i: [] for i in range(len(hierarchy) + 1)}
 
         self.tree: HierarchicalTree = HierarchicalTree()
-        self.optimizer = (optimizer, solver_options, optimizer_path)
+
+        if solver_options is None:
+            solver_options = {}
+
+        self.optimizer: OptimizationModel = OptimizationModel(
+            solver_name=solver_name,
+            solver_options=solver_options,
+            optimizer_path=optimizer_path
+        )
 
         self.workers: int = 4
 
-    
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
 
@@ -116,9 +125,52 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         # Initialize output file with headers
-        self.data_handler._initialize_output_file()
+        self.data_handler.initialize_output_file()
 
-        print(self.tree)
+        print(self.tree, "\n")
+
+    def _estimate_node_individually(self, node) -> None:
+        '''Solve optimization for a node's own contingency vector.
+
+        Args:
+            node (HierarchicalNode): The node to process.
+        '''
+        x_tilde = self.optimizer.non_negative_real_estimation(
+            noisy_measurements=node.contingency_vector,
+            node_id=node.geo_id,
+            constraints=node.constraints,
+            query_matrix=self.Q
+        )
+
+        node.contingency_vector = self.optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.geo_id,
+            constraints=node.constraints
+        )
+
+    def _estimate_and_update_children(self, node) -> None:
+        '''Solve optimization for a node considering its children and update their vectors.
+
+        Args:
+            node (HierarchicalNode): The node to process.
+        '''
+        joint_contingency_vector = node.combine_child_vectors()
+        constraints = node.combine_child_constraints()
+
+        x_tilde = self.optimizer.non_negative_real_estimation(
+            noisy_measurements=joint_contingency_vector,
+            node_id=node.geo_id,
+            constraints=constraints,
+            query_matrix=self.Q
+        )
+
+        joint_solution = self.optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.geo_id,
+            constraints=constraints
+        )
+
+        node.update_child_vectors(joint_solution)
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -127,7 +179,7 @@ class TopDown():
         then for each node in queue: materializes its children, constructs microdata for leaves,
         and frees its own vector. Also prepares constraints for each node in a single data pass.
         '''
-        print(f'Materializing contingency vectors and constructing microdata...', end=' ')
+        print(f'Running estimation phase...')
         t1 = time.time()
 
         # Materialize root and its children immediately
@@ -135,11 +187,19 @@ class TopDown():
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level])
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
+        # First phase: resolve root's own contingency vector
+        print(f'  Estimating node {root.geo_id} individually...')
+        #self._estimate_node_individually(root)
+
         queue = deque()
         for child in root.children:
             child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level])
             self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
             queue.append(child)
+
+        # Second phase: resolve root considering its children and update their vectors
+        print(f'  Estimating node {root.geo_id} with children...')
+        #self._estimate_and_update_children(root)
 
         # Free root's memory immediately after materializing children
         root.contingency_vector = None
@@ -155,6 +215,9 @@ class TopDown():
                 self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
                 queue.append(child)
 
+            print(f'  Estimating node {node.geo_id} with children...')
+            #self._estimate_and_update_children(node)
+
             # If node is a leaf, construct and write its microdata
             if node.is_leaf(): self.data_handler.write_microdata_for_leaf(node)
 
@@ -163,126 +226,6 @@ class TopDown():
             node.constraints = None
 
         print(f'{time.time() - t1:.2f} seconds.\n')
-
-    def root_estimation_phase(self, index: int = 0) -> None:
-        '''Perform the estimation phase of the TopDown algorithm for root node.
-
-        Reads the noisy measurement y from the first n_queries slots of the row, then
-        overwrites the first n_cells slots with x_hat. The row stays the same physical size.
-        '''
-        optimizer = OptimizationModel(*self.optimizer)
-        root = self.tree.root
-        n_queries = self.tree.n_queries
-        n_cells = self.tree.n_cells
-        x_tilde = optimizer.non_negative_real_estimation(
-            noisy_measurements=self.tree._contingency_vectors[index, :n_queries],
-            node_id=root,
-            constraints=root.constraints,
-            query_matrix=self.Q
-        )
-        self.tree._contingency_vectors[index, :n_cells] = optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            node_id=root,
-            constraints=root.constraints
-        )
-        return None
-
-    def subtree_estimation_phase(self) -> None:
-        '''Allows solving optimization models in parallel once their contingency vectors are updated.
-
-        This means that it is not necessary to wait for an entire level to finish before moving to the next,
-        because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
-        '''
-
-        root = self.tree.root
-        child_constraints = {child: child.constraints for child in root.children}
-
-        root_arguments = (
-            root,
-            child_constraints,
-        )
-
-        max_workers = self.workers
-        buffer = 2
-        max_outstanding = max_workers + buffer
-
-        # Retrieve solver configuration and shared memory information.
-        # Each process initializes its own solver instance and attaches
-        # to the shared memory space on first execution.
-        solver_name = self.optimizer[0]
-        solver_options = self.optimizer[1]
-        optimizer_path = self.optimizer[2]
-        shared_memory_name = self.tree._contingency_vectors_shm.name
-        shared_array_shape = self.tree._contingency_vectors.shape
-        shared_array_dtype = str(self.tree._contingency_vectors.dtype)
-
-        args = (
-            solver_name,
-            solver_options,
-            optimizer_path,
-            shared_memory_name,
-            shared_array_shape,
-            shared_array_dtype,
-            self.tree.n_queries,
-            self.tree.n_cells,
-            self.Q,
-        )
-
-        nodes_per_level = [abs(self.tree._levels[i] - self.tree._levels[i + 1])for i in range(len(self.tree._levels) - 1)]
-        time_per_level = np.zeros(len(self.hierarchical_columns))
-
-        with ProcessPoolExecutor(max_workers=max_workers, mp_context=get_context("spawn"),
-                                 initializer=init_process, initargs=args) as executor:
-            next_ranges = deque()
-            curr_range = None
-
-            # Submit root
-            futures = {
-                executor.submit(solve, *root_arguments): root_arguments
-            }
-
-            while futures:
-                done, _ = wait(futures, return_when=FIRST_COMPLETED)
-
-                # Process completed tasks
-                for fut in done:
-                    futures.pop(fut)
-                    node_id, elapsed_time = fut.result()
-                    node = self.tree.nodes[node_id]
-
-                    time_per_level[node.level] += elapsed_time
-                    nodes_per_level[node.level] -= 1
-
-                    if nodes_per_level[node.level] == 0: print(f"Level {node.level} processed in {time_per_level[node.level]:.2f} seconds.")
-
-                    # Add children range
-                    next_ranges.append(iter(node.children))
-
-                    # Initialize current range if needed
-                    if curr_range is None and next_ranges:
-                        curr_range = next_ranges.popleft()
-
-                # Fill available slots
-                while len(futures) < max_outstanding and curr_range is not None:
-                    try:
-                        node = next(curr_range)
-                    except StopIteration:
-                        if next_ranges:
-                            curr_range = next_ranges.popleft()
-                        else:
-                            curr_range = None
-                        continue
-
-                    if node.is_leaf(): continue
-
-                    child_arguments = (
-                        node,
-                        {child: child.constraints for child in node.children},
-                    )
-                    fut = executor.submit(solve, *child_arguments)
-                    futures[fut] = child_arguments
-
-        return None
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
@@ -348,40 +291,37 @@ class TopDown():
         '''
         self.initialize()
         self.estimation_phase()
-        self.tree.print_all_nodes()
-    
-        #self.estimation_phase()
   
-    def check_correctness(self) -> None:
-        '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
-        '''
-        root = self.tree.root
-        if root is not None:
-            print(f'Checking correctness of the tree...')
-            time1 = time.time()
-            self._check_correctness_node(root)
-            time2 = time.time()
-            print(f'Finished checking correctness in {time2-time1} seconds.\n')
+    # def check_correctness(self) -> None:
+    #     '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
+    #     '''
+    #     root = self.tree.root
+    #     if root is not None:
+    #         print(f'Checking correctness of the tree...')
+    #         time1 = time.time()
+    #         self._check_correctness_node(root)
+    #         time2 = time.time()
+    #         print(f'Finished checking correctness in {time2-time1} seconds.\n')
 
 
-    def _check_correctness_node(self, node) -> None:
-        '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.
+    # def _check_correctness_node(self, node) -> None:
+    #     '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.
 
-        Args:
-            node (HierarchicalNode): The node to check.
-        '''
-        if node.children:
-            # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = sum(self.tree._contingency_vectors[node])
-            children_sum = 0
-            for child in node.children:
-                children_sum += np.sum(self.tree._contingency_vectors[child])
+    #     Args:
+    #         node (HierarchicalNode): The node to check.
+    #     '''
+    #     if node.children:
+    #         # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
+    #         node_sum = sum(self.tree._contingency_vectors[node])
+    #         children_sum = 0
+    #         for child in node.children:
+    #             children_sum += np.sum(self.tree._contingency_vectors[child])
 
-            if node_sum != children_sum:
-                print(node_sum, children_sum)
-                print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node]}')
-                raise ValueError('Tree correctness check failed.')
-            else:
-                for child in node.children:
-                    self._check_correctness_node(child)
+    #         if node_sum != children_sum:
+    #             print(node_sum, children_sum)
+    #             print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
+    #             print(f'Parent node contingency vector: {self.tree._contingency_vectors[node]}')
+    #             raise ValueError('Tree correctness check failed.')
+    #         else:
+    #             for child in node.children:
+    #                 self._check_correctness_node(child)

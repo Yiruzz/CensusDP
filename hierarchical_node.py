@@ -13,7 +13,7 @@ class HierarchicalNode:
     without any tree traversal or tree-wide operation logic.
     '''
     def __init__(self, geo_id: int, level: int) -> None:
-        """
+        '''
         Initialize a hierarchical node.
 
         Args:
@@ -33,7 +33,7 @@ class HierarchicalNode:
 
             contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
             constraints (Optional[List[Callable]]): List of constraints for this node.
-        """
+        '''
         self.geo_id: int = geo_id
 
         self.children: List[HierarchicalNode] = []
@@ -73,8 +73,72 @@ class HierarchicalNode:
         '''
         return len(self.children) == 0
     
+    def combine_child_vectors(self) -> np.ndarray:
+        '''Concatenate the contingency vectors of all children into a single vector.
+
+        Returns:
+            np.ndarray: A 1D array with the concatenated child vectors.
+                       Empty array if this node is a leaf.
+        '''
+        if self.is_leaf():
+            return np.array([], dtype=int)
+
+        return np.concatenate([child.contingency_vector for child in self.children])
+    
+    def combine_child_constraints(self) -> List[Callable]:
+        '''Combine all child constraints into a single list with adjusted indices.
+
+        Each child constraint is adapted to work with the flattened joint vector.
+        Consistency constraints ensure parent value = sum of child values at each index.
+
+        Returns:
+            List[Callable]: Constraints callable with all indices adjusted to joint vector.
+                           Empty list if this node is a leaf.
+        '''
+        joint_constraints = []
+
+        if not self.is_leaf():
+            vectors_length = len(self.contingency_vector)
+            num_children = len(self.children)
+
+            # Wrap child publication constraints with adjusted indices
+            start = 0
+            for child in self.children:
+                end = start + vectors_length
+                for constraint in child.constraints:
+                    joint_constraints.append(
+                        lambda joint_array, s=start, e=end, c=constraint:
+                            c({i - s: joint_array[i] for i in range(s, e)})
+                    )
+                start = end
+
+            # Add consistency constraints: parent value at each index = sum of child values at that index
+            for index in range(vectors_length):
+                indices_to_sum = [index + i * vectors_length for i in range(num_children)]
+                joint_constraints.append(
+                    lambda joint_array, idxs=indices_to_sum, value=self.contingency_vector[index]:
+                        sum(joint_array[j] for j in idxs) == value
+                )
+
+        return joint_constraints
+    
+    def update_child_vectors(self, joint_solution: np.ndarray) -> None:
+        '''Distribute the joint solution back to individual child contingency vectors.
+
+        Args:
+            joint_solution (np.ndarray): Concatenated solution from optimization,
+                                        with one child's vector after another.
+        '''
+        if not self.is_leaf():
+            vectors_length = len(self.contingency_vector)
+            start = 0
+            for child in self.children:
+                end = start + vectors_length
+                child.contingency_vector = joint_solution[start:end]
+                start = end
+    
     def __str__(self) -> str:
-        """Return a detailed string representation of the node with key attributes."""
+        '''Return a detailed string representation of the node with key attributes.'''
         has_contingency = self.contingency_vector is not None and len(self.contingency_vector) > 0
         has_constraints = self.constraints is not None and len(self.constraints) > 0
         path = " -> ".join(str(x) for x in self.hierarchical_path)
