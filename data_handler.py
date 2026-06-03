@@ -247,7 +247,7 @@ class DataHandler:
         leaf_microdata = self.construct_microdata_for_leaf(node)
         leaf_microdata.to_csv(self.output_path, mode='a', header=False, index=False)
 
-    def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint]) -> Tuple[np.ndarray, List]:
+    def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint], query_matrix: np.ndarray) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
         Filters data once based on hierarchical path, then creates the contingency vector
@@ -256,6 +256,7 @@ class DataHandler:
         Args:
             hierarchical_path (List[int]): The node's hierarchical path for filtering.
             constraints (List[Constraint]): Constraints for the node considering its level.
+            query_matrix (np.ndarray): Query matrix for aggregating contingency vectors.
 
         Returns:
             Tuple[np.ndarray, List[Constraint]]: Contingency vector and constraint callables for this node.
@@ -274,7 +275,7 @@ class DataHandler:
         queries = self.contingency_df.columns.tolist()
         grouped = filtered_df.value_counts(subset=queries).reset_index(name='frequency')
         merged = pd.merge(self.contingency_df, grouped, how='left', on=queries).fillna({'frequency': 0})
-        contingency_vector = merged['frequency'].to_numpy(dtype=int)
+        contingency_vector = query_matrix @ merged['frequency'].to_numpy(dtype=int) 
 
         # Prepare constraints using the same filtered data
         level_constraints = []

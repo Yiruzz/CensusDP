@@ -136,7 +136,7 @@ class TopDown():
 
         # Materialize root and its children immediately
         root = self.tree.root
-        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level])
+        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level], self.Q)
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         # First phase: resolve root's own contingency vector
@@ -144,7 +144,7 @@ class TopDown():
 
         queue = deque()
         for child in root.children:
-            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level])
+            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
             self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
             queue.append(child)
 
@@ -167,7 +167,7 @@ class TopDown():
 
             # Materialize all children's vectors
             for child in node.children:
-                child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level])
+                child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
                 self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
                 queue.append(child)
 
