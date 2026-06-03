@@ -4,7 +4,7 @@ from collections import deque
 
 from multiprocessing import shared_memory
 from itertools import product
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from pathlib import Path
 
 from hierarchical_tree import HierarchicalTree
@@ -57,6 +57,12 @@ class DataHandler:
         # Query columns (not considered for the hierarchy).
         self.query_columns: List[str] = []
 
+    def _initialize_output_file(self) -> None:
+        '''Initialize the output CSV file with column headers.'''
+        # Create empty DataFrame with the expected columns
+        empty_df = pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)
+        empty_df.to_csv(self.output_path, index=False, header=True)
+
     def read_data(self, columns: List[str], sep: str = ',', nrows: Optional[int] = None) -> pd.DataFrame:
         '''Read data from the file_path into a pandas DataFrame.
         
@@ -74,16 +80,6 @@ class DataHandler:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
 
         return self.dataframe
-
-    def write_data(self, data: pd.DataFrame, out_path: Optional[str] = None, cols: list[str] = None) -> None:
-        '''Write the processed data to the output_path.
-        
-        Args:
-            data (pd.DataFrame): DataFrame containing the processed data to write.
-            out_path (Optional[str]): Optional path to save the processed data. If None, use self.output_path.
-            cols (Optional[list[str]]): Optional columns to write. Useful to avoid reordering the DataFrame.
-        '''
-        data.to_csv((out_path or self.output_path), columns=cols,  index=False)
     
     def generate_contingency_dataframe(self, query_columns: List[str]) -> pd.DataFrame:
         '''Generate a contingency dataframe from the loaded data.
@@ -114,11 +110,11 @@ class DataHandler:
 
         return self.contingency_df
     
-    def create_contingency_vector(self, df: pd.DataFrame) -> np.ndarray:
-        '''Create a contingency vector from the given dataframe with the same order as contingency_df.
-        
+    def create_contingency_vector(self, hierarchical_path: List[int]) -> np.ndarray:
+        '''Create a contingency vector from a dataframe, optionally filtered by hierarchical path.
+
         Args:
-            df (pd.DataFrame): DataFrame containing the data to aggregate.
+            hierarchical_path (Optional[List[Int]]): Filters df using this path before creating the vector.
 
         Returns:
             np.ndarray: Contingency vector with counts for each unique combination in contingency_df.
@@ -126,10 +122,16 @@ class DataHandler:
         if self.contingency_df is None:
             raise ValueError("Contingency DataFrame is not generated. Call generate_contingency_table first.")
 
+        filtered_df = self.dataframe
+        if len(hierarchical_path) > 1:
+            for level, value in enumerate(hierarchical_path[1:]):
+                column = self.hierarchical_columns[level]
+                filtered_df = filtered_df[filtered_df[column] == value]
+
         queries = self.contingency_df.columns.tolist()
 
         # Group the data by the permutation columns and count occurrences
-        grouped = df.value_counts(subset=queries).reset_index(name='frequency')
+        grouped = filtered_df.value_counts(subset=queries).reset_index(name='frequency')
 
         # Merge to get frequencies for all combinations, ensuring correct order and filling missing with 0.
         # This merged dataframe now contains all combinations from self.contingency_df and their counts (0 if not present in df).
@@ -137,7 +139,7 @@ class DataHandler:
 
         # Directly extract the 'frequency' column as a numpy array.
         contingency_vector = merged['frequency'].to_numpy(dtype=int)
-        
+
         return contingency_vector
 
     def build_hierarchical_tree(self) -> HierarchicalTree:
@@ -158,7 +160,7 @@ class DataHandler:
         # Build tree structure recursively, starting with the full dataframe
         tree._node_count = self._build_subtree(root, 0, self.dataframe)
         tree._levels = 1+len(self.hierarchical_columns)
-        
+
         return tree
 
     def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame) -> int:
@@ -192,59 +194,56 @@ class DataHandler:
 
         return n_nodes
 
-    def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
-        '''Construct microdata from the hierarchical tree.
-        
-        This method traverses the hierarchical tree and reconstructs the microdata
-        based on the contingency vectors at each node.
+    def construct_microdata_for_leaf(self, node) -> pd.DataFrame:
+        '''Construct microdata for a specific leaf node.
 
         Args:
-            tree (HierarchicalTree): The hierarchical tree containing contingency vectors.
+            node (HierarchicalNode): The leaf node with materialized contingency vector.
 
         Returns:
-            pd.DataFrame: The reconstructed microdata.
+            pd.DataFrame: Microdata for this leaf node.
         '''
-        
-        assert self.contingency_df is not None, ("Contingency DataFrame is not generated. Call generate_contingency_table first.")
+        assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
+
+        if not node.is_leaf():
+            raise ValueError("Node must be a leaf node.")
+
+        if node.contingency_vector is None:
+            raise ValueError("Node contingency vector is not materialized.")
 
         # Get all possible query column combinations.
         query_values = self.contingency_df[self.query_columns].to_numpy()
 
-        # Store partial DataFrames generated for each leaf.
-        microdata_parts = []
+        # Select only positive frequencies.
+        nonzero_mask = node.contingency_vector > 0
 
-        start_node_idx = tree._levels[-1]
-        for leaf in tree.nodes[start_node_idx:]:
-            # Generate rows associated with query values.
-            # Select only positive frequencies.
-            # After estimation, only the first n_cells slots of the row hold the x_hat values;
-            # the trailing slots (if vector_length > n_cells) are unused padding.
-            contingency_vector = tree._contingency_vectors[leaf.id][:tree.n_cells]
-            nonzero_mask = contingency_vector > 0
+        # Filter combinations to avoid processing zero-frequency rows.
+        filtered_query_values = query_values[nonzero_mask]
+        filtered_counts = node.contingency_vector[nonzero_mask]
 
-            # Filter combinations to avoid processing zero-frequency rows.
-            filtered_query_values = query_values[nonzero_mask]
-            filtered_counts = contingency_vector[nonzero_mask]
+        # Repeat each combination according to its frequency.
+        expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
 
-            # Repeat each combination according to its frequency.
-            expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
+        # Create DataFrame for the leaf.
+        leaf_df = pd.DataFrame(expanded_rows, columns=self.query_columns)
 
-            # Create partial DataFrame for the current leaf.
-            leaf_df = pd.DataFrame(expanded_rows, columns=self.query_columns)
+        # Generate columns associated with hierarchical values.
+        # Skip the root node because all records belong to it.
+        for level, hierarchical_value in enumerate(node.hierarchical_path[1:]):
+            # Repeat the hierarchical value for all rows.
+            leaf_df[self.hierarchical_columns[level]] = hierarchical_value
 
-            # Generate columns associated with hierarchical values.
-            # Skip the root node because all records belong to it.
-            current_level = 0
-            for hierarchical_value in leaf.hierarchical_path[1:]:
-                # Repeat the hierarchical value for all rows.
-                leaf_df[self.hierarchical_columns[current_level]] = hierarchical_value
+        # Reorder columns to match output file order: hierarchical + query
+        output_columns = self.hierarchical_columns + self.query_columns
+        return leaf_df[output_columns]
 
-                current_level += 1
-            
-            # Add the leaf node identifier.
-            leaf_df[self.hierarchical_columns[current_level]] = leaf.geo_id
-            microdata_parts.append(leaf_df)
+    def write_microdata_for_leaf(self, node) -> None:
+        '''Construct microdata for a leaf node and append to output file.
 
-        microdata = pd.concat(microdata_parts, ignore_index=True)
-        return microdata
+        Args:
+            node (HierarchicalNode): The leaf node with materialized contingency vector.
+        '''
+        # Construct microdata for this leaf
+        leaf_microdata = self.construct_microdata_for_leaf(node)
+        leaf_microdata.to_csv(self.output_path, mode='a', header=False, index=False)
 

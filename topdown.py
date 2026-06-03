@@ -114,88 +114,53 @@ class TopDown():
         print(f'Building hierarchical tree structure...', end=' ')
         self.tree = self.data_handler.build_hierarchical_tree()
         print(f'{time.time() - t1:.2f} seconds.\n')
+
+        # Initialize output file with headers
+        self.data_handler._initialize_output_file()
+
         print(self.tree)
 
-    def add_noise_to_chunk(self, start: int, end: int) -> Tuple[int, int, float]:
-        '''Apply noise to a chunk of contingency vectors.
+    def estimation_phase(self) -> None:
+        '''Perform the estimation phase of the TopDown algorithm.
 
-        Args:
-            start (int): Starting index of the chunk.
-            end (int): Ending index of the chunk (exclusive).
-
-        Returns:
-            Tuple[int, int, float]: The start index, end index, and execution time for processing the chunk.
+        Traverses the tree using BFS. Materializes root and its children immediately,
+        then for each node in queue: materializes its children, constructs microdata for leaves,
+        and frees its own vector.
         '''
+        print(f'Materializing contingency vectors and constructing microdata...', end=' ')
         t1 = time.time()
-        # Only the first n_queries slots of each row hold the live measurement y; the
-        # trailing slots (when vector_length > n_queries) are reserved padding for x_hat
-        # and must not be touched in this phase.
-        n_queries = self.tree.n_queries
-        for idx in range(start, end):
-            self.add_noise(self.tree._contingency_vectors[idx, :n_queries], self.tree.nodes[idx].level)
 
-        t2 = time.time()-t1
-        return start, end, t2
-        
-    def add_noise(self, contingency_vector: np.ndarray, level: int) -> None:
-        '''Add noise to the contingency vector using the configured privacy mechanism, in place.
+        # Materialize root and its children immediately
+        root = self.tree.root
+        root.contingency_vector = self.data_handler.create_contingency_vector(root.hierarchical_path)
+        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
-        Args:
-            contingency_vector (np.ndarray): The vector to be noised (modified in place).
-            level (int): Tree level — selects the per-level privacy parameter inside the mechanism.
-        '''
-        self.privacy_mechanism.add_noise(contingency_vector, level, self.query_sensitivity)
+        queue = deque()
+        for child in root.children:
+            child.contingency_vector = self.data_handler.create_contingency_vector(child.hierarchical_path)
+            self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
+            queue.append(child)
 
-    def measurement_phase(self) -> None:
-        '''Perform the measurement phase of the TopDown algorithm.
+        # Free root's memory immediately after materializing children
+        root.contingency_vector = None
 
-        First materializes contingency vectors for all nodes, then adds noise in place.
-        '''
-        t1 = time.time()
-        print(f'Materializing contingency vectors for all nodes...', end=' ')
-        t_mat = time.time()
-        self.data_handler.materialize_tree_vectors(self.tree, self.Q)
-        print(f'{time.time() - t_mat:.2f} seconds.')
+        # Process remaining nodes
+        while queue:
+            node = queue.popleft()
 
-        print(f'Setting up shared memory for parallel processing...', end=' ')
-        t_mem = time.time()
-        self.data_handler.setup_shared_memory_tree(self.tree, self.tree.n_queries, self.tree.vector_length)
-        print(f'{time.time() - t_mem:.2f} seconds.')
+            # Materialize all children's vectors
+            for child in node.children:
+                child.contingency_vector = self.data_handler.create_contingency_vector(child.hierarchical_path)
+                self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
+                queue.append(child)
 
-        print(f'Running measurement phase...\n')
+            # If node is a leaf, construct and write its microdata
+            if node.is_leaf(): self.data_handler.write_microdata_for_leaf(node)
 
-        # Create chunks to distribute among workers.
-        # Since the data is independent, workers do not require synchronization.
-        num_chunks = self.workers
-        base_chunk_size = self.tree._node_count // num_chunks
-        remaining_nodes = self.tree._node_count % num_chunks
+            # Free memory: delete current node's vector
+            node.contingency_vector = None
 
-        chunks = []
-        start = 0
-
-        for i in range(num_chunks):
-            extra = 1 if i < remaining_nodes else 0
-            end = start + base_chunk_size + extra
-            chunks.append((start, end))
-            start = end
-
-        # Create a thread pool.
-        # Each worker receives a chunk.
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            futures = []
-            for chunk in chunks:
-                print(f"Processing nodes {chunk[0]} until {chunk[1]}...")
-                futures.append(executor.submit(self.add_noise_to_chunk, *chunk))
-
-            print("\n", end="")
-
-            # The vectors are modified in-place,
-            # so only execution time is returned for logging purposes.
-            for future in as_completed(futures):
-                start, end, finished_time = future.result()
-                print(f"Finshed chunk nodes {start} until {end} in {finished_time:.2f} seconds")
-            
-        print(f"\nMeasurement phase completed in {time.time() - t1:.2f} seconds.\n")
+        print(f'{time.time() - t1:.2f} seconds.\n')
 
     def root_estimation_phase(self, index: int = 0) -> None:
         '''Perform the estimation phase of the TopDown algorithm for root node.
@@ -209,13 +174,13 @@ class TopDown():
         n_cells = self.tree.n_cells
         x_tilde = optimizer.non_negative_real_estimation(
             noisy_measurements=self.tree._contingency_vectors[index, :n_queries],
-            node_id=root.id,
+            node_id=root,
             constraints=root.constraints,
             query_matrix=self.Q
         )
         self.tree._contingency_vectors[index, :n_cells] = optimizer.rounding_estimation(
             x_tilde=x_tilde,
-            node_id=root.id,
+            node_id=root,
             constraints=root.constraints
         )
         return None
@@ -228,10 +193,10 @@ class TopDown():
         '''
 
         root = self.tree.root
-        child_constraints = {child.id: child.constraints for child in root.children}
+        child_constraints = {child: child.constraints for child in root.children}
 
         root_arguments = (
-            root.id,
+            root,
             child_constraints,
         )
 
@@ -309,52 +274,13 @@ class TopDown():
                     if node.is_leaf(): continue
 
                     child_arguments = (
-                        node.id,
-                        {child.id: child.constraints for child in node.children},
+                        node,
+                        {child: child.constraints for child in node.children},
                     )
                     fut = executor.submit(solve, *child_arguments)
                     futures[fut] = child_arguments
 
         return None
-
-    def estimation_phase(self) -> None:
-        '''Perform the estimation phase of the TopDown algorithm.
-
-        This method solves optimization problems at each node in the hierarchical tree to ensure
-        consistency and adherence to constraints after noise has been added.
-
-        Reads node.contingency_vector as the noisy measurement y (shape (n_queries,)) for any
-        node whose parent has already been estimated, and overwrites it with x_hat
-        (shape (n_cells,)) once that node is itself estimated. Top-down level order
-        guarantees parents are converted to x_hat before their children are read.
-        '''
-        t1 = time.time()
-        print(f'Running estimation phase...\n')
-        self.root_estimation_phase()
-        self.subtree_estimation_phase()
-        print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
-
-        return None
-
-    def construct_microdata(self) -> pd.DataFrame:
-        '''Construct the differentially private microdata from the hierarchical tree.
-
-        This method generates the final microdata by traversing the hierarchical tree and
-        aggregating the data from each node.
-
-        Returns:
-            pd.DataFrame: The constructed differentially private microdata.
-        '''
-        print(f'Constructing microdata from hierarchical tree...', end=' ')
-        t1 = time.time()
-        noisy_df = self.data_handler.construct_microdata(self.tree)
-        print(f'{time.time() - t1:.2f} seconds.')
-
-        print(f'Writing noisy data to {self.data_handler.output_path}...', end=' ')
-        t1 = time.time()
-        self.data_handler.write_data(data=noisy_df, cols=self.hierarchical_columns+self.query_columns)
-        print(f'{time.time() - t1:.2f} seconds.\n')
-        return noisy_df
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
@@ -385,7 +311,6 @@ class TopDown():
             if level_iter not in self.constraints:
                 self.constraints[level_iter] = []
             self.constraints[level_iter].append(constraint)
-    
     
     # TODO: Implement method to set constraint to specific node
     # def set_constraint_to_node(self, node_id: int, constraint: Constraint) -> None:
@@ -427,11 +352,11 @@ class TopDown():
             pd.DataFrame: The constructed differentially private microdata.
         '''
         self.initialize()
-        #self.measurement_phase()
-        #self.estimation_phase()
-        #noisy_data = self.construct_microdata()
-        #return noisy_data
+        self.estimation_phase()
+        self.tree.print_all_nodes()
     
+        #self.estimation_phase()
+  
     def check_correctness(self) -> None:
         '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
         '''
@@ -452,15 +377,15 @@ class TopDown():
         '''
         if node.children:
             # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = sum(self.tree._contingency_vectors[node.id])
+            node_sum = sum(self.tree._contingency_vectors[node])
             children_sum = 0
             for child in node.children:
-                children_sum += np.sum(self.tree._contingency_vectors[child.id])
+                children_sum += np.sum(self.tree._contingency_vectors[child])
 
             if node_sum != children_sum:
                 print(node_sum, children_sum)
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
+                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node]}')
                 raise ValueError('Tree correctness check failed.')
             else:
                 for child in node.children:

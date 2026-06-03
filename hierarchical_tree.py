@@ -2,7 +2,7 @@ from collections import deque
 from hierarchical_node import HierarchicalNode
 
 class HierarchicalTree:
-    '''
+    r'''
     Represents a hierarchical tree structure. Each node is a HierarchicalNode.
 
     This class is responsible for tree structure management, traversal,
@@ -73,3 +73,14 @@ class HierarchicalTree:
                     queue.append(child)
 
         return nodes_by_level
+
+    def print_all_nodes(self) -> None:
+        '''Print all nodes in the hierarchical tree using BFS traversal.'''
+        print("\n--- Nodos del árbol ---\n")
+        queue = deque([self.root])
+        while queue:
+            node = queue.popleft()
+            print(node)
+            print()
+            for child in node.children:
+                queue.append(child)
