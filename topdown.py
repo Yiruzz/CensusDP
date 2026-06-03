@@ -7,11 +7,7 @@ from constraints.constraint import Constraint
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from parallel_utils import init_process, solve
-
 from collections import deque
-from multiprocessing import get_context
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from typing import Dict, List, Union
 import time
 
@@ -106,18 +102,19 @@ class TopDown():
         self.data_handler.generate_contingency_dataframe(self.query_columns)
         print(f'{time.time() - t1:.2f} seconds.')
 
-        # t1 = time.time()
-        # print(f'Computing query matrix Q...', end=' ')
-        # if isinstance(self.Q, QueryWorkload):
-        #     self.Q = self.Q.build(self.data_handler.contingency_df)
-        # elif not isinstance(self.Q, np.ndarray):
-        #     self.Q = np.eye(len(self.data_handler.contingency_df))
-        # assert np.all((self.Q == 0) | (self.Q == 1)), \
-        #     "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-        # self.query_sensitivity = int(self.Q.sum(axis=0).max())
-        # print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
-        # print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
-        # print(f'{time.time() - t1:.2f} seconds.')
+        print(f'Computing query matrix Q...', end=' ')
+        if isinstance(self.Q, QueryWorkload):
+            self.Q = self.Q.build(self.data_handler.contingency_df)
+        elif not isinstance(self.Q, np.ndarray):
+            # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
+            self.Q = np.eye(len(self.data_handler.contingency_df), dtype=np.int_)
+        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
+        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
+        #assert np.all((self.Q == 0) | (self.Q == 1)), \
+            "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+        self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
+        print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
 
         t1 = time.time()
         print(f'Building hierarchical tree structure...', end=' ')
@@ -129,55 +126,10 @@ class TopDown():
 
         print(self.tree, "\n")
 
-    def _estimate_node_individually(self, node) -> None:
-        '''Solve optimization for a node's own contingency vector.
-
-        Args:
-            node (HierarchicalNode): The node to process.
-        '''
-        x_tilde = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=node.contingency_vector,
-            node_id=node.geo_id,
-            constraints=node.constraints,
-            query_matrix=self.Q
-        )
-
-        node.contingency_vector = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            node_id=node.geo_id,
-            constraints=node.constraints
-        )
-
-    def _estimate_and_update_children(self, node) -> None:
-        '''Solve optimization for a node considering its children and update their vectors.
-
-        Args:
-            node (HierarchicalNode): The node to process.
-        '''
-        joint_contingency_vector = node.combine_child_vectors()
-        constraints = node.combine_child_constraints()
-
-        x_tilde = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=joint_contingency_vector,
-            node_id=node.geo_id,
-            constraints=constraints,
-            query_matrix=self.Q
-        )
-
-        joint_solution = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            node_id=node.geo_id,
-            constraints=constraints
-        )
-
-        node.update_child_vectors(joint_solution)
-
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
 
-        Traverses the tree using BFS. Materializes root and its children immediately,
-        then for each node in queue: materializes its children, constructs microdata for leaves,
-        and frees its own vector. Also prepares constraints for each node in a single data pass.
+        Uses breadth-first traversal with lazy materialization to minimize memory usage.
         '''
         print(f'Running estimation phase...')
         t1 = time.time()
@@ -188,8 +140,7 @@ class TopDown():
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         # First phase: resolve root's own contingency vector
-        print(f'  Estimating node {root.geo_id} individually...')
-        #self._estimate_node_individually(root)
+        self._estimate_node_individually(root)
 
         queue = deque()
         for child in root.children:
@@ -198,8 +149,8 @@ class TopDown():
             queue.append(child)
 
         # Second phase: resolve root considering its children and update their vectors
-        print(f'  Estimating node {root.geo_id} with children...')
-        #self._estimate_and_update_children(root)
+        self._estimate_and_update_children(root)
+        self._check_correctness_node(root)
 
         # Free root's memory immediately after materializing children
         root.contingency_vector = None
@@ -209,17 +160,19 @@ class TopDown():
         while queue:
             node = queue.popleft()
 
+            # If node is a leaf, construct and write its microdata
+            if node.is_leaf():
+                self.data_handler.write_microdata_for_leaf(node)
+                continue
+
             # Materialize all children's vectors
             for child in node.children:
                 child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level])
                 self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
                 queue.append(child)
 
-            print(f'  Estimating node {node.geo_id} with children...')
-            #self._estimate_and_update_children(node)
-
-            # If node is a leaf, construct and write its microdata
-            if node.is_leaf(): self.data_handler.write_microdata_for_leaf(node)
+            self._estimate_and_update_children(node)
+            self._check_correctness_node(node)
 
             # Free memory: delete current node's vector
             node.contingency_vector = None
@@ -249,24 +202,6 @@ class TopDown():
         '''
         for level_iter in range(level + 2):
             self.constraints[level_iter].append(constraint)
-    
-    # TODO: Implement method to set constraint to specific node
-    # def set_constraint_to_node(self, node_id: int, constraint: Constraint) -> None:
-    #     '''Set a constraint to a specific node in the hierarchical tree.
-        
-    #     It is the user's responsibility to ensure that the optimization problem remains feasible
-    #     after adding the constraint. If used improperly, it may lead to infeasible optimization problems.
-
-    #     For example, adding a constraint to all children of a node may contradict the consistency constraint
-    #     that the sum of the children's contingency vectors equals the parent's contingency vector.
-
-    #     Args:
-    #         node_id (int): The ID of the node to which the constraint should be added.
-    #         constraint (Constraint): The Constraint to add.
-    #     '''
-    #     node = self.tree.find_node_by_id(node_id)
-    #     if node is not None:
-    #         node.constraints.append(constraint)
 
     def set_query_workload(self, query_matrix: Union[QueryWorkload, np.ndarray]) -> None:
         '''Set the workload query matrix Q.
@@ -280,7 +215,81 @@ class TopDown():
         '''
         self.Q = query_matrix
 
-    def run(self) -> pd.DataFrame:
+    def _estimate_node_individually(self, node) -> None:
+        '''Solve optimization for a node's own contingency vector.
+
+        Args:
+            node (HierarchicalNode): The node to process.
+        '''
+        print(f'  Estimating node {node.geo_id} individually...', end=' ')
+
+        t1 = time.time()
+        x_tilde = self.optimizer.non_negative_real_estimation(
+            noisy_measurements=node.contingency_vector,
+            node_id=node.geo_id,
+            constraints=node.constraints,
+            query_matrix=self.Q
+        )
+        non_neg_time = time.time() - t1
+
+        t1 = time.time()
+        node.contingency_vector = self.optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.geo_id,
+            constraints=node.constraints
+        )
+        rounding_time = time.time() - t1
+
+        print(f'non negative {non_neg_time:.1f}s - rounding {rounding_time:.1f}s')
+
+    def _estimate_and_update_children(self, node) -> None:
+        '''Solve optimization for a node considering its children and update their vectors.
+
+        Args:
+            node (HierarchicalNode): The node to process.
+        '''
+        print(f'  Estimating node {node.geo_id} with children...', end=' ')
+
+        joint_contingency_vector = node.combine_child_vectors()
+        constraints = node.combine_child_constraints()
+
+        t1 = time.time()
+        x_tilde = self.optimizer.non_negative_real_estimation(
+            noisy_measurements=joint_contingency_vector,
+            node_id=node.geo_id,
+            constraints=constraints,
+            query_matrix=self.Q
+        )
+        non_neg_time = time.time() - t1
+
+        t1 = time.time()
+        joint_solution = self.optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.geo_id,
+            constraints=constraints
+        )
+        rounding_time = time.time() - t1
+
+        node.update_child_vectors(joint_solution)
+
+        print(f'non negative {non_neg_time:.1f}s - rounding {rounding_time:.1f}s')
+  
+    def _check_correctness_node(self, node) -> None:
+        '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.
+
+        Args:
+            node (HierarchicalNode): The node to check.
+        '''
+        node_sum = sum(node.contingency_vector)
+        children_sum = 0
+        for child in node.children:
+            children_sum += np.sum(child.contingency_vector)
+
+        if node_sum != children_sum:
+            print(node_sum, children_sum)
+            print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
+    
+    def run(self) -> None:
         '''Run the TopDown algorithm end-to-end.
 
         This method executes the full TopDown algorithm, including initialization,
@@ -291,37 +300,3 @@ class TopDown():
         '''
         self.initialize()
         self.estimation_phase()
-  
-    # def check_correctness(self) -> None:
-    #     '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
-    #     '''
-    #     root = self.tree.root
-    #     if root is not None:
-    #         print(f'Checking correctness of the tree...')
-    #         time1 = time.time()
-    #         self._check_correctness_node(root)
-    #         time2 = time.time()
-    #         print(f'Finished checking correctness in {time2-time1} seconds.\n')
-
-
-    # def _check_correctness_node(self, node) -> None:
-    #     '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.
-
-    #     Args:
-    #         node (HierarchicalNode): The node to check.
-    #     '''
-    #     if node.children:
-    #         # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-    #         node_sum = sum(self.tree._contingency_vectors[node])
-    #         children_sum = 0
-    #         for child in node.children:
-    #             children_sum += np.sum(self.tree._contingency_vectors[child])
-
-    #         if node_sum != children_sum:
-    #             print(node_sum, children_sum)
-    #             print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-    #             print(f'Parent node contingency vector: {self.tree._contingency_vectors[node]}')
-    #             raise ValueError('Tree correctness check failed.')
-    #         else:
-    #             for child in node.children:
-    #                 self._check_correctness_node(child)

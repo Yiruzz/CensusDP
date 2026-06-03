@@ -110,10 +110,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     )
 
     # Set the queries to be answered at each node of the tree.
-    topdown.set_query_workload(QueryWorkload()
-                               .add(col('P02') == 1)
-                               .add(col('P02') == 2)
-                               .add(col('P02') == 1 or col('P02') == 2))
+    topdown.set_query_workload(None)
 
     ####################
     # Edit Constraints #
