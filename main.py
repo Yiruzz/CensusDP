@@ -159,7 +159,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     # Since we don't know the specific number of households per COMUNA in advance, 
     # we use a contextual constraint that will get the real total from the data at runtime (dynamically).
     real_total_constraint = SumEqualRealTotal(expression=TrueExpression())
-    # 3 is the level of 'COMUNA' in the tree
     topdown.set_constraint_to_level(PROCESS_UNTIL_idx, real_total_constraint)
 
     # TODO: Maybe a refactor to the constraint building process to make it more user-friendly.

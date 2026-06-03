@@ -1,12 +1,12 @@
 import pandas as pd
 import numpy as np
-from collections import deque
 
-from multiprocessing import shared_memory
 from itertools import product
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple
 from pathlib import Path
 
+from constraints.constraint import Constraint
+from constraints.contextual_constraints import ContextualAggregateConstraint
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 
@@ -246,4 +246,46 @@ class DataHandler:
         # Construct microdata for this leaf
         leaf_microdata = self.construct_microdata_for_leaf(node)
         leaf_microdata.to_csv(self.output_path, mode='a', header=False, index=False)
+
+    def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint]) -> Tuple[np.ndarray, List]:
+        '''Materialize contingency vector and prepare constraints in a single pass.
+
+        Filters data once based on hierarchical path, then creates the contingency vector
+        and prepares all constraints for the node.
+
+        Args:
+            hierarchical_path (List[int]): The node's hierarchical path for filtering.
+            constraints (List[Constraint]): Constraints for the node considering its level.
+
+        Returns:
+            Tuple[np.ndarray, List[Constraint]]: Contingency vector and constraint callables for this node.
+        '''
+        if self.contingency_df is None:
+            raise ValueError("Contingency DataFrame not generated. Call generate_contingency_dataframe first.")
+
+        # Filter data once based on hierarchical path
+        filtered_df = self.dataframe
+        if len(hierarchical_path) > 1:
+            for level_idx, value in enumerate(hierarchical_path[1:]):
+                column = self.hierarchical_columns[level_idx]
+                filtered_df = filtered_df[filtered_df[column] == value]
+
+        # Create contingency vector from filtered data
+        queries = self.contingency_df.columns.tolist()
+        grouped = filtered_df.value_counts(subset=queries).reset_index(name='frequency')
+        merged = pd.merge(self.contingency_df, grouped, how='left', on=queries).fillna({'frequency': 0})
+        contingency_vector = merged['frequency'].to_numpy(dtype=int)
+
+        # Prepare constraints using the same filtered data
+        level_constraints = []
+        for constraint in constraints:
+            # Apply aggregation for constraints that compute dynamically
+            match constraint:
+                case ContextualAggregateConstraint():
+                    constraint.apply_aggregation_function(filtered_df)
+
+            # Convert to optimizer function
+            level_constraints.append(constraint.to_constraint(self.contingency_df))
+
+        return contingency_vector, level_constraints
 

@@ -32,7 +32,7 @@ class HierarchicalNode:
             level (int): Level where the node is located.
 
             contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
-            constraints (List[Callable]): List of constraints for this node.
+            constraints (Optional[List[Callable]]): List of constraints for this node.
         """
         self.geo_id: int = geo_id
 
@@ -43,7 +43,7 @@ class HierarchicalNode:
         self.level: int = level
 
         self.contingency_vector: Optional[np.ndarray] = None
-        self.constraints: List[Callable] = []
+        self.constraints: Optional[List[Callable]] = None
 
     def add_child(self, child_node: 'HierarchicalNode') -> None:
         '''Add a child node to this node.
@@ -76,7 +76,7 @@ class HierarchicalNode:
     def __str__(self) -> str:
         """Return a detailed string representation of the node with key attributes."""
         has_contingency = self.contingency_vector is not None and len(self.contingency_vector) > 0
-        has_constraints = len(self.constraints) > 0
+        has_constraints = self.constraints is not None and len(self.constraints) > 0
         path = " -> ".join(str(x) for x in self.hierarchical_path)
 
         result = "--- HierarchicalNode ---\n"

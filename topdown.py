@@ -12,7 +12,7 @@ from parallel_utils import init_process, solve
 from collections import deque
 from multiprocessing import get_context
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
-from typing import Callable, Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Union
 import time
 
 class TopDown():
@@ -72,7 +72,7 @@ class TopDown():
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
         self.query_sensitivity: int = 1  # L1 sensitivity of Q; computed in initialize() once Q is materialized
 
-        self.constraints: Dict[int, List[Constraint]] = {}
+        self.constraints: Dict[int, List[Constraint]] = {i: [] for i in range(len(hierarchy) + 1)}
 
         self.tree: HierarchicalTree = HierarchicalTree()
         self.optimizer = (optimizer, solver_options, optimizer_path)
@@ -125,24 +125,25 @@ class TopDown():
 
         Traverses the tree using BFS. Materializes root and its children immediately,
         then for each node in queue: materializes its children, constructs microdata for leaves,
-        and frees its own vector.
+        and frees its own vector. Also prepares constraints for each node in a single data pass.
         '''
         print(f'Materializing contingency vectors and constructing microdata...', end=' ')
         t1 = time.time()
 
         # Materialize root and its children immediately
         root = self.tree.root
-        root.contingency_vector = self.data_handler.create_contingency_vector(root.hierarchical_path)
+        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level])
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         queue = deque()
         for child in root.children:
-            child.contingency_vector = self.data_handler.create_contingency_vector(child.hierarchical_path)
+            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level])
             self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
             queue.append(child)
 
         # Free root's memory immediately after materializing children
         root.contingency_vector = None
+        root.constraints = None
 
         # Process remaining nodes
         while queue:
@@ -150,7 +151,7 @@ class TopDown():
 
             # Materialize all children's vectors
             for child in node.children:
-                child.contingency_vector = self.data_handler.create_contingency_vector(child.hierarchical_path)
+                child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level])
                 self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
                 queue.append(child)
 
@@ -159,6 +160,7 @@ class TopDown():
 
             # Free memory: delete current node's vector
             node.contingency_vector = None
+            node.constraints = None
 
         print(f'{time.time() - t1:.2f} seconds.\n')
 
@@ -284,32 +286,25 @@ class TopDown():
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
-        
+
         The constraint will be applied when the tree is built.
 
         Args:
             constraint (Constraint): The Constraint to add.
         '''
-        if not self.hierarchical_columns: 
-            raise ValueError("Hierarchical columns must be set before adding constraints to the tree.")
-    
-        for level in range(len(self.hierarchical_columns)):
-            if level not in self.constraints:
-                self.constraints[level] = []
-            self.constraints[level].append(constraint)
+
+        self.set_constraint_to_level(len(self.hierarchical_columns) - 1, constraint)
 
     def set_constraint_to_level(self, level: int, constraint: Constraint) -> None:
         '''Add a constraint to a specific level in the hierarchical tree.
-        
+
         The constraint will be applied when the tree is built.
 
         Args:
-            level (int): The level in the tree to which the constraint should be added.
+            level (int): The index in hierarchical_columns (0-based). Constraint applies to all levels from root up to and including this level.
             constraint (Constraint): The Constraint to add.
         '''
-        for level_iter in range(level+1):
-            if level_iter not in self.constraints:
-                self.constraints[level_iter] = []
+        for level_iter in range(level + 2):
             self.constraints[level_iter].append(constraint)
     
     # TODO: Implement method to set constraint to specific node
