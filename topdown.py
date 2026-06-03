@@ -160,10 +160,10 @@ class TopDown():
         while queue:
             node = queue.popleft()
 
-            # If node is a leaf, construct and write its microdata
+            # If node is a leaf, go to construct and write microdata
             if node.is_leaf():
-                self.data_handler.write_microdata_for_leaf(node)
-                continue
+                queue.append(node)
+                break
 
             # Materialize all children's vectors
             for child in node.children:
@@ -175,6 +175,12 @@ class TopDown():
             self._check_correctness_node(node)
 
             # Free memory: delete current node's vector
+            node.contingency_vector = None
+            node.constraints = None
+        
+        while queue:
+            node = queue.popleft()
+            self.data_handler.write_microdata_for_leaf(node)
             node.contingency_vector = None
             node.constraints = None
 
