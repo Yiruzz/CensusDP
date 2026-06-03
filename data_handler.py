@@ -7,8 +7,6 @@ from itertools import product
 from typing import List, Optional, Tuple
 from pathlib import Path
 
-from constraints.constraint import Constraint
-from constraints.contextual_constraints import ContextualAggregateConstraint
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 
@@ -141,191 +139,59 @@ class DataHandler:
         contingency_vector = merged['frequency'].to_numpy(dtype=int)
         
         return contingency_vector
-    
-    def convert_tree_representation(self, root: HierarchicalNode, n_nodes: int,
-                                    n_queries: int, vector_length: int) -> Tuple[List[HierarchicalNode], List[int], np.ndarray, memoryview]:
-        '''Retrieve the references of all nodes of the tree to facilitate access.
-        Also create a shared memory space with all contingency vectors copied,
-        enabling multiprocessing without duplicating data.
 
-        Each row is sized to vector_length = max(n_queries, n_cells) so the same slot holds
-        both the noisy measurement y (length n_queries, written here) and later the estimated
-        cell counts x_hat (length n_cells, written by the estimation phase). The unused
-        trailing slots are zero-initialized and ignored until estimation overwrites them.
+    def build_hierarchical_tree(self) -> HierarchicalTree:
+        '''Build a hierarchical tree structure based on hierarchical columns.
 
-        Args:
-            root (HierarchicalNode): A hierarchical tree.
-            n_nodes (int): Number of nodes, corresponding to the number of rows in the shared memory space.
-            n_queries (int): Length of the measurement vector y currently held by each node.
-            vector_length (int): Physical row length = max(n_queries, n_cells).
-
-        Return:
-            tuple[list[HierarchicalNode], List[int], np.ndarray, memoryview]: A tuple containing all node references, the node index where each level starts,
-                                                                              the view over the shared memory buffer, and the memoryview used to access the shared memory.
-        '''
-        shape = (n_nodes, vector_length)
-        size = int(np.prod(shape) * np.dtype(self.dtype).itemsize)
-
-        # Create share memory space
-        shm = shared_memory.SharedMemory(create=True, size=size)
-
-        # View over the shared buffer. shared_memory contents are uninitialized, so zero the
-        # whole array — the trailing slots beyond n_queries must start at 0, since the
-        # measurement phase only writes the first n_queries entries.
-        arr = np.ndarray(shape, dtype=self.dtype, buffer=shm.buf)
-        arr.fill(0)
-
-        # Retrieve node references
-        nodes = []
-        queue = deque([root])
-
-        next_id = 0
-
-        # Retrive starts levels starting COUNTRY (ROOT)
-        levels = [0] * (1+len(self.hierarchical_columns))
-        idx = 0
-
-        while queue:
-            node = queue.popleft()
-
-            # Assign node IDs using BFS order
-            node.id = next_id
-
-            # Copy the node's noisy-measurement-sized vector into the first n_queries slots.
-            arr[node.id, :n_queries] = node.contingency_vector[:]
-            del node.contingency_vector
-            nodes.append(node)
-
-            if node.level == idx and levels[idx] == 0:
-                levels[idx] = node.id
-                idx += 1
-
-            for child in node.children:
-                child.parent_id = node.id
-                queue.append(child)
-
-            next_id += 1
-        return nodes, levels, arr, shm
-
-    def build_hierarchical_tree(self, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> HierarchicalTree:
-        '''Build a hierarchical tree based on the hierarchical columns.
-        It creates a contingency vector for each node in the tree.
-
-        Each node stores y = Q @ x (shape (n_queries,)) — the noiseless query answers.
-        The measurement phase adds noise in place; the estimation phase later overwrites
-        this slot with the estimated cell-counts x_hat (shape (n_cells,)). Keeping a
-        single slot avoids retaining both x and y simultaneously.
-
-        Args:
-            constraints (Dict[int, List[Callable]]): Dictionary mapping tree levels to their constraints.
-            query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells), applied to each
-                node's raw cell counts so the slot holds Q @ x instead of x.
+        This creates only the tree structure using hierarchical_path for each node.
+        Contingency vectors, constraints, and query matrix information are NOT handled here.
 
         Returns:
-            HierarchicalTree: The constructed hierarchical tree.
+            HierarchicalTree: The constructed hierarchical tree with hierarchical_path information.
         '''
+        assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
+        assert self.hierarchical_columns, "Hierarchical columns not set."
 
         tree = HierarchicalTree()
-        root = tree.nodes[0]
-        curr_level = 0
+        root = tree.root
 
-        # Generate the contingency table if not already done
-        if self.contingency_df is None:
-            self.generate_contingency_dataframe(self.query_columns)
-
-        assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
-        # Query answers for the root node (entire dataset). Raw x is discarded after the multiply.
-        root.contingency_vector = query_matrix @ self.create_contingency_vector(self.dataframe)
-
-        # List of constraints for the root node
-        root_contstraints = []
-        if constraints and curr_level in constraints:
-            # Iterate over the constraints for the root node
-            for constraint in constraints[curr_level]:
-                # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
-                match constraint:
-                    case ContextualAggregateConstraint():
-                        constraint.apply_aggregation_function(self.dataframe)
-                # Append the constraint function to the root constraints list
-                assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-                root_contstraints.append(constraint.to_constraint(self.contingency_df))
-
-        root.constraints = root_contstraints
-
-        # Construct the tree recursively and count the nodes created
-        # Then change the representation to array and create a share memory space
-        tree._node_count = self._build_subtree(root, 0, self.dataframe, constraints, query_matrix)
-
-        # Single-buffer sizing: rows of max(n_queries, n_cells) hold both y (n_queries) before
-        # estimation and x_hat (n_cells) after, so the same allocation serves both phases.
-        n_queries, n_cells = query_matrix.shape
-        tree.n_queries = n_queries
-        tree.n_cells = n_cells
-        tree.vector_length = max(n_queries, n_cells)
-
-        tree.nodes, tree._levels, tree._contingency_vectors, tree._contingency_vectors_shm = self.convert_tree_representation(
-            root, tree._node_count, n_queries, tree.vector_length
-        )
+        # Build tree structure recursively, starting with the full dataframe
+        tree._node_count = self._build_subtree(root, 0, self.dataframe)
+        tree._levels = 1+len(self.hierarchical_columns)
+        
         return tree
 
-    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame, constraints: dict[int, List[Constraint]], query_matrix: np.ndarray) -> int:
+    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame) -> int:
         '''Helper method to recursively build the subtree for a given parent node.
+
+        Creates only the tree structure. Receives the pre-filtered dataframe for this node's subset.
 
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
-            level_iterator (int): An iterator for the current level in the hierarchy. It has an offset of 1.
-            data (pd.DataFrame): The subset of data corresponding to the parent node.
-            constraints (List[Callable]): List of constraints to apply to each node.
-            query_matrix (np.ndarray): Query matrix Q applied to each child's raw cell counts.
+            level_iterator (int): An iterator for the current level in the hierarchy.
+            data (pd.DataFrame): The dataframe filtered to contain only rows for this node's subset.
 
         Returns:
             int: The number of nodes in the subtree.
         '''
         n_nodes = 1
 
-        # When there are no more levels to process, return the parent node
         if level_iterator >= len(self.hierarchical_columns):
             return n_nodes
-        
-        # Get the current hierarchical column to split on
+
         current_column = self.hierarchical_columns[level_iterator]
         unique_hierarchical_values = data[current_column].unique()
 
         for value in unique_hierarchical_values:
-            # Filter data for the current hierarchical value
-            filtered_data = data[data[current_column] == value]
-
-            # Prepare constraints for the current level
-            level_constraints = []
-            if constraints and level_iterator in constraints:
-                # Iterate over the constraints for the current level
-                for constraint in constraints[level_iterator]:
-                    # Case when the constraint is a ContextualAggregateConstraint and needs to compute its value
-                    match constraint:
-                        case ContextualAggregateConstraint():
-                            constraint.apply_aggregation_function(filtered_data)
-                    # Append the constraint function to the level constraints list
-                    assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
-                    level_constraints.append(constraint.to_constraint(self.contingency_df))
-
-            # Create a new child node
-            child_node = HierarchicalNode(geo_id=value, level=level_iterator+1, constraints=level_constraints)
+            child_node = HierarchicalNode(geo_id=value, level=level_iterator+1)
             parent_node.add_child(child_node)
 
-            # Store query answers Q @ x; raw cell counts x are not retained.
-            child_node.contingency_vector = query_matrix @ self.create_contingency_vector(filtered_data)
-
-            # Recursively build the subtree for the child node
-            n_nodes += self._build_subtree(child_node, level_iterator + 1, filtered_data, constraints, query_matrix)
+            # Filter data for this child and pass to recursion
+            child_data = data[data[current_column] == value]
+            n_nodes += self._build_subtree(child_node, level_iterator + 1, child_data)
 
         return n_nodes
-    
-    # NOTE: This method will not work if the query matrix contains any workload that is not a simple count of the contingency cells.
-    # TODO: Make a more complete version of construction of output data, it does not need to be microdata.
-    #       For example it can be just aggregate data, where each count have the information of the query that produces it:
-    #       (df['Sex'] == 'Male') & (df['Age'] == 30) -> 10
-    #       (df['Sex'] == 'Female') & (df['Age'] == 30) -> 15
-    #       ... and so on on the other queries.
+
     def construct_microdata(self, tree: HierarchicalTree) -> pd.DataFrame:
         '''Construct microdata from the hierarchical tree.
         

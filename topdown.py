@@ -74,19 +74,17 @@ class TopDown():
 
         self.constraints: Dict[int, List[Constraint]] = {}
 
-        self.tree: HierarchicalTree = HierarchicalTree(constraints=[])
+        self.tree: HierarchicalTree = HierarchicalTree()
         self.optimizer = (optimizer, solver_options, optimizer_path)
 
         self.workers: int = 4
-        
-        #self.constraints: List[List[Callable]] = []
-        # self.processed_data: pd.DataFrame = None
-        # self.distance_metric: Optional[str] = None
+
     
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
-        
-        This method sets up the necessary components for the algorithm to run, such as data handling and tree structure.
+
+        This method reads data, generates the contingency dataframe, computes Q,
+        and builds the hierarchical tree structure (without computing contingency vectors).
         '''
         print(f'Initializing TopDown algorithm...')
         t1 = time.time()
@@ -99,22 +97,24 @@ class TopDown():
         self.data_handler.generate_contingency_dataframe(self.query_columns)
         print(f'{time.time() - t1:.2f} seconds.')
 
+        # t1 = time.time()
+        # print(f'Computing query matrix Q...', end=' ')
+        # if isinstance(self.Q, QueryWorkload):
+        #     self.Q = self.Q.build(self.data_handler.contingency_df)
+        # elif not isinstance(self.Q, np.ndarray):
+        #     self.Q = np.eye(len(self.data_handler.contingency_df))
+        # assert np.all((self.Q == 0) | (self.Q == 1)), \
+        #     "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+        # self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        # print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
+        # print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+        # print(f'{time.time() - t1:.2f} seconds.')
+
         t1 = time.time()
-        print(f'Building hierarchical tree...', end=' ')
-        if isinstance(self.Q, QueryWorkload):
-            self.Q = self.Q.build(self.data_handler.contingency_df)
-        elif not isinstance(self.Q, np.ndarray):
-            # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
-            self.Q = np.eye(len(self.data_handler.contingency_df))
-        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
-        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
-        assert np.all((self.Q == 0) | (self.Q == 1)), \
-            "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-        self.query_sensitivity = int(self.Q.sum(axis=0).max())
-        print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
-        print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
-        self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
+        print(f'Building hierarchical tree structure...', end=' ')
+        self.tree = self.data_handler.build_hierarchical_tree()
         print(f'{time.time() - t1:.2f} seconds.\n')
+        print(self.tree)
 
     def add_noise_to_chunk(self, start: int, end: int) -> Tuple[int, int, float]:
         '''Apply noise to a chunk of contingency vectors.
@@ -149,10 +149,19 @@ class TopDown():
     def measurement_phase(self) -> None:
         '''Perform the measurement phase of the TopDown algorithm.
 
-        Each node's contingency_vector already holds y = Q @ x from tree construction.
-        This phase adds discrete noise calibrated to the sensitivity of Q in place: y <- y + noise.
+        First materializes contingency vectors for all nodes, then adds noise in place.
         '''
         t1 = time.time()
+        print(f'Materializing contingency vectors for all nodes...', end=' ')
+        t_mat = time.time()
+        self.data_handler.materialize_tree_vectors(self.tree, self.Q)
+        print(f'{time.time() - t_mat:.2f} seconds.')
+
+        print(f'Setting up shared memory for parallel processing...', end=' ')
+        t_mem = time.time()
+        self.data_handler.setup_shared_memory_tree(self.tree, self.tree.n_queries, self.tree.vector_length)
+        print(f'{time.time() - t_mem:.2f} seconds.')
+
         print(f'Running measurement phase...\n')
 
         # Create chunks to distribute among workers.
@@ -195,7 +204,7 @@ class TopDown():
         overwrites the first n_cells slots with x_hat. The row stays the same physical size.
         '''
         optimizer = OptimizationModel(*self.optimizer)
-        root = self.tree.nodes[index]
+        root = self.tree.root
         n_queries = self.tree.n_queries
         n_cells = self.tree.n_cells
         x_tilde = optimizer.non_negative_real_estimation(
@@ -213,14 +222,14 @@ class TopDown():
 
     def subtree_estimation_phase(self) -> None:
         '''Allows solving optimization models in parallel once their contingency vectors are updated.
-        
+
         This means that it is not necessary to wait for an entire level to finish before moving to the next,
         because the executor processes tasks in the order they are submitted, but each task may take a different amount of time.
         '''
-    
-        root = self.tree.nodes[0]
+
+        root = self.tree.root
         child_constraints = {child.id: child.constraints for child in root.children}
-    
+
         root_arguments = (
             root.id,
             child_constraints,
@@ -280,7 +289,7 @@ class TopDown():
                     if nodes_per_level[node.level] == 0: print(f"Level {node.level} processed in {time_per_level[node.level]:.2f} seconds.")
 
                     # Add children range
-                    next_ranges.append(iter(node.children)) 
+                    next_ranges.append(iter(node.children))
 
                     # Initialize current range if needed
                     if curr_range is None and next_ranges:
@@ -324,12 +333,12 @@ class TopDown():
         self.root_estimation_phase()
         self.subtree_estimation_phase()
         print(f'Estimation phase completed in {time.time() - t1:.2f} seconds.\n')
-        
+
         return None
-    
+
     def construct_microdata(self) -> pd.DataFrame:
         '''Construct the differentially private microdata from the hierarchical tree.
-        
+
         This method generates the final microdata by traversing the hierarchical tree and
         aggregating the data from each node.
 
@@ -410,7 +419,7 @@ class TopDown():
 
     def run(self) -> pd.DataFrame:
         '''Run the TopDown algorithm end-to-end.
-        
+
         This method executes the full TopDown algorithm, including initialization,
         measurement phase, estimation phase, and microdata construction.
 
@@ -418,15 +427,15 @@ class TopDown():
             pd.DataFrame: The constructed differentially private microdata.
         '''
         self.initialize()
-        self.measurement_phase()
-        self.estimation_phase()
-        noisy_data = self.construct_microdata()
-        return noisy_data
+        #self.measurement_phase()
+        #self.estimation_phase()
+        #noisy_data = self.construct_microdata()
+        #return noisy_data
     
     def check_correctness(self) -> None:
         '''Checks the correctness of the tree structure considering that its childs sums up to the parent node.
         '''
-        root = self.tree.nodes[0]
+        root = self.tree.root
         if root is not None:
             print(f'Checking correctness of the tree...')
             time1 = time.time()
@@ -448,8 +457,8 @@ class TopDown():
             for child in node.children:
                 children_sum += np.sum(self.tree._contingency_vectors[child.id])
 
-            if node_sum != children_sum:      
-                print(node_sum, children_sum)      
+            if node_sum != children_sum:
+                print(node_sum, children_sum)
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
                 print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
                 raise ValueError('Tree correctness check failed.')

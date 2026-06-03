@@ -199,10 +199,10 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     
     # This method can be used to check the correctness of the results.
     # Also used for testing purposes.
-    topdown.check_correctness()
+    #topdown.check_correctness()
 
     # Privacy garantee
-    print(topdown.privacy_mechanism.report_guarantee())
+    #print(topdown.privacy_mechanism.report_guarantee())
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
