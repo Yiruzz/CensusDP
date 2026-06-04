@@ -1,5 +1,6 @@
 import numpy as np
-import pandas as pd
+import scipy.sparse as sp
+from itertools import product
 from typing import List, Optional, Tuple
 
 from .expression import Expr, col
@@ -12,11 +13,12 @@ class WorkloadMatrix:
     where each entry Q[i, j] indicates how much cell j contributes to query i.
     For counting queries (the default), entries are 0 or 1.
 
-    Queries are defined lazily and materialised into a numpy matrix by calling
-    `.build(contingency_df)` once the contingency domain is known.
+    Queries are defined lazily and materialised into a scipy CSR matrix by calling
+    `.build(domain)` once the contingency domain is known.
 
     Usage:
-        from workload import WorkloadMatrix, col
+        from queries.workload_matrix import WorkloadMatrix
+        from queries import col
 
         wm = WorkloadMatrix()
         wm.add(col('Sex') == 'M', name='count_male')
@@ -24,7 +26,7 @@ class WorkloadMatrix:
         wm.add_marginal(['Sex'])          # one query per unique Sex value
         wm.add_marginal(['Sex', 'Age'])   # one query per (Sex, Age) combination
 
-        Q = wm.build(contingency_df)      # shape: (n_queries, n_cells)
+        Q = wm.build(domain)              # scipy CSR, shape (n_queries, n_cells)
     """
 
     def __init__(self) -> None:
@@ -71,46 +73,52 @@ class WorkloadMatrix:
     # Matrix construction
     # ------------------------------------------------------------------
 
-    def build(self, contingency_df: pd.DataFrame) -> np.ndarray:
-        """Materialise Q as a (n_queries x n_cells) float numpy matrix.
+    def build(self, domain) -> sp.csr_matrix:
+        """Materialise Q as a sparse (n_queries x n_cells) CSR matrix with 0/1 entries.
 
         Args:
-            contingency_df: The global contingency domain DataFrame produced
-                            by DataHandler.generate_contingency_dataframe().
+            domain: ContingencyDomain produced by
+                    DataHandler.build_contingency_domain().
 
         Returns:
-            np.ndarray of shape (n_queries, n_cells) with 0/1 entries.
+            scipy.sparse.csr_matrix of shape (n_queries, n_cells).
 
         Raises:
             ValueError: If no queries have been defined.
         """
-        rows: List[np.ndarray] = []
+        all_rows: List[np.ndarray] = []
+        all_cols: List[np.ndarray] = []
+        base = 0
 
-        # Explicit single-predicate queries
+        # Explicit single-predicate queries — one row each.
         for expr, _ in self._explicit:
-            mask = expr.evaluate(contingency_df)
-            rows.append(mask.astype(float).values)
+            cols = domain.select(expr.evaluate(domain)).astype(np.int64)
+            all_rows.append(np.full(len(cols), base, dtype=np.int64))
+            all_cols.append(cols)
+            base += 1
 
-        # Lazy marginal queries - resolve unique combinations now
+        # Marginal queries — every cell maps to exactly one combination, so the
+        # block is the cell→group assignment computed from the mixed-radix structure.
         for columns in self._marginals:
-            unique_combos = contingency_df[columns].drop_duplicates().reset_index(drop=True)
-            for _, combo_row in unique_combos.iterrows():
-                # Build compound equality expression for this combination
-                expr: Optional[Expr] = None
-                for c in columns:
-                    eq = col(c) == combo_row[c]
-                    expr = eq if expr is None else expr & eq
-                assert expr is not None
-                mask = expr.evaluate(contingency_df)
-                rows.append(mask.astype(float).values)
+            gid = np.zeros(domain.n_cells, dtype=np.int64)
+            weight = 1
+            for c in reversed(columns):
+                gid += domain.axis_ranks(c) * weight
+                weight *= len(domain.domains[c])
+            all_rows.append(gid + base)
+            all_cols.append(np.arange(domain.n_cells, dtype=np.int64))
+            base += int(weight)
 
-        if not rows:
+        if base == 0:
             raise ValueError(
                 "WorkloadMatrix has no queries. "
                 "Use .add() or .add_marginal() before calling .build()."
             )
 
-        return np.vstack(rows)
+        rows = np.concatenate(all_rows)
+        cols = np.concatenate(all_cols)
+        data = np.ones(len(rows), dtype=np.float64)
+        return sp.coo_matrix((data, (rows, cols)), shape=(base, domain.n_cells)).tocsr()
 
     # ------------------------------------------------------------------
     # Introspection helpers
