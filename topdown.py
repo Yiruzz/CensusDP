@@ -7,6 +7,7 @@ from constraints.constraint import Constraint
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
+from scipy.sparse import issparse, csr_matrix, eye as sparse_eye
 from collections import deque
 from typing import Dict, List, Union
 import time
@@ -105,11 +106,10 @@ class TopDown():
         print(f'Computing query matrix Q...', end=' ')
         if isinstance(self.Q, QueryWorkload):
             self.Q = self.Q.build(self.data_handler.contingency_df)
+            self.Q = csr_matrix(self.Q)
         elif not isinstance(self.Q, np.ndarray):
             # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
-            self.Q = np.eye(len(self.data_handler.contingency_df), dtype=np.int_)
-        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
-        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
+            self.Q = sparse_eye(len(self.data_handler.contingency_df), dtype=np.uint8, format='csr')
         #assert np.all((self.Q == 0) | (self.Q == 1)), \
             "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
         self.query_sensitivity = int(self.Q.sum(axis=0).max())

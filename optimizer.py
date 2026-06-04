@@ -84,7 +84,9 @@ class OptimizationModel:
 
         # Indices where the matrix Q has nonzeros (in this case just a 1).
         # Needed to detect what are we actually querying for in each row.
-        nz_per_row = [np.flatnonzero(query_matrix[r] != 0) for r in range(n_queries)]
+        # For sparse CSR: extract nonzero indices directly from internal structure (no densification)
+        nz_per_row = [query_matrix.indices[query_matrix.indptr[r]:query_matrix.indptr[r+1]]
+                      for r in range(n_queries)]
 
         # Auxiliary variables q_x[k, r] = Q[r, :] @ x_k, lifted via linear equalities so the
         # objective stays as a sum of one-term squares. Without this, squaring a Pyomo
