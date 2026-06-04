@@ -1,3 +1,6 @@
+import os
+import tempfile
+import shutil
 import pandas as pd
 import numpy as np
 
@@ -56,6 +59,9 @@ class DataHandler:
 
         # Query columns (not considered for the hierarchy).
         self.query_columns: List[str] = []
+
+        # Define path to dir to save vectors
+        self.spill_dir: str = os.path.join(tempfile.gettempdir(), f'topdown_spill_{os.getpid()}')
 
     def initialize_output_file(self) -> None:
         '''Initialize the output CSV file with column headers.'''
@@ -194,7 +200,48 @@ class DataHandler:
 
         return n_nodes
 
-    def construct_microdata_for_leaf(self, node) -> pd.DataFrame:
+    def _spill_path(self, node: HierarchicalNode) -> str:
+        '''Get the spill file path for a node based on its hierarchical_path.
+
+        Args:
+            node (HierarchicalNode): The node whose spill path is being determined.
+
+        Returns:
+            str: File path for the spilled vector named by the node's hierarchical_path.
+        '''
+        name = '_'.join(str(p) for p in node.hierarchical_path)
+        for ch in ('/', '\\', ' ', ':'):
+            name = name.replace(ch, '_')
+        return os.path.join(self.spill_dir, name + '.npy')
+
+    def spill_vector(self, node: HierarchicalNode) -> None:
+        '''Write node.contingency_vector to disk and free it from RAM.
+
+        One file per node, named by its hierarchical_path, ensuring sibling nodes don't conflict.
+
+        Args:
+            node (HierarchicalNode): The node whose contingency vector should be spilled.
+        '''
+        os.makedirs(self.spill_dir, exist_ok=True)
+        np.save(self._spill_path(node), np.ascontiguousarray(node.contingency_vector))
+        node.contingency_vector = None
+        node.constraints = None
+
+    def load_vector(self, node: HierarchicalNode) -> None:
+        '''Reload node.contingency_vector from disk and delete the file (used once).
+
+        Args:
+            node (HierarchicalNode): The node whose contingency vector should be reloaded.
+        '''
+        node.contingency_vector = np.load(self._spill_path(node))
+        os.remove(self._spill_path(node))
+
+    def cleanup_spill(self) -> None:
+        '''Delete the spill directory and all remaining spilled vectors.'''
+        if os.path.isdir(self.spill_dir):
+            shutil.rmtree(self.spill_dir, ignore_errors=True)
+
+    def _construct_microdata_for_leaf(self, node) -> pd.DataFrame:
         '''Construct microdata for a specific leaf node.
 
         Args:
@@ -237,15 +284,17 @@ class DataHandler:
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
 
-    def write_microdata_for_leaf(self, node) -> None:
+    def write_microdata_for_leaf(self, node: HierarchicalNode) -> None:
         '''Construct microdata for a leaf node and append to output file.
 
         Args:
             node (HierarchicalNode): The leaf node with materialized contingency vector.
         '''
         # Construct microdata for this leaf
-        leaf_microdata = self.construct_microdata_for_leaf(node)
+        leaf_microdata = self._construct_microdata_for_leaf(node)
         leaf_microdata.to_csv(self.output_path, mode='a', header=False, index=False)
+        node.contingency_vector = None
+        node.constraints = None
 
     def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint], query_matrix: np.ndarray) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.

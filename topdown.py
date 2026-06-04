@@ -145,49 +145,34 @@ class TopDown():
 
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
+        self.data_handler.spill_vector(root) 
 
-        queue = deque()
-        for child in root.children:
-            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
-            self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
-            queue.append(child)
-
-        # Second phase: resolve root considering its children and update their vectors
-        self._estimate_and_update_children(root)
-        self._check_correctness_node(root)
-
-        # Free root's memory immediately after materializing children
-        root.contingency_vector = None
-        root.constraints = None
-
+        queue = deque([root])
+        
         # Process remaining nodes
         while queue:
             node = queue.popleft()
-
-            # If node is a leaf, go to construct and write microdata
-            if node.is_leaf():
-                queue.append(node)
-                break
+            self.data_handler.load_vector(node)
 
             # Materialize all children's vectors
             for child in node.children:
                 child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
                 self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
-                queue.append(child)
 
             self._estimate_and_update_children(node)
             self._check_correctness_node(node)
-
-            # Free memory: delete current node's vector
             node.contingency_vector = None
             node.constraints = None
         
-        while queue:
-            node = queue.popleft()
-            self.data_handler.write_microdata_for_leaf(node)
-            node.contingency_vector = None
-            node.constraints = None
+            if node.children[0].is_leaf():
+                for child in node.children:
+                    self.data_handler.write_microdata_for_leaf(child)
+            else:
+                for child in node.children:
+                    self.data_handler.spill_vector(child)
+                    queue.append(child)
 
+        self.data_handler.cleanup_spill()
         print(f'{time.time() - t1:.2f} seconds.\n')
     
     def estimation_phase_dfs(self) -> None:
@@ -355,8 +340,10 @@ class TopDown():
         estimation phase, and microdata construction.
         '''
         self.initialize()
-
-        if self.traversal_method == 'bfs':
-            self.estimation_phase_bfs()
-        else:
-            self.estimation_phase_dfs()
+        try:
+            if self.traversal_method == 'bfs':
+                self.estimation_phase_bfs()
+            else:
+                self.estimation_phase_dfs()
+        finally:
+            self.data_handler.cleanup_spill()
