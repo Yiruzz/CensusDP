@@ -23,7 +23,8 @@ class TopDown():
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism,
                  out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
-                 solver_options: dict = None, optimizer_path: str = None) -> None:
+                 solver_options: dict = None, optimizer_path: str = None,
+                 traversal_method: str = 'bfs') -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -37,6 +38,7 @@ class TopDown():
             solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
+            traversal_method (str): Tree traversal method for estimation phase: 'bfs' or 'dfs'. Defaults to 'bfs'.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -50,6 +52,8 @@ class TopDown():
             optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
 
             constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints
+
+            traversal_method (str): The traversal method to use in estimation phase ('bfs' or 'dfs').
         '''
         n_levels = len(hierarchy) + 1
         if len(privacy_mechanism.level_params) != n_levels:
@@ -84,8 +88,8 @@ class TopDown():
             optimizer_path=optimizer_path
         )
 
-        self.workers: int = 4
-
+        self.traversal_method: str = traversal_method
+        
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
 
@@ -126,12 +130,12 @@ class TopDown():
 
         print(self.tree, "\n")
 
-    def estimation_phase(self) -> None:
+    def estimation_phase_bfs(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
 
         Uses breadth-first traversal with lazy materialization to minimize memory usage.
         '''
-        print(f'Running estimation phase...')
+        print(f'Running estimation phase (BFS)...')
         t1 = time.time()
 
         # Materialize root and its children immediately
@@ -185,6 +189,55 @@ class TopDown():
             node.constraints = None
 
         print(f'{time.time() - t1:.2f} seconds.\n')
+    
+    def estimation_phase_dfs(self) -> None:
+        '''Perform the estimation phase using depth-first traversal.
+
+        Uses DFS with lazy materialization to minimize memory usage.
+        Processes leaf nodes as they are encountered during traversal.
+        '''
+        print(f'Running estimation phase (DFS)...')
+        t1 = time.time()
+
+        root = self.tree.root
+        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level], self.Q)
+        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
+
+        # First phase: resolve root's own contingency vector
+        self._estimate_node_individually(root)
+
+        # DFS traversal: process subtrees recursively
+        self._dfs_process_children(root)
+
+        # Free root's memory
+        root.contingency_vector = None
+        root.constraints = None
+
+        print(f'{time.time() - t1:.2f} seconds.\n')
+
+    def _dfs_process_children(self, node) -> None:
+        '''Recursively process children using DFS.
+
+        Args:
+            node (HierarchicalNode): The current node being processed.
+        '''
+        if node.is_leaf():
+            self.data_handler.write_microdata_for_leaf(node)
+            node.contingency_vector = None
+            node.constraints = None
+            return
+        
+        for child in node.children:
+            # Materialize root's children before _estimate_and_update_children
+            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
+            self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
+
+        # Second phase: resolve root considering its children and update their vectors
+        self._estimate_and_update_children(node)
+        self._check_correctness_node(node)
+
+        for child in node.children:
+            self._dfs_process_children(child)
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
@@ -294,15 +347,16 @@ class TopDown():
         if node_sum != children_sum:
             print(node_sum, children_sum)
             print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-    
+
     def run(self) -> None:
         '''Run the TopDown algorithm end-to-end.
 
         This method executes the full TopDown algorithm, including initialization,
-        measurement phase, estimation phase, and microdata construction.
-
-        Returns:
-            pd.DataFrame: The constructed differentially private microdata.
+        estimation phase, and microdata construction.
         '''
         self.initialize()
-        self.estimation_phase()
+
+        if self.traversal_method == 'bfs':
+            self.estimation_phase_bfs()
+        else:
+            self.estimation_phase_dfs()
