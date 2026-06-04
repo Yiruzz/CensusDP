@@ -187,17 +187,10 @@ class TopDown():
         root = self.tree.root
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level], self.Q)
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
-
-        # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
 
-        # DFS traversal: process subtrees recursively
         self._dfs_process_children(root)
-
-        # Free root's memory
-        root.contingency_vector = None
-        root.constraints = None
-
+        self.data_handler.cleanup_spill()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
     def _dfs_process_children(self, node) -> None:
@@ -206,23 +199,24 @@ class TopDown():
         Args:
             node (HierarchicalNode): The current node being processed.
         '''
-        if node.is_leaf():
-            self.data_handler.write_microdata_for_leaf(node)
-            node.contingency_vector = None
-            node.constraints = None
-            return
-        
         for child in node.children:
-            # Materialize root's children before _estimate_and_update_children
             child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
             self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
 
-        # Second phase: resolve root considering its children and update their vectors
         self._estimate_and_update_children(node)
         self._check_correctness_node(node)
+        node.contingency_vector = None
+        node.constraints = None
 
-        for child in node.children:
-            self._dfs_process_children(child)
+        if node.children[0].is_leaf():
+            for child in node.children:
+                self.data_handler.write_microdata_for_leaf(child)
+        else:
+            for child in node.children:
+                self.data_handler.spill_vector(child)
+            for child in node.children:
+                self.data_handler.load_vector(child)
+                self._dfs_process_children(child)
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
