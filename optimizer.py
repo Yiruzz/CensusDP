@@ -2,6 +2,7 @@ import pyomo.environ as pyo
 import gurobipy as gp
 
 import numpy as np
+import scipy.sparse as sp
 from typing import List, Callable, Any
 
 class OptimizationModel:
@@ -75,6 +76,12 @@ class OptimizationModel:
         n_children = len(noisy_measurements) // n_queries
         n = n_children * n_cells
 
+        # Work over the CSR structure so each query row's contribution iterates only
+        # its nonzero columns (O(nnz)), not the full cell range. Handles the sparse
+        # identity workload and arbitrary sparse/dense Q uniformly.
+        Q = query_matrix.tocsr() if sp.issparse(query_matrix) else sp.csr_matrix(query_matrix)
+        indptr, indices, qdata = Q.indptr, Q.indices, Q.data
+
         # Create a ConcreteModel directly
         instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{node_id}')
 
@@ -87,8 +94,12 @@ class OptimizationModel:
         def objective_rule(model):
             total = 0
             for k in range(n_children):
+                base = k * n_cells
                 for r in range(n_queries):
-                    q_x_r = sum(float(query_matrix[r, j]) * model.x[k * n_cells + j] for j in range(n_cells) if query_matrix[r, j] != 0)
+                    q_x_r = sum(
+                        float(qdata[p]) * model.x[base + indices[p]]
+                        for p in range(indptr[r], indptr[r + 1])
+                    )
                     total += (q_x_r - float(noisy_measurements[k * n_queries + r])) ** 2
             return total
 
