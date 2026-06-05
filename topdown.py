@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import scipy.sparse as sp
 from hierarchical_tree import HierarchicalTree
 from data_handler import DataHandler
 from optimizer import OptimizationModel
@@ -25,7 +26,8 @@ class TopDown():
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism,
-                 out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None) -> None:
+                 out_path: str = 'noisy_data.csv', optimizer='gurobi', solver_options={}, optimizer_path=None,
+                 domain: Optional[Dict[str, "List"]] = None) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -39,6 +41,10 @@ class TopDown():
             optimizer (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
+            domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
+                query columns, defining the contingency cell space. Should be data-independent
+                for a sound DP guarantee. When None (or a column omitted), the domain is inferred
+                from the observed data with a warning. Passed through to DataHandler.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -60,7 +66,7 @@ class TopDown():
                 f"expected {n_levels} (= len(hierarchy) + 1)."
             )
 
-        self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
+        self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path, domain=domain)
         self.hierarchical_columns: List[str] = hierarchy
         self.query_columns: List[str] = query_columns
 
@@ -95,24 +101,36 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
-        print(f'Generating contingency dataframe...', end=' ')
-        self.data_handler.generate_contingency_dataframe(self.query_columns)
+        print(f'Building contingency domain...', end=' ')
+        self.data_handler.build_contingency_domain(self.query_columns)
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
-        print(f'Building hierarchical tree...', end=' ')
+
+        print(f'Building query workload...', end=' ')
         if isinstance(self.Q, QueryWorkload):
-            self.Q = self.Q.build(self.data_handler.contingency_df)
-        elif not isinstance(self.Q, np.ndarray):
-            # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
-            self.Q = np.eye(len(self.data_handler.contingency_df))
+            self.Q = self.Q.build(self.data_handler.contingency_domain)
+        elif not (isinstance(self.Q, np.ndarray) or sp.issparse(self.Q)):
+            # No workload set - use the sparse identity (each cell answered directly).
+            n_cells = self.data_handler.contingency_domain.n_cells
+            self.Q = sp.identity(n_cells, format='csr', dtype=float)
         # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
         #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
-        assert np.all((self.Q == 0) | (self.Q == 1)), \
-            "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-        self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        if sp.issparse(self.Q):
+            assert np.all((self.Q.data == 0) | (self.Q.data == 1)), \
+                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+            self.query_sensitivity = int(np.asarray(self.Q.sum(axis=0)).max())
+        else:
+            assert np.all((self.Q == 0) | (self.Q == 1)), \
+                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+            self.query_sensitivity = int(self.Q.sum(axis=0).max())
         print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+        print(f'{time.time() - t1:.2f} seconds.\n')
+        
+        t1 = time.time()
+
+        print(f'Building hierarchical tree...', end=' ')
         self.tree = self.data_handler.build_hierarchical_tree(self.constraints, self.Q)
         print(f'{time.time() - t1:.2f} seconds.\n')
 
@@ -442,16 +460,19 @@ class TopDown():
             node (HierarchicalNode): The node to check.
         '''
         if node.children:
-            # Check if the sum of the contingency vectors of the children nodes is equal to the parent node's contingency vector
-            node_sum = sum(self.tree._contingency_vectors[node.id])
+            # Compare only the x_hat region [:n_cells]; when n_queries > n_cells the
+            # trailing slots still hold the stale noisy measurement y (estimation only
+            # overwrites the first n_cells), which would otherwise corrupt the sum.
+            n_cells = self.tree.n_cells
+            node_sum = np.sum(self.tree._contingency_vectors[node.id][:n_cells])
             children_sum = 0
             for child in node.children:
-                children_sum += np.sum(self.tree._contingency_vectors[child.id])
+                children_sum += np.sum(self.tree._contingency_vectors[child.id][:n_cells])
 
-            if node_sum != children_sum:      
-                print(node_sum, children_sum)      
+            if node_sum != children_sum:
+                print(node_sum, children_sum)
                 print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id]}')
+                print(f'Parent node contingency vector: {self.tree._contingency_vectors[node.id][:n_cells]}')
                 raise ValueError('Tree correctness check failed.')
             else:
                 for child in node.children:

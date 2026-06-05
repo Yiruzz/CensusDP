@@ -1,4 +1,4 @@
-import pandas as pd
+import numpy as np
 from abc import ABC, abstractmethod
 from typing import Any, List
 
@@ -6,13 +6,14 @@ from typing import Any, List
 class Expr(ABC):
     """Base class for boolean expressions over the contingency domain.
 
-    All expressions must implement `evaluate(df)` returning a boolean Series
-    aligned with `df.index`. Boolean operators produce new compound expressions.
+    All expressions implement evaluate(domain) returning a boolean numpy array
+    of length domain.n_cells, where entry j is True iff cell j satisfies the
+    expression. Boolean operators produce new compound expressions.
     """
 
     @abstractmethod
-    def evaluate(self, df: pd.DataFrame) -> pd.Series:
-        """Return a boolean mask over the contingency domain rows."""
+    def evaluate(self, domain) -> np.ndarray:
+        """Return a boolean mask (length domain.n_cells) over the contingency cells."""
         raise NotImplementedError()
 
     def __and__(self, other: 'Expr') -> 'AndExpr':
@@ -86,16 +87,8 @@ class CompareExpr(Expr):
         self.op = op
         self.value = value
 
-    def evaluate(self, df: pd.DataFrame) -> pd.Series:
-        c = df[self.column]
-        match self.op:
-            case '==': return c == self.value
-            case '!=': return c != self.value
-            case '>':  return c > self.value
-            case '>=': return c >= self.value
-            case '<':  return c < self.value
-            case '<=': return c <= self.value
-            case _: raise ValueError(f"Unknown operator: {self.op}")
+    def evaluate(self, domain) -> np.ndarray:
+        return domain.mask_compare(self.column, self.op, self.value)
 
     def __repr__(self) -> str:
         return f"col('{self.column}') {self.op} {self.value!r}"
@@ -108,8 +101,8 @@ class AndExpr(Expr):
         self.left = left
         self.right = right
 
-    def evaluate(self, df: pd.DataFrame) -> pd.Series:
-        return self.left.evaluate(df) & self.right.evaluate(df)
+    def evaluate(self, domain) -> np.ndarray:
+        return self.left.evaluate(domain) & self.right.evaluate(domain)
 
     def __repr__(self) -> str:
         return f"({self.left!r} & {self.right!r})"
@@ -122,8 +115,8 @@ class OrExpr(Expr):
         self.left = left
         self.right = right
 
-    def evaluate(self, df: pd.DataFrame) -> pd.Series:
-        return self.left.evaluate(df) | self.right.evaluate(df)
+    def evaluate(self, domain) -> np.ndarray:
+        return self.left.evaluate(domain) | self.right.evaluate(domain)
 
     def __repr__(self) -> str:
         return f"({self.left!r} | {self.right!r})"
@@ -135,8 +128,8 @@ class NotExpr(Expr):
     def __init__(self, expr: Expr) -> None:
         self.expr = expr
 
-    def evaluate(self, df: pd.DataFrame) -> pd.Series:
-        return ~self.expr.evaluate(df)
+    def evaluate(self, domain) -> np.ndarray:
+        return ~self.expr.evaluate(domain)
 
     def __repr__(self) -> str:
         return f"~({self.expr!r})"
@@ -149,8 +142,8 @@ class InExpr(Expr):
         self.column = column
         self.values = values
 
-    def evaluate(self, df: pd.DataFrame) -> pd.Series:
-        return df[self.column].isin(self.values)
+    def evaluate(self, domain) -> np.ndarray:
+        return domain.mask_isin(self.column, self.values)
 
     def __repr__(self) -> str:
         return f"col('{self.column}').isin({self.values!r})"

@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from functools import partial
 from typing import Callable, List
@@ -57,23 +58,22 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         super().__init__(expression=expression, aggregation_function=get_real_total)
 
     @staticmethod
-    def check_sum(contingency_var: pd.Series, sum_val: int, indices: List[int]) -> bool:
+    def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
         """Check that the sum of selected indices in the contingency variable equals a target value.
-        
+
         Args:
-            contingency_var (pd.Series): A series containing numeric values.
+            contingency_var: A Pyomo Var/dict indexed by cell index.
             sum_val (int): The expected sum of the selected elements.
             indices (List[int]): Indices in contingency_var whose values will be summed.
         Returns:
             bool: True if the sum of the selected elements equals sum_val, otherwise False.
         """
         return sum(contingency_var[i] for i in indices) == sum_val
-    
-    def to_constraint(self, contingency_df):
-        # Get reduced series
-        reduced_series = self.expression.reduce(contingency_df)
-        # Get indices where the expression is True
-        indices = reduced_series[reduced_series].index
+
+    def to_constraint(self, domain):
+        # Reduce to a boolean mask over the cells, then take the selected indices.
+        reduced_mask = self.expression.reduce(domain)
+        indices = np.flatnonzero(reduced_mask).tolist()
         # Return a function that checks if the sum of the contingency variable equals the value
         return partial(SumEqualRealTotal.check_sum, sum_val=self.value, indices=indices)
     

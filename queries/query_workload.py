@@ -1,31 +1,35 @@
 import numpy as np
-import pandas as pd
+import scipy.sparse as sp
+from itertools import product
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .expression import Expr, col
 
 # A resolver is a closure produced by each query-definition method.
-# It captures the query parameters and, when called with the contingency domain,
-# returns (list_of_rows, list_of_names).
-_Resolver = Callable[[pd.DataFrame], Tuple[List[np.ndarray], List[str]]]
+# It captures the query parameters and, when called with the ContingencyDomain,
+# returns COO components for its block of query rows:
+#   (rows, cols, n_rows, names)
+# where rows/cols index a local (n_rows x domain.n_cells) 0/1 submatrix and names
+# labels each local row. build() stacks the blocks into one CSR matrix.
+_Resolver = Callable[[Any], Tuple[np.ndarray, np.ndarray, int, List[str]]]
 
 
 class QueryWorkload:
-    """Builds a linear query workload matrix Q for the TopDown algorithm.
+    """Builds a sparse linear query workload matrix Q for the TopDown algorithm.
 
-    Maps a pandas-like syntax to the linear queries described by McKenna et al.
-    in the HDMM framework. Each query becomes one row of Q; the workload answers
-    on data vector x are Q @ x.
+    Maps a pandas-like syntax to the linear queries.
+    Each query becomes one row of Q; the workload answers on data vector x are Q @ x.
 
-    Q is built lazily: resolvers capture the query intent at definition time and
-    materialise into a matrix when .build(contingency_df) is called.
+    Q is built lazily and sparsely: resolvers capture the query intent at
+    definition time and materialise into a scipy CSR matrix when
+    .build(domain) is called - no dense intermediate is ever formed.
 
     Args:
         schema: Optional domain description {attr: [values]}, corresponding to
                 dom(R) in McKenna et al. Used for documentation only.
 
     Example:
-        from workload import QueryWorkload, col
+        from queries import QueryWorkload, col
 
         qw = (QueryWorkload(schema={'Sex': ['M', 'F'], 'Age': list(range(1, 6))})
               .value_counts(['Sex'])
@@ -33,8 +37,8 @@ class QueryWorkload:
               .range_query('Age', 2, 4)
               .add(col('Income') == 'high', name='count_high_income'))
 
-        Q       = qw.build(contingency_df)     # (n_queries x n_cells)
-        answers = qw.answer(x, contingency_df) # Q @ x
+        Q       = qw.build(domain)              # scipy CSR (n_queries x n_cells)
+        answers = qw.answer(x, domain)          # Q @ x
     """
 
     def __init__(self, schema: Optional[Dict[str, List[Any]]] = None) -> None:
@@ -51,33 +55,34 @@ class QueryWorkload:
         attribute values becomes one row in Q that counts all contingency cells
         matching that combination (a marginal query in McKenna et al.'s terms).
 
-        Rows are ordered by the sorted unique combinations of the attributes.
+        Every cell belongs to exactly one combination, so this whole block is the
+        cell→group assignment: row = group id, col = cell, computed in O(n_cells)
+        from the mixed-radix structure with no per-combination evaluation.
 
         Args:
-            attributes: Column names to count over. Must be present in the
-                        contingency domain passed to .build().
+            attributes: Column names to count over. Must be present in the domain.
 
         Returns:
             self, for chaining.
         """
-        def resolve(df: pd.DataFrame) -> Tuple[List[np.ndarray], List[str]]:
-            rows, names = [], []
-            unique_combos = (
-                df[attributes]
-                .drop_duplicates()
-                .reset_index(drop=True)
-            )
-            for _, combo_row in unique_combos.iterrows():
-                expr: Optional[Expr] = None
-                parts: List[str] = []
-                for c in attributes:
-                    eq = col(c) == combo_row[c]
-                    expr = eq if expr is None else expr & eq
-                    parts.append(f"{c}={combo_row[c]!r}")
-                assert expr is not None
-                rows.append(expr.evaluate(df).astype(float).values)
-                names.append(', '.join(parts))
-            return rows, names
+        def resolve(domain) -> Tuple[np.ndarray, np.ndarray, int, List[str]]:
+            # group id of each cell = mixed radix over `attributes` (first attr most
+            # significant), so groups are ordered lexicographically like the values.
+            gid = np.zeros(domain.n_cells, dtype=np.int64)
+            weight = 1
+            for c in reversed(attributes):
+                size = len(domain.domains[c])
+                gid += domain.axis_ranks(c) * weight
+                weight *= size
+            num_groups = int(weight)
+
+            rows = gid
+            cols = np.arange(domain.n_cells, dtype=np.int64)
+            names = [
+                ', '.join(f"{c}={v!r}" for c, v in zip(attributes, combo))
+                for combo in product(*(domain.domains[c] for c in attributes))
+            ]
+            return rows, cols, num_groups, names
 
         self._resolvers.append(resolve)
         return self
@@ -92,9 +97,10 @@ class QueryWorkload:
         Returns:
             self, for chaining.
         """
-        def resolve(df: pd.DataFrame) -> Tuple[List[np.ndarray], List[str]]:
-            row = expression.evaluate(df).astype(float).values
-            return [row], [name or repr(expression)]
+        def resolve(domain) -> Tuple[np.ndarray, np.ndarray, int, List[str]]:
+            cols = domain.select(expression.evaluate(domain)).astype(np.int64)
+            rows = np.zeros(len(cols), dtype=np.int64)
+            return rows, cols, 1, [name or repr(expression)]
 
         self._resolvers.append(resolve)
         return self
@@ -103,7 +109,6 @@ class QueryWorkload:
         """Add a single counting query for attr in [start, end] (inclusive).
 
         Shorthand for .add((col(attr) >= start) & (col(attr) <= end)).
-        Corresponds to a single row of the AllRange matrix from McKenna et al.
 
         Args:
             attr:  Attribute name.
@@ -118,50 +123,56 @@ class QueryWorkload:
 
     # ── Matrix construction ────────────────────────────────────────────────────
 
-    def build(self, contingency_df: pd.DataFrame) -> np.ndarray:
-        """Materialise Q as a (n_queries x n_cells) float numpy matrix.
+    def build(self, domain) -> sp.csr_matrix:
+        """Materialise Q as a sparse (n_queries x n_cells) CSR matrix.
 
-        Each row is a 0/1 vector indicating which contingency cells are included
-        in that query. Safe to call multiple times (idempotent).
+        Each row is a 0/1 indicator of which contingency cells the query includes.
 
         Args:
-            contingency_df: Global contingency domain produced by
-                            DataHandler.generate_contingency_dataframe().
+            domain: ContingencyDomain produced by DataHandler.build_contingency_domain().
 
         Returns:
-            np.ndarray of shape (n_queries, n_cells).
+            scipy.sparse.csr_matrix of shape (n_queries, n_cells).
 
         Raises:
             ValueError: If no queries have been defined.
         """
-        all_rows: List[np.ndarray] = []
-        all_names: List[str] = []
-
-        for resolve in self._resolvers:
-            rows, names = resolve(contingency_df)
-            all_rows.extend(rows)
-            all_names.extend(names)
-
-        if not all_rows:
+        if not self._resolvers:
             raise ValueError(
                 "QueryWorkload has no queries. "
                 "Call .value_counts(), .add(), or .range_query() first."
             )
 
-        self._query_names = all_names
-        return np.vstack(all_rows)
+        all_rows: List[np.ndarray] = []
+        all_cols: List[np.ndarray] = []
+        all_names: List[str] = []
+        base = 0
+        for resolve in self._resolvers:
+            rows, cols, n_rows, names = resolve(domain)
+            all_rows.append(rows + base)
+            all_cols.append(cols)
+            all_names.extend(names)
+            base += n_rows
 
-    def answer(self, x: np.ndarray, contingency_df: pd.DataFrame) -> np.ndarray:
+        rows = np.concatenate(all_rows) if all_rows else np.empty(0, dtype=np.int64)
+        cols = np.concatenate(all_cols) if all_cols else np.empty(0, dtype=np.int64)
+        data = np.ones(len(rows), dtype=np.float64)
+
+        self._query_names = all_names
+        return sp.coo_matrix((data, (rows, cols)), shape=(base, domain.n_cells)).tocsr()
+
+    def answer(self, x: np.ndarray, domain) -> np.ndarray:
         """Compute Q @ x (workload answers on data vector x).
 
         Args:
-            x:              Data vector, one count per contingency cell.
-            contingency_df: The global contingency domain.
+            x:      Data vector, one count per contingency cell.
+            domain: The ContingencyDomain.
 
         Returns:
             np.ndarray of shape (n_queries,).
         """
-        return self.build(contingency_df) @ x
+        result = self.build(domain) @ x
+        return np.asarray(result).ravel()
 
     # ── Introspection ──────────────────────────────────────────────────────────
 
