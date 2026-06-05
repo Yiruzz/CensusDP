@@ -76,12 +76,6 @@ class OptimizationModel:
         n_children = len(noisy_measurements) // n_queries
         n = n_children * n_cells
 
-        # Work over the CSR structure so each query row's contribution iterates only
-        # its nonzero columns (O(nnz)), not the full cell range. Handles the sparse
-        # identity workload and arbitrary sparse/dense Q uniformly.
-        Q = query_matrix.tocsr() if sp.issparse(query_matrix) else sp.csr_matrix(query_matrix)
-        indptr, indices, qdata = Q.indptr, Q.indices, Q.data
-
         # Create a ConcreteModel directly
         instance = pyo.ConcreteModel(name=f'RealEstimation_NodeID_{node_id}')
 
@@ -91,14 +85,20 @@ class OptimizationModel:
 
         # Objective: sum_k || Q @ x_k - y_k ||^2
         # Q entries are Python floats (constants) so Pyomo builds a pure quadratic expression.
+        # Work over the CSR structure so each query row's contribution iterates only
+        # its nonzero columns (O(nnz)), not the full cell range.
+        if not sp.issparse(query_matrix):
+            query_matrix = query_matrix.tocsr()  # Ensure CSR format for efficient row access
+
+
         def objective_rule(model):
             total = 0
             for k in range(n_children):
                 base = k * n_cells
                 for r in range(n_queries):
                     q_x_r = sum(
-                        float(qdata[p]) * model.x[base + indices[p]]
-                        for p in range(indptr[r], indptr[r + 1])
+                        float(query_matrix.data[p]) * model.x[base + query_matrix.indices[p]]
+                        for p in range(query_matrix.indptr[r], query_matrix.indptr[r + 1])
                     )
                     total += (q_x_r - float(noisy_measurements[k * n_queries + r])) ** 2
             return total
