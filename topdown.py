@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import scipy.sparse as sp
 from hierarchical_tree import HierarchicalTree
 from data_handler import DataHandler
 from optimizer import OptimizationModel
@@ -7,9 +8,8 @@ from constraints.constraint import Constraint
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from scipy.sparse import issparse, csr_matrix, eye as sparse_eye
 from collections import deque
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 import time
 
 class TopDown():
@@ -24,7 +24,8 @@ class TopDown():
                  privacy_mechanism: PrivacyMechanism,
                  out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
                  solver_options: dict = None, optimizer_path: str = None,
-                 traversal_method: str = 'bfs') -> None:
+                 traversal_method: str = 'bfs',
+                 domain: Optional[Dict[str, List]] = None) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -39,6 +40,11 @@ class TopDown():
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
             traversal_method (str): Tree traversal method for estimation phase: 'bfs' or 'dfs'. Defaults to 'bfs'.
+                DFS is the most natural for resource savings (one root-to-leaf branch resident at a time).
+            domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
+                query columns, defining the contingency cell space. Should be data-independent
+                for a sound DP guarantee. When None (or a column omitted), the domain is inferred
+                from the observed data with a warning. Passed through to DataHandler.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -62,11 +68,10 @@ class TopDown():
                 f"expected {n_levels} (= len(hierarchy) + 1)."
             )
 
-        
         self.hierarchical_columns: List[str] = hierarchy
         self.query_columns: List[str] = query_columns
 
-        self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path)
+        self.data_handler: DataHandler = DataHandler(file_path=data_path, output_path=out_path, domain=domain)
         self.data_handler.hierarchical_columns = hierarchy
         self.data_handler.query_columns = query_columns
 
@@ -103,24 +108,35 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
-        print(f'Generating contingency dataframe...', end=' ')
-        self.data_handler.generate_contingency_dataframe(self.query_columns)
+        print(f'Building contingency domain...', end=' ')
+        self.data_handler.build_contingency_domain(self.query_columns)
         print(f'{time.time() - t1:.2f} seconds.')
 
-        print(f'Computing query matrix Q...', end=' ')
+        t1 = time.time()
+        print(f'Building query workload...', end=' ')
         if isinstance(self.Q, QueryWorkload):
-            self.Q = self.Q.build(self.data_handler.contingency_df)
-            self.Q = csr_matrix(self.Q)
-        elif not isinstance(self.Q, np.ndarray):
-            # No workload set — use identity. NOTE: np.eye(n_cells) is dense; avoid for large domains.
-            self.Q = sparse_eye(len(self.data_handler.contingency_df), dtype=np.uint8, format='csr')
-        #assert np.all((self.Q == 0) | (self.Q == 1)), \
-            "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-        self.query_sensitivity = int(self.Q.sum(axis=0).max())
+            self.Q = self.Q.build(self.data_handler.contingency_domain)
+        elif not (isinstance(self.Q, np.ndarray) or sp.issparse(self.Q)):
+            # No workload set - use the sparse identity (each cell answered directly).
+            n_cells = self.data_handler.contingency_domain.n_cells
+            self.Q = sp.identity(n_cells, format='csr', dtype=float)
+        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
+        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
+        if sp.issparse(self.Q):
+            assert np.all((self.Q.data == 0) | (self.Q.data == 1)), \
+                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+            self.query_sensitivity = int(np.asarray(self.Q.sum(axis=0)).max())
+        else:
+            assert np.all((self.Q == 0) | (self.Q == 1)), \
+                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+            self.query_sensitivity = int(self.Q.sum(axis=0).max())
         print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+        print(f'{time.time() - t1:.2f} seconds.\n')
 
         t1 = time.time()
+        # Build only the tree structure; contingency vectors and constraints are
+        # materialized lazily per node during the estimation phase (DFS/BFS + spill).
         print(f'Building hierarchical tree structure...', end=' ')
         self.tree = self.data_handler.build_hierarchical_tree()
         print(f'{time.time() - t1:.2f} seconds.\n')

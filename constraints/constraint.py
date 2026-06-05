@@ -1,23 +1,22 @@
 from abc import ABC, abstractmethod
-import pandas as pd
 from typing import Callable
 
 class Constraint(ABC):
     """Base interface for all constraints.
 
-    Implementations must provide `to_constraint(contingency_df)` which returns a
-    callable constraint function that recivies a contingency vector and returns a boolean
+    Implementations must provide to_constraint(domain) which returns a callable
+    constraint function that receives a contingency variable and returns a boolean
     expression that will be used by the optimizer.
     """
 
     @abstractmethod
-    def to_constraint(self, contingency_df: pd.DataFrame) -> Callable:
+    def to_constraint(self, domain) -> Callable:
         """Convert the constraint into a callable function.
 
         Args:
-            contingency_df (pd.DataFrame): Pandas DataFrame used as the domain for evaluation.
+            domain: ContingencyDomain used as the cell space for evaluation.
         Returns:
-            Callable: A function that takes a contingency vector and returns a boolean expression
-                      that will be used by the optimizer.
+            Callable: A function that takes a contingency variable and returns a boolean
+                      expression that will be used by the optimizer.
         """
         raise NotImplementedError()

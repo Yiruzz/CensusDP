@@ -1,4 +1,4 @@
-import pandas as pd
+import numpy as np
 from functools import partial
 from typing import Callable, List
 
@@ -24,11 +24,11 @@ class SumEqual(AggregateConstraint):
     """Represents a sum equality constraint: Sum(expression) == value"""
 
     @staticmethod
-    def check_sum(contingency_var: pd.Series, sum_val: int, indices: List[int]) -> bool:
+    def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
         """Check that the sum of selected indices in the contingency variable equals a target value.
-        
+
         Args:
-            contingency_var (pd.Series): A series containing numeric values.
+            contingency_var: A Pyomo Var/dict indexed by cell index.
             sum_val (int): The expected sum of the selected elements.
             indices (List[int]): Indices in contingency_var whose values will be summed.
         Returns:
@@ -36,12 +36,11 @@ class SumEqual(AggregateConstraint):
         """
 
         return sum(contingency_var[i] for i in indices) == sum_val
-    
-    def to_constraint(self, contingency_df: pd.DataFrame) -> Callable:
-        # Get reduced series
-        reduced_series = self.expression.reduce(contingency_df)
-        # Get indices where the expression is True
-        indices = reduced_series[reduced_series].index
+
+    def to_constraint(self, domain) -> Callable:
+        # Reduce to a boolean mask over the cells, then take the selected indices.
+        reduced_mask = self.expression.reduce(domain)
+        indices = np.flatnonzero(reduced_mask).tolist()
         # Return a function that checks if the sum of the contingency variable equals the value
         return partial(SumEqual.check_sum, sum_val=self.value, indices=indices)
     

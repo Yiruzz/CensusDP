@@ -3,37 +3,47 @@ import tempfile
 import shutil
 import pandas as pd
 import numpy as np
+import scipy.sparse as sp
 
-from itertools import product
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from pathlib import Path
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
+from domain import ContingencyDomain
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 
 class DataHandler:
     '''Class to handle data loading, preprocessing and postprocessing.'''
 
-    def __init__(self, file_path: str, output_path: str = 'noisy_data.csv') -> None:
+    def __init__(self, file_path: str, output_path: str = 'noisy_data.csv',
+                 domain: Optional[Dict[str, Sequence]] = None) -> None:
         '''Constructror for DataHandler class.
-        
+
         Args:
             file_path (str): Path to the data file.
             output_path (str): Path to save the processed data.
+            domain (Optional[Dict[str, Sequence]]): Per-column set of all possible
+                values, defining the contingency cell space. This should be
+                data-independent for a sound DP guarantee (so valid-but-absent
+                values still get a cell + noise). When None, or for any query column
+                omitted, the domain is inferred from the observed data
+                (np.sort(unique)) with a warning.
 
         Attributes:
             file_path (str): Path to the data file.
             output_path (str): Path to save the processed data. Defaults to "noisy_data.csv".
-            
+
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
-            contingency_df (Optional[pd.DataFrame]): DataFrame to hold the contingency table.    
-            contingency_df_length: Optional[int]: Length of the contingency dataframe.
+            contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space
+                that replaces the dense Cartesian-product contingency table.
+            contingency_df_length: Optional[int]: Number of contingency cells (n_cells).
             dtype (str): NumPy data type used for all arrays.
 
             query_columns (List[str]): List of columns to use for generating the contingency table.
             hierarchical_columns (List[str]): List of columns representing the hierarchical levels.
+            spill_dir (str): Directory where node vectors are spilled to disk during estimation.
         '''
         # Input and output paths
         self.file_path: str = file_path
@@ -48,10 +58,11 @@ class DataHandler:
         # Dataframe to hold the data (loaded from file_path).
         self.dataframe: Optional[pd.DataFrame] = None
 
-        # Used to store and have an order on each unique combination of attributes.
-        # The contingency vectors will have the same order of this dataframe.
-        self.contingency_df: Optional[pd.DataFrame] = None
-        self.contingency_df_length: Optional[pd.DataFrame] = None
+        # Mixed-radix cell space; the contingency vectors are indexed by its flat
+        # cell index. Replaces the dense Cartesian-product DataFrame.
+        self.domain: Optional[Dict[str, Sequence]] = domain
+        self.contingency_domain: Optional[ContingencyDomain] = None
+        self.contingency_df_length: Optional[int] = None
         self.dtype: str = 'int64'
 
         # Hierarchical columns (first value highest hierarchy, last lowest).
@@ -71,7 +82,7 @@ class DataHandler:
 
     def read_data(self, columns: List[str], sep: str = ',', nrows: Optional[int] = None) -> pd.DataFrame:
         '''Read data from the file_path into a pandas DataFrame.
-        
+
         Args:
             sep (str): Separator used in the CSV file. Defaults to ",".
             columns (List[str]): List of columns to read from the CSV file.
@@ -86,73 +97,87 @@ class DataHandler:
             self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
 
         return self.dataframe
-    
-    def generate_contingency_dataframe(self, query_columns: List[str]) -> pd.DataFrame:
-        '''Generate a contingency dataframe from the loaded data.
-        This method assumes that each column have all the possible values.
+
+    def build_contingency_domain(self, query_columns: List[str]) -> ContingencyDomain:
+        '''Build the mixed-radix contingency domain for the query columns.
+
+        Replaces the dense Cartesian-product DataFrame: the cell space is described
+        structurally by per-column sorted value sets + strides, so no (k x n_cells)
+        table is materialised. Per-column values come from the user-declared
+        self.domain when available.
 
         Args:
             query_columns (List[str]): List of query columns to aggregate.
 
         Returns:
-            pd.DataFrame: Contingency DataFrame with each unique combination of query columns.
+            ContingencyDomain: The constructed cell space.
         '''
-        # Get unique values for each column
-        # NOTE: Here we assume that each column contains all possible values
-        # Example: if the domain of "Age" is [0, ..., 100], we assume that the column contains all those values
         assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
-        unique_values = [self.dataframe[col].unique() for col in query_columns]
 
-        # Generate all possible combinations (Cartesian product)
-        self.contingency_df = pd.DataFrame(list(product(*unique_values)), columns=query_columns)
-        
-        # Sort by the columns to ensure a consistent order
-        self.contingency_df.sort_values(by=query_columns, inplace=True)
-        self.contingency_df.reset_index(drop=True, inplace=True)
+        self.contingency_domain = ContingencyDomain.build(
+            columns=query_columns, data=self.dataframe, declared=self.domain
+        )
+        self.contingency_df_length = self.contingency_domain.n_cells
 
-        self.contingency_df_length = self.contingency_df.shape[0]
+        print("Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
 
-        print("Contingency DataFrame generated with shape:", self.contingency_df.shape, "in", end=' ')
+        return self.contingency_domain
 
-        return self.contingency_df
-    
-    def create_contingency_vector(self, hierarchical_path: List[int]) -> np.ndarray:
-        '''Create a contingency vector from a dataframe, optionally filtered by hierarchical path.
+    def create_contingency_vector(self, df: pd.DataFrame) -> sp.csr_matrix:
+        '''Create a sparse contingency (column) vector for the given records.
+
+        Uses the domain's mixed-radix encoder to map each record to its flat cell
+        index and scatters the counts — replacing the pandas value_counts + merge
+        against a full Cartesian table. Returned sparse so the raw histogram x is
+        never densified before Q @ x.
 
         Args:
-            hierarchical_path (Optional[List[Int]]): Filters df using this path before creating the vector.
+            df (pd.DataFrame): DataFrame containing the records to aggregate.
 
         Returns:
-            np.ndarray: Contingency vector with counts for each unique combination in contingency_df.
+            scipy.sparse.csr_matrix: Column vector of shape (n_cells, 1) with the
+                count for each contingency cell.
         '''
-        if self.contingency_df is None:
-            raise ValueError("Contingency DataFrame is not generated. Call generate_contingency_table first.")
+        if self.contingency_domain is None:
+            raise ValueError("Contingency domain is not built. Call build_contingency_domain first.")
 
-        filtered_df = self.dataframe
-        if len(hierarchical_path) > 1:
-            for level, value in enumerate(hierarchical_path[1:]):
-                column = self.hierarchical_columns[level]
-                filtered_df = filtered_df[filtered_df[column] == value]
+        domain = self.contingency_domain
+        flat_indices = domain.encode(df)
+        nz, counts = np.unique(flat_indices, return_counts=True)
+        return sp.csr_matrix(
+            (counts, (nz, np.zeros(len(nz), dtype=np.int64))),
+            shape=(domain.n_cells, 1),
+            dtype=self.dtype,
+        )
 
-        queries = self.contingency_df.columns.tolist()
+    def _query_answers(self, query_matrix, records: pd.DataFrame) -> np.ndarray:
+        '''Compute the noiseless query answers y = Q @ x for a set of records.
 
-        # Group the data by the permutation columns and count occurrences
-        grouped = filtered_df.value_counts(subset=queries).reset_index(name='frequency')
+        Builds the sparse raw histogram x for records and applies the (sparse or
+        dense) query matrix, returning a dense 1-D integer array of length n_queries.
 
-        # Merge to get frequencies for all combinations, ensuring correct order and filling missing with 0.
-        # This merged dataframe now contains all combinations from self.contingency_df and their counts (0 if not present in df).
-        merged = pd.merge(self.contingency_df, grouped, how='left', on=queries).fillna({'frequency': 0})
+        Args:
+            query_matrix: Query matrix Q (scipy sparse CSR or dense ndarray),
+                shape (n_queries, n_cells).
+            records (pd.DataFrame): The node's records.
 
-        # Directly extract the 'frequency' column as a numpy array.
-        contingency_vector = merged['frequency'].to_numpy(dtype=int)
-
-        return contingency_vector
+        Returns:
+            np.ndarray: Dense length-n_queries answers.
+        '''
+        x = self.create_contingency_vector(records)  # sparse (n_cells, 1)
+        if sp.issparse(query_matrix):
+            y = np.asarray((query_matrix @ x).todense()).ravel()
+        else:
+            y = query_matrix @ x.toarray().ravel()
+        # Q is binary and x integer, so y is integer-valued; cast exactly.
+        return y.astype(self.dtype)
 
     def build_hierarchical_tree(self) -> HierarchicalTree:
         '''Build a hierarchical tree structure based on hierarchical columns.
 
         This creates only the tree structure using hierarchical_path for each node.
-        Contingency vectors, constraints, and query matrix information are NOT handled here.
+        Contingency vectors, constraints, and query matrix information are NOT handled here;
+        they are materialized on demand during the estimation phase.
 
         Returns:
             HierarchicalTree: The constructed hierarchical tree with hierarchical_path information.
@@ -250,7 +275,8 @@ class DataHandler:
         Returns:
             pd.DataFrame: Microdata for this leaf node.
         '''
-        assert self.contingency_df is not None, "Contingency DataFrame is not generated. Call generate_contingency_table first."
+        assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
+        domain = self.contingency_domain
 
         if not node.is_leaf():
             raise ValueError("Node must be a leaf node.")
@@ -258,15 +284,15 @@ class DataHandler:
         if node.contingency_vector is None:
             raise ValueError("Node contingency vector is not materialized.")
 
-        # Get all possible query column combinations.
-        query_values = self.contingency_df[self.query_columns].to_numpy()
+        # After estimation, the node's vector holds the estimated cell counts x_hat
+        # (length n_cells). Select only positive frequencies.
+        contingency_vector = node.contingency_vector
+        nonzero_idx = np.flatnonzero(contingency_vector > 0)
 
-        # Select only positive frequencies.
-        nonzero_mask = node.contingency_vector > 0
-
-        # Filter combinations to avoid processing zero-frequency rows.
-        filtered_query_values = query_values[nonzero_mask]
-        filtered_counts = node.contingency_vector[nonzero_mask]
+        # Decode only the nonzero cells into their attribute combinations,
+        # avoiding any full (n_cells x k) combination table.
+        filtered_query_values = domain.decode(nonzero_idx)
+        filtered_counts = contingency_vector[nonzero_idx]
 
         # Repeat each combination according to its frequency.
         expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
@@ -299,8 +325,9 @@ class DataHandler:
     def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint], query_matrix: np.ndarray) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
-        Filters data once based on hierarchical path, then creates the contingency vector
-        and prepares all constraints for the node.
+        Filters data once based on hierarchical path, then creates the (sparse-backed)
+        measurement vector y = Q @ x and prepares all constraints for the node against
+        the mixed-radix contingency domain.
 
         Args:
             hierarchical_path (List[int]): The node's hierarchical path for filtering.
@@ -310,8 +337,8 @@ class DataHandler:
         Returns:
             Tuple[np.ndarray, List[Constraint]]: Contingency vector and constraint callables for this node.
         '''
-        if self.contingency_df is None:
-            raise ValueError("Contingency DataFrame not generated. Call generate_contingency_dataframe first.")
+        if self.contingency_domain is None:
+            raise ValueError("Contingency domain is not built. Call build_contingency_domain first.")
 
         # Filter data once based on hierarchical path
         filtered_df = self.dataframe
@@ -320,13 +347,11 @@ class DataHandler:
                 column = self.hierarchical_columns[level_idx]
                 filtered_df = filtered_df[filtered_df[column] == value]
 
-        # Create contingency vector from filtered data
-        queries = self.contingency_df.columns.tolist()
-        grouped = filtered_df.value_counts(subset=queries).reset_index(name='frequency')
-        merged = pd.merge(self.contingency_df, grouped, how='left', on=queries).fillna({'frequency': 0})
-        contingency_vector = query_matrix @ merged['frequency'].to_numpy(dtype=int) 
+        # Build the measurement vector y = Q @ x from the sparse histogram of the
+        # filtered records (raw cell counts x are never densified).
+        contingency_vector = self._query_answers(query_matrix, filtered_df)
 
-        # Prepare constraints using the same filtered data
+        # Prepare constraints using the same filtered data, targeting the sparse domain.
         level_constraints = []
         for constraint in constraints:
             # Apply aggregation for constraints that compute dynamically
@@ -334,8 +359,7 @@ class DataHandler:
                 case ContextualAggregateConstraint():
                     constraint.apply_aggregation_function(filtered_df)
 
-            # Convert to optimizer function
-            level_constraints.append(constraint.to_constraint(self.contingency_df))
+            # Convert to optimizer callable against the contingency domain
+            level_constraints.append(constraint.to_constraint(self.contingency_domain))
 
         return contingency_vector, level_constraints
-

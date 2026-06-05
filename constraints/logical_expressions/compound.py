@@ -1,6 +1,6 @@
 from abc import ABC
 from typing import List
-import pandas as pd
+import numpy as np
 
 from .base import LogicalExpression
 
@@ -46,33 +46,33 @@ class BinaryExpression(CompoundExpression, ABC):
 
 class And(NaryExpression):
     '''Class for logical AND expression.'''
-    def reduce(self, contingency_df: pd.DataFrame) -> pd.Series:
-        reduced_expressions = [expr.reduce(contingency_df) for expr in self.expressions]
+    def reduce(self, domain) -> np.ndarray:
+        reduced_expressions = [expr.reduce(domain) for expr in self.expressions]
         result = reduced_expressions[0]
-        for series in reduced_expressions[1:]:
-            result = result & series
+        for mask in reduced_expressions[1:]:
+            result = result & mask
         return result
 
 
 class Or(NaryExpression):
     '''Class for logical OR expression.'''
-    def reduce(self, contingency_df: pd.DataFrame) -> pd.Series:
-        reduced_expressions = [expr.reduce(contingency_df) for expr in self.expressions]
+    def reduce(self, domain) -> np.ndarray:
+        reduced_expressions = [expr.reduce(domain) for expr in self.expressions]
         result = reduced_expressions[0]
-        for series in reduced_expressions[1:]:
-            result = result | series
+        for mask in reduced_expressions[1:]:
+            result = result | mask
         return result
 
 
 class Not(UnaryExpression):
     '''Class for logical NOT expression.'''
-    def reduce(self, contingency_df: pd.DataFrame) -> pd.Series:
-        return ~self.expressions[0].reduce(contingency_df)
+    def reduce(self, domain) -> np.ndarray:
+        return ~self.expressions[0].reduce(domain)
 
 
 class Implies(BinaryExpression):
     '''Class for logical IMPLIES expression.'''
-    def reduce(self, contingency_df: pd.DataFrame) -> pd.Series:
-        antecedent = self.expressions[0].reduce(contingency_df)
-        consequent = self.expressions[1].reduce(contingency_df)
+    def reduce(self, domain) -> np.ndarray:
+        antecedent = self.expressions[0].reduce(domain)
+        consequent = self.expressions[1].reduce(domain)
         return (~antecedent) | consequent
