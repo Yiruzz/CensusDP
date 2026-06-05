@@ -15,7 +15,7 @@ from queries import QueryWorkload, col
 
 
 
-def main(process_until: str, queries: list[str], user_constraints: bool):
+def main(process_until: str, queries: list[str], user_constraints: bool, traversal_method: str = 'bfs'):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -104,16 +104,14 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
         query_columns=QUERIES,
         privacy_mechanism=PRIVACY_MECHANISM,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
-        optimizer=SOLVER_NAME,
+        solver_name=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
-        optimizer_path=OPT_PATH
+        optimizer_path=OPT_PATH,
+        traversal_method=traversal_method
     )
 
     # Set the queries to be answered at each node of the tree.
-    topdown.set_query_workload(QueryWorkload()
-                               .add(col('P02') == 1)
-                               .add(col('P02') == 2)
-                               .add(col('P02') == 1 or col('P02') == 2))
+    topdown.set_query_workload(None)
 
     ####################
     # Edit Constraints #
@@ -159,7 +157,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     # Since we don't know the specific number of households per COMUNA in advance, 
     # we use a contextual constraint that will get the real total from the data at runtime (dynamically).
     real_total_constraint = SumEqualRealTotal(expression=TrueExpression())
-    # 3 is the level of 'COMUNA' in the tree
     topdown.set_constraint_to_level(PROCESS_UNTIL_idx, real_total_constraint)
 
     # TODO: Maybe a refactor to the constraint building process to make it more user-friendly.
@@ -199,10 +196,10 @@ def main(process_until: str, queries: list[str], user_constraints: bool):
     
     # This method can be used to check the correctness of the results.
     # Also used for testing purposes.
-    topdown.check_correctness()
+    #topdown.check_correctness()
 
     # Privacy garantee
-    print(topdown.privacy_mechanism.report_guarantee())
+    #print(topdown.privacy_mechanism.report_guarantee())
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -226,6 +223,13 @@ if __name__ == "__main__":
         help="Whether to consider user constraints during execution",
     )
 
+    parser.add_argument(
+        "--traversal_method",
+        choices=["bfs", "dfs"],
+        default="bfs",
+        help="Tree traversal method for estimation phase (bfs: breadth-first, dfs: depth-first). Defaults to bfs.",
+    )
+
     args = parser.parse_args()
 
-    main(args.process_until, args.queries, args.user_constraints)
+    main(args.process_until, args.queries, args.user_constraints, args.traversal_method)

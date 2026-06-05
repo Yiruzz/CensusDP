@@ -2,7 +2,6 @@ import pyomo.environ as pyo
 import gurobipy as gp
 
 import numpy as np
-import scipy.sparse as sp
 from typing import List, Callable, Any
 
 class OptimizationModel:
@@ -83,24 +82,60 @@ class OptimizationModel:
         instance.I = pyo.RangeSet(0, n - 1)
         instance.x = pyo.Var(instance.I, domain=pyo.NonNegativeReals)
 
-        # Objective: sum_k || Q @ x_k - y_k ||^2
-        # Q entries are Python floats (constants) so Pyomo builds a pure quadratic expression.
-        # Work over the CSR structure so each query row's contribution iterates only
-        # its nonzero columns (O(nnz)), not the full cell range.
-        if not sp.issparse(query_matrix):
-            query_matrix = query_matrix.tocsr()  # Ensure CSR format for efficient row access
+        # Indices where the matrix Q has nonzeros (in this case just a 1).
+        # Needed to detect what are we actually querying for in each row.
+        # For sparse CSR: extract nonzero indices directly from internal structure (no densification)
+        nz_per_row = [query_matrix.indices[query_matrix.indptr[r]:query_matrix.indptr[r+1]]
+                      for r in range(n_queries)]
 
+        # Auxiliary variables q_x[k, r] = Q[r, :] @ x_k, lifted via linear equalities so the
+        # objective stays as a sum of one-term squares. Without this, squaring a Pyomo
+        # LinearExpression with s nonzeros materialises s^2 cross terms. Problematic for dense Q.
+        # Rows with a single nonzero (e.g. identity workload) skip the lift to avoid one pointless equality per row.
+        
+        # This way we are ensuring that the number of quadratic terms correspond to exactly the number of query answers, 
+        # which is the intended design of the objective.
 
+        # Number of children
+        instance.K = pyo.RangeSet(0, n_children - 1)
+        # Number of queries
+        instance.R = pyo.RangeSet(0, n_queries - 1)
+        # Auxiliary variables for lifted query answers (children x queries)
+        instance.q_x = pyo.Var(instance.K, instance.R, domain=pyo.Reals)
+
+        # Add linear equalities to define the lifted variables q_x in terms of x. For rows with multiple nonzeros, each q_x[k, r] = Q[r, :] @ x_k.
+        instance.AuxLink = pyo.ConstraintList()
+        for r in range(n_queries):
+            # non-zero indices in the r-th row of Q.
+            nz = nz_per_row[r]
+            if len(nz) == 1: # case of a single-term row, squaring it directly is already cheap.
+                continue     # usually happens for identity query workloads.
+
+            # nonzeros and coefficients in the r-th row of Q.
+            coeffs = [float(query_matrix[r, j]) for j in nz]
+            for k in range(n_children): # Iterate over the joint space
+                base = k * n_cells 
+                # Each new auxiliary variable q_x[k, r] is defined as the linear combination (sum) of the corresponding x variables according to the r-th row of Q.
+                instance.AuxLink.add(
+                    instance.q_x[k, r] == sum(c * instance.x[base + int(j)] for c, j in zip(coeffs, nz))
+                )
+
+        # Objective: sum_{k, r} (q_x[k, r] - y[k, r])^2 — one quadratic term per (k, r).
+        # For single-nonzero Q rows the lift is skipped, so use the underlying x directly.
         def objective_rule(model):
             total = 0
-            for k in range(n_children):
-                base = k * n_cells
-                for r in range(n_queries):
-                    q_x_r = sum(
-                        float(query_matrix.data[p]) * model.x[base + query_matrix.indices[p]]
-                        for p in range(query_matrix.indptr[r], query_matrix.indptr[r + 1])
-                    )
-                    total += (q_x_r - float(noisy_measurements[k * n_queries + r])) ** 2
+            for r in range(n_queries):
+                nz = nz_per_row[r]
+                if len(nz) == 1: # Identity workload case
+                    j = int(nz[0])
+                    coef = float(query_matrix[r, j])
+                    for k in range(n_children):
+                        y_kr = float(noisy_measurements[k * n_queries + r])
+                        total += (coef * model.x[k * n_cells + j] - y_kr) ** 2
+                else: # General case with lifted variables
+                    for k in range(n_children):
+                        y_kr = float(noisy_measurements[k * n_queries + r]) # The noisy value for the k-th child and r-th query
+                        total += (model.q_x[k, r] - y_kr) ** 2 # just a simple squared error with the lifted variable q_x[k, r]
             return total
 
         instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
@@ -187,4 +222,3 @@ class OptimizationModel:
         # Final result: floor + binary decisions
         # TODO: Data Handler should cast type
         return (x_floor + y_estimated_array).astype(np.int64)
-
