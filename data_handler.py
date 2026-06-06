@@ -192,6 +192,9 @@ class DataHandler:
         tree._node_count = self._build_subtree(root, 0, self.dataframe)
         tree._levels = 1+len(self.hierarchical_columns)
 
+        # Assign unique incremental IDs to all nodes via BFS
+        tree._index_nodes()
+
         return tree
 
     def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame) -> int:

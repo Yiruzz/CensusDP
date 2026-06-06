@@ -21,6 +21,7 @@ class HierarchicalNode:
             level (int): Level where the node is located.
 
         Attributes:
+            id (Optional[int]): Unique incremental identifier assigned during tree construction via BFS.
             geo_id (int): Identifier related to geography.
 
             children (List[HierarchicalNode]): List of child nodes.
@@ -34,6 +35,7 @@ class HierarchicalNode:
             contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
             constraints (Optional[List[Callable]]): List of constraints for this node.
         '''
+        self.id: Optional[int] = None
         self.geo_id: int = geo_id
 
         self.children: List[HierarchicalNode] = []
@@ -144,6 +146,7 @@ class HierarchicalNode:
         path = " -> ".join(str(x) for x in self.hierarchical_path)
 
         result = "--- HierarchicalNode ---\n"
+        result += f"ID: {self.id}\n"
         result += f"Geo ID: {self.geo_id}\n"
         result += f"Nivel: {self.level}\n"
         result += f"Ruta jerárquica: {path}\n"

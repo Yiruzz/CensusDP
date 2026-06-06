@@ -74,6 +74,24 @@ class HierarchicalTree:
 
         return nodes_by_level
 
+    def _index_nodes(self) -> None:
+        '''Assign unique incremental IDs to all nodes via BFS traversal.
+
+        Each node receives an id starting from 0 at the root, incrementing sequentially
+        through breadth-first order.
+        '''
+        node_id = 0
+        queue = deque([self.root])
+
+        while queue:
+            node = queue.popleft()
+            node.id = node_id
+            node_id += 1
+
+            if not node.is_leaf():
+                for child in node.children:
+                    queue.append(child)
+
     def print_all_nodes(self) -> None:
         '''Print all nodes in the hierarchical tree using BFS traversal.'''
         print("\n--- Nodos del árbol ---\n")

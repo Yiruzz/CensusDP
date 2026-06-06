@@ -275,12 +275,12 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
-        print(f'  Estimating node {node.geo_id} individually...', end=' ')
+        print(f'  Estimating node {node.id} individually...', end=' ')
 
         t1 = time.time()
         x_tilde = self.optimizer.non_negative_real_estimation(
             noisy_measurements=node.contingency_vector,
-            node_id=node.geo_id,
+            node_id=node.id,
             constraints=node.constraints,
             query_matrix=self.Q
         )
@@ -289,7 +289,7 @@ class TopDown():
         t1 = time.time()
         node.contingency_vector = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
-            node_id=node.geo_id,
+            node_id=node.id,
             constraints=node.constraints
         )
         rounding_time = time.time() - t1
@@ -302,7 +302,7 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
-        print(f'  Estimating node {node.geo_id} with children...', end=' ')
+        print(f'  Estimating node {node.id} with children...', end=' ')
 
         joint_contingency_vector = node.combine_child_vectors()
         constraints = node.combine_child_constraints()
@@ -310,7 +310,7 @@ class TopDown():
         t1 = time.time()
         x_tilde = self.optimizer.non_negative_real_estimation(
             noisy_measurements=joint_contingency_vector,
-            node_id=node.geo_id,
+            node_id=node.id,
             constraints=constraints,
             query_matrix=self.Q
         )
@@ -319,7 +319,7 @@ class TopDown():
         t1 = time.time()
         joint_solution = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
-            node_id=node.geo_id,
+            node_id=node.id,
             constraints=constraints
         )
         rounding_time = time.time() - t1
