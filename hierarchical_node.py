@@ -1,6 +1,7 @@
 import numpy as np
 
-from typing import Callable, List, Optional, Any
+from typing import List, Optional
+from constraints.constraint import SparseRow
 
 class HierarchicalNode:
     '''Represents a node in a hierarchical tree structure.
@@ -33,7 +34,7 @@ class HierarchicalNode:
             level (int): Level where the node is located.
 
             contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
-            constraints (Optional[List[Callable]]): List of constraints for this node.
+            constraints (Optional[List[SparseRow]]): List of sparse row constraints for this node.
         '''
         self.id: Optional[int] = None
         self.geo_id: int = geo_id
@@ -45,7 +46,7 @@ class HierarchicalNode:
         self.level: int = level
 
         self.contingency_vector: Optional[np.ndarray] = None
-        self.constraints: Optional[List[Callable]] = None
+        self.constraints: Optional[List[SparseRow]] = None
 
     def add_child(self, child_node: 'HierarchicalNode') -> None:
         '''Add a child node to this node.
@@ -87,15 +88,15 @@ class HierarchicalNode:
 
         return np.concatenate([child.contingency_vector for child in self.children])
     
-    def combine_child_constraints(self) -> List[Callable]:
+    def combine_child_constraints(self) -> List[SparseRow]:
         '''Combine all child constraints into a single list with adjusted indices.
 
         Each child constraint is adapted to work with the flattened joint vector.
         Consistency constraints ensure parent value = sum of child values at each index.
 
         Returns:
-            List[Callable]: Constraints callable with all indices adjusted to joint vector.
-                           Empty list if this node is a leaf.
+            List[SparseRow]: Constraints callable with all indices adjusted to joint vector.
+                            Empty list if this node is a leaf.
         '''
         joint_constraints = []
 
@@ -106,20 +107,20 @@ class HierarchicalNode:
             # Wrap child publication constraints with adjusted indices
             start = 0
             for child in self.children:
-                end = start + vectors_length
                 for constraint in child.constraints:
-                    joint_constraints.append(
-                        lambda joint_array, s=start, e=end, c=constraint:
-                            c({i - s: joint_array[i] for i in range(s, e)})
-                    )
-                start = end
+                    joint_constraints.append(constraint.offset(start))
+                start += vectors_length
 
             # Add consistency constraints: parent value at each index = sum of child values at that index
             for index in range(vectors_length):
                 indices_to_sum = [index + i * vectors_length for i in range(num_children)]
                 joint_constraints.append(
-                    lambda joint_array, idxs=indices_to_sum, value=self.contingency_vector[index]:
-                        sum(joint_array[j] for j in idxs) == value
+                    SparseRow(
+                        indices=np.array(indices_to_sum, dtype=np.uint32),
+                        coefs=np.ones(len(indices_to_sum), dtype=np.uint8),
+                        sense='=',
+                        rhs=float(self.contingency_vector[index])
+                    )
                 )
 
         return joint_constraints

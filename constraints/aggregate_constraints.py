@@ -1,48 +1,36 @@
+import pandas as pd
 import numpy as np
-from functools import partial
-from typing import Callable, List
 
 from .logical_expressions import LogicalExpression
-from constraints.constraint import Constraint
+from constraints.constraint import Constraint, SparseRow
 from abc import ABC
 
+
 class AggregateConstraint(Constraint, ABC):
-    """
-    Base class for all aggregate constraints. Provides the interface.
-    """
+    '''Base class for all aggregate constraints.
+
+    An aggregate constraint enforces that the sum of contingency cells
+    satisfying a logical expression equals a target value.
+    '''
+
     def __init__(self, expression: LogicalExpression, value: int) -> None:
-        """
-        Constructor of an AggregateConstraint.
+        '''Initialize an aggregate constraint.
+
         Args:
-            expression (LogicalConstraint): A logical constraint to aggregate over.
-            value (int, optional): A static value for the aggregate constraint.
-        """
+            expression (LogicalExpression): A logical expression to aggregate over.
+            value (int): The target sum value for cells satisfying the expression.
+        '''
         self.expression = expression
         self.value = value
 
+
 class SumEqual(AggregateConstraint):
-    """Represents a sum equality constraint: Sum(expression) == value"""
+    '''Represents a sum equality constraint: Sum(expression) == value'''
 
-    @staticmethod
-    def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
-        """Check that the sum of selected indices in the contingency variable equals a target value.
-
-        Args:
-            contingency_var: A Pyomo Var/dict indexed by cell index.
-            sum_val (int): The expected sum of the selected elements.
-            indices (List[int]): Indices in contingency_var whose values will be summed.
-        Returns:
-            bool: True if the sum of the selected elements equals sum_val, otherwise False.
-        """
-
-        return sum(contingency_var[i] for i in indices) == sum_val
-
-    def to_constraint(self, domain) -> Callable:
-        # Reduce to a boolean mask over the cells, then take the selected indices.
+    def to_sparse_row(self, domain) -> SparseRow:
         reduced_mask = self.expression.reduce(domain)
-        indices = np.flatnonzero(reduced_mask).tolist()
-        # Return a function that checks if the sum of the contingency variable equals the value
-        return partial(SumEqual.check_sum, sum_val=self.value, indices=indices)
-    
-# NOTE: Add more aggregate expressions as needed
+        indices = np.asarray(np.flatnonzero(reduced_mask), dtype=np.uint32)
+        coefs = np.ones_like(indices, dtype=np.uint8)
+        return SparseRow(indices=indices, coefs=coefs, sense='=', rhs=float(self.value))
 
+# NOTE: Add more aggregate expressions as needed

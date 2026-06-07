@@ -189,7 +189,8 @@ class TopDown():
                     queue.append(child)
 
         self.data_handler.cleanup_spill()
-        print(f'{time.time() - t1:.2f} seconds.\n')
+        elapsed_time = time.time() - t1
+        print(f'Estimation phase completed in {elapsed_time:.2f} seconds.\n')
     
     def estimation_phase_dfs(self) -> None:
         '''Perform the estimation phase using depth-first traversal.
@@ -207,7 +208,8 @@ class TopDown():
 
         self._dfs_process_children(root)
         self.data_handler.cleanup_spill()
-        print(f'{time.time() - t1:.2f} seconds.\n')
+        elapsed_time = time.time() - t1
+        print(f'Estimation phase completed in {elapsed_time:.2f} seconds.\n')
 
     def _dfs_process_children(self, node) -> None:
         '''Recursively process children using DFS.
@@ -275,7 +277,10 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
-        print(f'  Estimating node {node.id} individually...', end=' ')
+        n_vars = len(node.contingency_vector)
+        n_constraints = len(node.constraints)
+        print(f'    [Node {node.id}] Solving individually...')
+        print(f'      [Problem size] {n_vars} variables, {n_constraints} constraints')
 
         t1 = time.time()
         x_tilde = self.optimizer.non_negative_real_estimation(
@@ -285,6 +290,7 @@ class TopDown():
             query_matrix=self.Q
         )
         non_neg_time = time.time() - t1
+        print(f'      [Real estimation] {non_neg_time:.2f}s')
 
         t1 = time.time()
         node.contingency_vector = self.optimizer.rounding_estimation(
@@ -293,8 +299,8 @@ class TopDown():
             constraints=node.constraints
         )
         rounding_time = time.time() - t1
-
-        print(f'non negative {non_neg_time:.1f}s - rounding {rounding_time:.1f}s')
+        print(f'      [Rounding] {rounding_time:.2f}s')
+        print(f'      [DONE] {non_neg_time + rounding_time:.2f}s total')
 
     def _estimate_and_update_children(self, node) -> None:
         '''Solve optimization for a node considering its children and update their vectors.
@@ -302,10 +308,14 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
-        print(f'  Estimating node {node.id} with children...', end=' ')
+        n_children = len(node.children)
+        print(f'    [Node {node.id}] Solving with {n_children} children...')
 
         joint_contingency_vector = node.combine_child_vectors()
         constraints = node.combine_child_constraints()
+        n_vars = len(joint_contingency_vector)
+        n_constraints = len(constraints)
+        print(f'      [Problem size] {n_vars} variables, {n_constraints} constraints')
 
         t1 = time.time()
         x_tilde = self.optimizer.non_negative_real_estimation(
@@ -315,6 +325,7 @@ class TopDown():
             query_matrix=self.Q
         )
         non_neg_time = time.time() - t1
+        print(f'      [Real estimation] {non_neg_time:.2f}s')
 
         t1 = time.time()
         joint_solution = self.optimizer.rounding_estimation(
@@ -323,10 +334,10 @@ class TopDown():
             constraints=constraints
         )
         rounding_time = time.time() - t1
+        print(f'      [Rounding] {rounding_time:.2f}s')
 
         node.update_child_vectors(joint_solution)
-
-        print(f'non negative {non_neg_time:.1f}s - rounding {rounding_time:.1f}s')
+        print(f'      [DONE] {non_neg_time + rounding_time:.2f}s total (updated {n_children} children)')
   
     def _check_correctness_node(self, node) -> None:
         '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.

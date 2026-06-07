@@ -1,81 +1,83 @@
-import numpy as np
 import pandas as pd
-from functools import partial
-from typing import Callable, List
+import numpy as np
+from typing import Callable
 
 from constraints.logical_expressions.base import LogicalExpression
+from constraints.constraint import SparseRow
 from .aggregate_constraints import AggregateConstraint
 
 from abc import ABC
 
 class ContextualAggregateConstraint(AggregateConstraint, ABC):
-    """
-    Base class for all contextual aggregate constraints. Provides the interface.
+    '''Base class for contextual aggregate constraints.
 
-    A contextual aggregate constraint is an aggregate constraint that depends on the context
-    of the hierarchical node in which it is applied. This means that the constraint may vary
-    based on the data subset represented by the node.
+    A contextual aggregate constraint depends on the data subset (context) of the
+    hierarchical node in which it is applied. The constraint value is dynamically
+    calculated based on the filtered DataFrame at evaluation time, rather than being
+    known in advance.
+    '''
 
-    That means that the value of the constraint can be dynamically calculated based on the
-    DataFrame associated with the node's context.
-    """
     def __init__(self, expression: LogicalExpression, aggregation_function: Callable[[pd.DataFrame], int]) -> None:
-        """
-        Constructor of a ContextualAggregateConstraint.
+        '''Initialize a contextual aggregate constraint.
+
         Args:
             expression (LogicalExpression): A logical expression to aggregate over.
-            aggregation_function (Callable[[pd.DataFrame], int], optional): A function 
-                to calculate the value dynamically using the node's DataFrame. Defaults to None.
-        """
-        # We initialize the base AggregateConstraint with a placeholder value (-1).
-        # It will be changed later when we apply the aggregation function at runtime. 
+            aggregation_function (Callable[[pd.DataFrame], int]): A function that takes
+                the filtered DataFrame and returns the computed constraint value.
+        '''
+        # Initialize with placeholder value; will be replaced when aggregation function is applied
         super().__init__(expression=expression, value=-1)
         self.aggregation_function = aggregation_function
-        
+
     def apply_aggregation_function(self, contextualized_df: pd.DataFrame) -> int:
-        """Calculate the value for the aggregate expression.
+        '''Compute the constraint value based on the filtered DataFrame.
+
+        Called during data materialization to compute context-dependent constraint values.
 
         Args:
-            contingency_df (pd.DataFrame): The DataFrame to use for calculation.
+            contextualized_df (pd.DataFrame): The filtered DataFrame for this node's context.
+
         Returns:
-            int: The calculated value.
-        """
-        if self.aggregation_function is not None:
-            self.value = self.aggregation_function(contextualized_df)
-            return self.value
-        else:
+            int: The computed constraint value.
+
+        Raises:
+            ValueError: If no aggregation function was provided.
+        '''
+        if self.aggregation_function is None:
             raise ValueError("No aggregation_function provided to compute the value.")
-        
+        self.value = self.aggregation_function(contextualized_df)
+        return self.value
+
 
 class SumEqualRealTotal(ContextualAggregateConstraint):
-    """Convenience class for the user to easily set the Real Total constraint."""
+    '''Constraint that sums to the total count of records in the node's context.
+
+    Used to enforce that the sum of cells satisfying an expression equals
+    the total number of records in the filtered dataset. This is a convenience
+    class that pre-defines the aggregation function.
+    '''
+
     def __init__(self, expression: LogicalExpression) -> None:
-
-        # Function to calculate the real total from the DataFrame
-        get_real_total = lambda df: len(df)
-        
-        # The true total is the count of rows in the node's context
-        super().__init__(expression=expression, aggregation_function=get_real_total)
-
-    @staticmethod
-    def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
-        """Check that the sum of selected indices in the contingency variable equals a target value.
+        '''Initialize the Real Total constraint.
 
         Args:
-            contingency_var: A Pyomo Var/dict indexed by cell index.
-            sum_val (int): The expected sum of the selected elements.
-            indices (List[int]): Indices in contingency_var whose values will be summed.
+            expression (LogicalExpression): The expression whose cells must sum to the total count.
+        '''
+        super().__init__(expression=expression, aggregation_function=lambda df: len(df))
+
+    def to_sparse_row(self, domain) -> SparseRow:
+        '''Convert to SparseRow: sum of selected cells == total record count.
+
+        Args:
+            domain: ContingencyDomain used as the cell space for evaluation.
+
         Returns:
-            bool: True if the sum of the selected elements equals sum_val, otherwise False.
-        """
-        return sum(contingency_var[i] for i in indices) == sum_val
-
-    def to_constraint(self, domain):
-        # Reduce to a boolean mask over the cells, then take the selected indices.
+            SparseRow: Sparse linear constraint with sense='=' and rhs=self.value,
+                      containing indices where the expression is True.
+        '''
         reduced_mask = self.expression.reduce(domain)
-        indices = np.flatnonzero(reduced_mask).tolist()
-        # Return a function that checks if the sum of the contingency variable equals the value
-        return partial(SumEqualRealTotal.check_sum, sum_val=self.value, indices=indices)
-    
-# NOTE: Add more aggregate expressions as needed
+        indices = np.asarray(np.flatnonzero(reduced_mask), dtype=np.uint32)
+        coefs = np.ones_like(indices, dtype=np.uint8)
+        return SparseRow(indices=indices, coefs=coefs, sense='=', rhs=float(self.value))
 
+# NOTE: Add more aggregate expressions as needed

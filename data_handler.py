@@ -362,7 +362,7 @@ class DataHandler:
                 case ContextualAggregateConstraint():
                     constraint.apply_aggregation_function(filtered_df)
 
-            # Convert to optimizer callable against the contingency domain
-            level_constraints.append(constraint.to_constraint(self.contingency_domain))
+            # Convert to sparse row representation against the contingency domain
+            level_constraints.append(constraint.to_sparse_row(self.contingency_domain))
 
         return contingency_vector, level_constraints

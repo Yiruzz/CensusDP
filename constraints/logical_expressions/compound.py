@@ -6,7 +6,7 @@ from .base import LogicalExpression
 
 
 class CompoundExpression(LogicalExpression, ABC):
-    """Abstract class for expression combining other expressions."""
+    '''Abstract class for expression combining other expressions.'''
 
     def __init__(self, expressions: List[LogicalExpression]):
         for arg in expressions:
@@ -23,7 +23,7 @@ class CompoundExpression(LogicalExpression, ABC):
 
 class NaryExpression(CompoundExpression, ABC):
     '''Class for n-ary logical expressions. (Or, And)
-    
+
     Constructor recieves a variable number of LogicalConstraint arguments.
     '''
     def __init__(self, *args: LogicalExpression):

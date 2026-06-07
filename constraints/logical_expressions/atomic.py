@@ -6,10 +6,10 @@ from .base import LogicalExpression
 
 
 class AtomicExpression(LogicalExpression, ABC):
-    """Base class for simple comparison expressions (leaf nodes).
+    '''Base class for simple comparison expressions (leaf nodes).
 
     Subclasses should implement `reduce` to return a boolean np.ndarray.
-    """
+    '''
     def __init__(self, variable_id: str, value: Any) -> None:
         self.variable_id = variable_id
         self.value = value
