@@ -63,7 +63,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool, travers
 
     # Set the solver to use and its options
     SOLVER_NAME = 'gurobi'
-    OPT_PATH = None  # Path to the solver executable if needed, for example: /opt/gurobi/gurobi910/linux64/bin/gurobi_cl
 
     # Define solver-specific options
     if SOLVER_NAME == 'gurobi':
@@ -106,7 +105,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool, travers
         out_path=OUTPUT_PATH+OUTPUT_FILE,
         solver_name=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
-        optimizer_path=OPT_PATH,
         traversal_method=traversal_method
     )
 

@@ -23,9 +23,7 @@ class TopDown():
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism,
                  out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
-                 solver_options: dict = None, optimizer_path: str = None,
-                 traversal_method: str = 'bfs',
-                 domain: Optional[Dict[str, List]] = None) -> None:
+                 solver_options: dict = {}, traversal_method: str = 'bfs', domain: Optional[Dict[str, List]] = None) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -38,7 +36,6 @@ class TopDown():
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
             solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
-            optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
             traversal_method (str): Tree traversal method for estimation phase: 'bfs' or 'dfs'. Defaults to 'bfs'.
                 DFS is the most natural for resource savings (one root-to-leaf branch resident at a time).
             domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
@@ -84,14 +81,7 @@ class TopDown():
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
-        if solver_options is None:
-            solver_options = {}
-
-        self.optimizer: OptimizationModel = OptimizationModel(
-            solver_name=solver_name,
-            solver_options=solver_options,
-            optimizer_path=optimizer_path
-        )
+        self.optimizer: OptimizationModel = OptimizationModel(solver_name=solver_name, solver_options=solver_options)
 
         self.traversal_method: str = traversal_method
         

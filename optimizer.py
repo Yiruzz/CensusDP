@@ -15,17 +15,12 @@ class OptimizationModel:
     by writing them to Gurobi LP format and solving with Gurobi.
     '''
 
-    def __init__(self, solver_name: str = 'gurobi', solver_options: Optional[dict] = None, optimizer_path: Optional[str] = None, debug: bool = False) -> None:
+    def __init__(self, solver_name: str = 'gurobi', solver_options: Optional[dict] = None) -> None:
         '''Initialize the optimization model.
 
         Args:
             solver_name (str): Solver to use (must be 'gurobi').
             solver_options (Optional[dict]): Parameters to pass to Gurobi (e.g., TimeLimit, MIPGap).
-            optimizer_path (Optional[str]): Unused; kept for API compatibility.
-            debug (bool): Unused; kept for API compatibility.
-
-        Raises:
-            ValueError: If solver_name is not 'gurobi'.
         '''
         if solver_name != 'gurobi':
             raise ValueError(f"This OptimizationModel only supports 'gurobi'; got {solver_name!r}.")
