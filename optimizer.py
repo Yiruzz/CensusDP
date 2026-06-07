@@ -328,14 +328,25 @@ def _write_non_negative_real_estimation_lp(path: str, query_matrix: sp.csr_matri
     # Objective                                                          #
     # ------------------------------------------------------------------ #
 
-    # Precompute nonzero column indices for each query row
+    # Precompute nonzero column indices for each query row directly from CSR structure
     # (identifies which cells have nonzero query coefficients per query)
-    nonzero_indices_per_row = [query_matrix.getrow(r).nonzero()[1] for r in range(num_queries)]
+    nonzero_indices_per_row = [query_matrix.indices[query_matrix.indptr[r]:query_matrix.indptr[r+1]]
+                               for r in range(num_queries)]
 
     # Identify query rows with multiple nonzero coefficients
     # These rows need auxiliary variables to linearize the quadratic terms
     multi_rows = [r for r in range(num_queries) if len(nonzero_indices_per_row[r]) > 1]
     multi_row_set = set(multi_rows)
+
+    # Precalculate coefficients and coefficient pairs for each row (one-time cost)
+    row_coeffs = {}          # For single-element lookup: row_coeffs[r][cell_idx]
+    row_coeffs_list = {}     # For iteration: row_coeffs_list[r] = [(coef, idx), ...]
+    for r in range(num_queries):
+        row_start, row_end = query_matrix.indptr[r], query_matrix.indptr[r+1]
+        nz_indices = nonzero_indices_per_row[r]
+        coeffs = query_matrix.data[row_start:row_end]
+        row_coeffs[r] = dict(zip(nz_indices, coeffs))
+        row_coeffs_list[r] = list(zip(coeffs, nz_indices))
 
     # Open file in write mode to construct the LP model
     with open(path, 'w') as f:
@@ -361,7 +372,7 @@ def _write_non_negative_real_estimation_lp(path: str, query_matrix: sp.csr_matri
                 if query_idx not in multi_row_set:
                     # Get the single nonzero column index and its coefficient
                     cell_idx = int(nonzero_indices[0])
-                    coefficient = float(query_matrix[query_idx, cell_idx])
+                    coefficient = float(row_coeffs[query_idx][cell_idx])
                     # Form variable name using child and cell indices
                     x_variable = f'x_{child_idx * num_cells + cell_idx}'
 
@@ -439,10 +450,8 @@ def _write_non_negative_real_estimation_lp(path: str, query_matrix: sp.csr_matri
         # Constraint form: sum_j Q[query_idx,j] * x_{child_idx*num_cells+j} - q_{child_idx}_{query_idx} = 0
         auxiliary_constraint_count = 0
         for query_idx in multi_rows:
-            # Convert to COO (coordinate) format for efficient iteration
-            # over non-zero coefficients in this query row
-            row_coo = query_matrix.getrow(query_idx).tocoo()
-            coefficient_pairs = list(zip(row_coo.col, row_coo.data))
+            # Get coefficient pairs from precalculated list (already computed, O(1) lookup)
+            coefficient_pairs = row_coeffs_list[query_idx]
             # Create one constraint for each (query, child) pair
             for child_idx in range(num_children):
                 constraint_name = f'AuxLink_{child_idx}_{query_idx}'
