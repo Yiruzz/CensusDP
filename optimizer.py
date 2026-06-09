@@ -6,7 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 import gurobipy as gp
 
-from constraints.constraint import SparseRow
+from constraints.constraint import SparseConstraint
 
 class OptimizationModel:
     '''LP-based optimization model builder for census DP problems.
@@ -35,7 +35,7 @@ class OptimizationModel:
                 pass  # parameter is model-only; re-applied per model below
         self.env.start()
 
-    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, node_id: int, constraints: List[SparseRow], query_matrix: sp.csr_matrix) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, node_id: int, constraints: List[SparseConstraint], query_matrix: sp.csr_matrix) -> np.ndarray:
         '''Estimate non-negative values minimizing squared error to measurements.
 
         Solves: minimize ||Q*x - y||^2 subject to user-defined constraints and x >= 0.
@@ -43,7 +43,7 @@ class OptimizationModel:
         Args:
             noisy_measurements (np.ndarray): Noisy measurement vector y (length n_queries * n_children).
             node_id (int): Node identifier for logging/debugging.
-            constraints (List[SparseRow]): User-defined constraints on x variables.
+            constraints (List[SparseConstraint]): User-defined constraints on x variables.
             query_matrix (sp.csr_matrix): Query matrix Q (n_queries x n_cells).
 
         Returns:
@@ -62,7 +62,7 @@ class OptimizationModel:
         finally:
             _safe_delete_file(path)
 
-    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseRow]) -> np.ndarray:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint]) -> np.ndarray:
         '''Round a continuous solution to binary (0/1) values via quadratic optimization.
 
         Finds binary values y that minimize Euclidean distance to the rounded solution
@@ -82,7 +82,7 @@ class OptimizationModel:
         Args:
             x_tilde (np.ndarray): Continuous solution to round (length n).
             node_id (int): Node identifier for logging and error messages.
-            constraints (List[SparseRow]): Constraints on binary variables.
+            constraints (List[SparseConstraint]): Constraints on binary variables.
 
         Returns:
             np.ndarray: Binary solution x_final = floor(x_tilde) + y_optimal.
@@ -264,14 +264,14 @@ def _format_coefficient_term(coef: float, var: str) -> str:
         return f'+ {coef:.17g} {var}'
     return f'- {-coef:.17g} {var}'
 
-def _write_constraints(file: IO, constraint: SparseRow, var_prefix: str, name: str) -> None:
+def _write_constraints(file: IO, constraint: SparseConstraint, var_prefix: str, name: str) -> None:
     '''Write a constraint to LP format.
 
-    Formats and writes a single constraint from a SparseRow to the LP file.
+    Formats and writes a single constraint from a SparseConstraint to the LP file.
 
     Args:
         file (IO): Open file object to write to.
-        constraint (SparseRow): Constraint with indices, coefs, sense, and rhs attributes.
+        constraint (SparseConstraint): Constraint with indices, coefs, sense, and rhs attributes.
         var_prefix (str): Prefix for variable names (e.g., 'x', 'y').
         name (str): Name/label of the constraint.
     '''
@@ -301,7 +301,7 @@ def _write_constraints(file: IO, constraint: SparseRow, var_prefix: str, name: s
 
 def _write_non_negative_real_estimation_lp(path: str, query_matrix: sp.csr_matrix, noisy_measurements: np.ndarray,
                                             num_queries: int, num_children: int, num_cells: int,
-                                            constraints: List[SparseRow]) -> None:
+                                            constraints: List[SparseConstraint]) -> None:
     '''Write a non-negative real estimation problem to an LP format file.
 
     Constructs and writes a Gurobi LP model that minimizes ||Q*x - y||^2
@@ -314,7 +314,7 @@ def _write_non_negative_real_estimation_lp(path: str, query_matrix: sp.csr_matri
         num_queries (int): Number of queries.
         num_children (int): Number of children (data subsets).
         num_cells (int): Number of cells per query.
-        constraints (List[SparseRow]): User-defined constraints over x variables.
+        constraints (List[SparseConstraint]): User-defined constraints over x variables.
     '''
     # Total number of x variables: x_{0}, x_{1}, ..., x_{num_x_variables-1}
     num_x_variables = num_children * num_cells
@@ -502,7 +502,7 @@ def _write_non_negative_real_estimation_lp(path: str, query_matrix: sp.csr_matri
         # Write "End" to mark the end of the LP file
         f.write('End\n')
     
-def _write_binary_rounding_lp(path: str, linear_coefficients: np.ndarray, floor_values: np.ndarray, constraints: List[SparseRow], num_variables: int) -> None:
+def _write_binary_rounding_lp(path: str, linear_coefficients: np.ndarray, floor_values: np.ndarray, constraints: List[SparseConstraint], num_variables: int) -> None:
     '''Write a rounding/binary estimation problem to an LP format file.
 
     Creates a model for rounding a continuous solution x_tilde to binary.
@@ -511,7 +511,7 @@ def _write_binary_rounding_lp(path: str, linear_coefficients: np.ndarray, floor_
         path (str): Path to the output LP file.
         linear_coefficients (np.ndarray): Linear coefficients for objective (1.0 - 2.0 * residual).
         floor_values (np.ndarray): Floor values of continuous solution.
-        constraints (List[SparseRow]): Original constraints adjusted for binary variables.
+        constraints (List[SparseConstraint]): Original constraints adjusted for binary variables.
         num_variables (int): Number of binary variables.
     '''
     with open(path, 'w') as f:
@@ -557,7 +557,7 @@ def _write_binary_rounding_lp(path: str, linear_coefficients: np.ndarray, floor_
             # Calculate the shift: sum of coef[i] * floor_values[i]
             rhs_shift = float(np.dot(constraint_row.coefs, floor_values[constraint_row.indices]))
             # Create shifted constraint with adjusted RHS
-            shifted_constraint = SparseRow(indices=constraint_row.indices, coefs=constraint_row.coefs,
+            shifted_constraint = SparseConstraint(indices=constraint_row.indices, coefs=constraint_row.coefs,
                                           sense=constraint_row.sense, rhs=constraint_row.rhs - rhs_shift)
             _write_constraints(f, shifted_constraint, var_prefix='y', name=f'r_{constraint_idx}')
 

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 from .logical_expressions import LogicalExpression
-from constraints.constraint import Constraint, SparseRow
+from constraints.constraint import Constraint, SparseConstraint
 from abc import ABC
 
 
@@ -27,10 +27,10 @@ class AggregateConstraint(Constraint, ABC):
 class SumEqual(AggregateConstraint):
     '''Represents a sum equality constraint: Sum(expression) == value'''
 
-    def to_sparse_row(self, domain) -> SparseRow:
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
         reduced_mask = self.expression.reduce(domain)
         indices = np.asarray(np.flatnonzero(reduced_mask), dtype=np.uint32)
         coefs = np.ones_like(indices, dtype=np.uint8)
-        return SparseRow(indices=indices, coefs=coefs, sense='=', rhs=float(self.value))
+        return SparseConstraint(indices=indices, coefs=coefs, sense='=', rhs=float(self.value))
 
 # NOTE: Add more aggregate expressions as needed

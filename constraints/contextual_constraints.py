@@ -3,7 +3,7 @@ import numpy as np
 from typing import Callable
 
 from constraints.logical_expressions.base import LogicalExpression
-from constraints.constraint import SparseRow
+from constraints.constraint import SparseConstraint
 from .aggregate_constraints import AggregateConstraint
 
 from abc import ABC
@@ -65,19 +65,19 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         '''
         super().__init__(expression=expression, aggregation_function=lambda df: len(df))
 
-    def to_sparse_row(self, domain) -> SparseRow:
-        '''Convert to SparseRow: sum of selected cells == total record count.
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        '''Convert to SparseConstraint: sum of selected cells == total record count.
 
         Args:
             domain: ContingencyDomain used as the cell space for evaluation.
 
         Returns:
-            SparseRow: Sparse linear constraint with sense='=' and rhs=self.value,
+            SparseConstraint: Sparse linear constraint with sense='=' and rhs=self.value,
                       containing indices where the expression is True.
         '''
         reduced_mask = self.expression.reduce(domain)
         indices = np.asarray(np.flatnonzero(reduced_mask), dtype=np.uint32)
         coefs = np.ones_like(indices, dtype=np.uint8)
-        return SparseRow(indices=indices, coefs=coefs, sense='=', rhs=float(self.value))
+        return SparseConstraint(indices=indices, coefs=coefs, sense='=', rhs=float(self.value))
 
 # NOTE: Add more aggregate expressions as needed

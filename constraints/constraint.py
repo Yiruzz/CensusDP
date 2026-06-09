@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 
 @dataclass(frozen=True)
-class SparseRow:
+class SparseConstraint:
     '''Sparse linear constraint representation for LP/optimization.
 
     Encodes a linear constraint over contingency cells in a compact format
@@ -20,7 +20,7 @@ class SparseRow:
     sense: str
     rhs: float
 
-    def offset(self, k: int) -> "SparseRow":
+    def offset(self, k: int) -> "SparseConstraint":
         '''Adjust all indices by an offset k (for combining child constraints).
 
         Used when concatenating contingency vectors from multiple children.
@@ -30,26 +30,26 @@ class SparseRow:
             k (int): Offset to add to all indices.
 
         Returns:
-            SparseRow: New SparseRow with adjusted indices (indices + k).
+            SparseConstraint: New SparseConstraint with adjusted indices (indices + k).
         '''
-        return SparseRow(indices=self.indices + int(k), coefs=self.coefs, sense=self.sense, rhs=self.rhs)
+        return SparseConstraint(indices=self.indices + int(k), coefs=self.coefs, sense=self.sense, rhs=self.rhs)
 
 
 class Constraint(ABC):
     '''Base interface for all constraints.
 
-    Implementations must provide `to_sparse_row(domain)` which returns a
-    SparseRow consumed by the optimizer when it writes the LP file.
+    Implementations must provide `to_sparse_constraint(domain)` which returns a
+    SparseConstraint consumed by the optimizer when it writes the LP file.
     '''
 
     @abstractmethod
-    def to_sparse_row(self, domain) -> SparseRow:
-        '''Convert the constraint into a SparseRow over the given domain.
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        '''Convert the constraint into a SparseConstraint over the given domain.
 
         Args:
             domain: ContingencyDomain used as the cell space for evaluation.
 
         Returns:
-            SparseRow: Sparse linear representation consumed by the optimizer.
+            SparseConstraint: Sparse linear representation consumed by the optimizer.
         '''
         raise NotImplementedError()

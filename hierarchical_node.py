@@ -1,7 +1,7 @@
 import numpy as np
 
 from typing import List, Optional
-from constraints.constraint import SparseRow
+from constraints.constraint import SparseConstraint
 
 class HierarchicalNode:
     '''Represents a node in a hierarchical tree structure.
@@ -34,7 +34,7 @@ class HierarchicalNode:
             level (int): Level where the node is located.
 
             contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
-            constraints (Optional[List[SparseRow]]): List of sparse row constraints for this node.
+            constraints (Optional[List[SparseConstraint]]): List of sparse constraint constraints for this node.
         '''
         self.id: Optional[int] = None
         self.geo_id: int = geo_id
@@ -46,7 +46,7 @@ class HierarchicalNode:
         self.level: int = level
 
         self.contingency_vector: Optional[np.ndarray] = None
-        self.constraints: Optional[List[SparseRow]] = None
+        self.constraints: Optional[List[SparseConstraint]] = None
 
     def add_child(self, child_node: 'HierarchicalNode') -> None:
         '''Add a child node to this node.
@@ -88,14 +88,14 @@ class HierarchicalNode:
 
         return np.concatenate([child.contingency_vector for child in self.children])
     
-    def combine_child_constraints(self) -> List[SparseRow]:
+    def combine_child_constraints(self) -> List[SparseConstraint]:
         '''Combine all child constraints into a single list with adjusted indices.
 
         Each child constraint is adapted to work with the flattened joint vector.
         Consistency constraints ensure parent value = sum of child values at each index.
 
         Returns:
-            List[SparseRow]: Constraints callable with all indices adjusted to joint vector.
+            List[SparseConstraint]: Constraints callable with all indices adjusted to joint vector.
                             Empty list if this node is a leaf.
         '''
         joint_constraints = []
@@ -115,7 +115,7 @@ class HierarchicalNode:
             for index in range(vectors_length):
                 indices_to_sum = [index + i * vectors_length for i in range(num_children)]
                 joint_constraints.append(
-                    SparseRow(
+                    SparseConstraint(
                         indices=np.array(indices_to_sum, dtype=np.uint32),
                         coefs=np.ones(len(indices_to_sum), dtype=np.uint8),
                         sense='=',
