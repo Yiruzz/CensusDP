@@ -237,18 +237,20 @@ class DataHandler:
         name = '_'.join(str(p) for p in node.hierarchical_path)
         for ch in ('/', '\\', ' ', ':'):
             name = name.replace(ch, '_')
-        return os.path.join(self.spill_dir, name + '.npy')
+        return os.path.join(self.spill_dir, name + '.npz')
 
     def spill_vector(self, node: HierarchicalNode) -> None:
         '''Write node.contingency_vector to disk and free it from RAM.
 
-        One file per node, named by its hierarchical_path, ensuring sibling nodes don't conflict.
+        The vector is the estimated sparse cell-count column (CSC), serialized with
+        scipy's sparse .npz format. One file per node, named by its hierarchical_path,
+        ensuring sibling nodes don't conflict.
 
         Args:
             node (HierarchicalNode): The node whose contingency vector should be spilled.
         '''
         os.makedirs(self.spill_dir, exist_ok=True)
-        np.save(self._spill_path(node), np.ascontiguousarray(node.contingency_vector))
+        sp.save_npz(self._spill_path(node), node.contingency_vector)
         node.contingency_vector = None
         node.constraints = None
 
@@ -258,7 +260,7 @@ class DataHandler:
         Args:
             node (HierarchicalNode): The node whose contingency vector should be reloaded.
         '''
-        node.contingency_vector = np.load(self._spill_path(node))
+        node.contingency_vector = sp.load_npz(self._spill_path(node))
         os.remove(self._spill_path(node))
 
     def cleanup_spill(self) -> None:
@@ -284,15 +286,15 @@ class DataHandler:
         if node.contingency_vector is None:
             raise ValueError("Node contingency vector is not materialized.")
 
-        # After estimation, the node's vector holds the estimated cell counts x_hat
-        # (length n_cells). Select only positive frequencies.
+        # After estimation, the node's vector is the estimated cell counts x_hat as a
+        # sparse CSC column (n_cells, 1) storing only positive cells.
         contingency_vector = node.contingency_vector
-        nonzero_idx = np.flatnonzero(contingency_vector > 0)
+        nonzero_idx = contingency_vector.indices
+        filtered_counts = contingency_vector.data
 
         # Decode only the nonzero cells into their attribute combinations,
         # avoiding any full (n_cells x k) combination table.
         filtered_query_values = domain.decode(nonzero_idx)
-        filtered_counts = contingency_vector[nonzero_idx]
 
         # Repeat each combination according to its frequency.
         expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)

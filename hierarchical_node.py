@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.sparse as sp
 
 from typing import Callable, List, Optional, Any
 
@@ -31,7 +32,10 @@ class HierarchicalNode:
                                            Used to filter the dataframe to get this node's data subset.
             level (int): Level where the node is located.
 
-            contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
+            contingency_vector: Node's contingency vector, None when not materialized or freed.
+                Has two lifecycle states: a dense np.ndarray noisy measurement (query space)
+                right after materialization, then a sparse scipy CSC column of estimated cell
+                counts (cell space) after the node is solved. 
             constraints (Optional[List[Callable]]): List of constraints for this node.
         '''
         self.geo_id: int = geo_id
@@ -91,6 +95,11 @@ class HierarchicalNode:
         Each child constraint is adapted to work with the flattened joint vector.
         Consistency constraints ensure parent value = sum of child values at each index.
 
+        The parent vector is a sparse CSC column vector, so consistency constraints are
+        emitted only for its non-zero cells (its support). Cells where the parent is 0 need
+        no constraint: the optimizer does not create child variables there, so they are
+        structurally 0 and the consistency sum(children) == 0 holds automatically.
+
         Returns:
             List[Callable]: Constraints callable with all indices adjusted to joint vector.
                            Empty list if this node is a leaf.
@@ -98,10 +107,12 @@ class HierarchicalNode:
         joint_constraints = []
 
         if not self.is_leaf():
-            vectors_length = len(self.contingency_vector)
+            vectors_length = self.contingency_vector.shape[0]
             num_children = len(self.children)
 
-            # Wrap child publication constraints with adjusted indices
+            # Wrap child publication constraints with adjusted indices. The optimizer passes a
+            # pruned view that reads 0 for cells it did not instantiate, so building the
+            # per-child index dict over the full range is safe.
             start = 0
             for child in self.children:
                 end = start + vectors_length
@@ -112,34 +123,53 @@ class HierarchicalNode:
                     )
                 start = end
 
-            # Add consistency constraints: parent value at each index = sum of child values at that index
-            for index in range(vectors_length):
+            # Consistency constraints only on the parent's support: parent value at each
+            # non-zero cell = sum of child values at that cell.
+            parent = self.contingency_vector
+            for index, value in zip(parent.indices, parent.data):
+                index = int(index)
                 indices_to_sum = [index + i * vectors_length for i in range(num_children)]
                 joint_constraints.append(
-                    lambda joint_array, idxs=indices_to_sum, value=self.contingency_vector[index]:
+                    lambda joint_array, idxs=indices_to_sum, value=int(value):
                         sum(joint_array[j] for j in idxs) == value
                 )
 
         return joint_constraints
     
-    def update_child_vectors(self, joint_solution: np.ndarray) -> None:
+    def update_child_vectors(self, joint_solution: sp.csc_matrix) -> None:
         '''Distribute the joint solution back to individual child contingency vectors.
 
         Args:
-            joint_solution (np.ndarray): Concatenated solution from optimization,
-                                        with one child's vector after another.
+            joint_solution (sp.csc_matrix): Concatenated sparse solution from optimization,
+                shape (num_children * n_cells, 1), with one child's cell block after another.
         '''
         if not self.is_leaf():
-            vectors_length = len(self.contingency_vector)
+            vectors_length = self.contingency_vector.shape[0]
+            rows = joint_solution.indices
+            data = joint_solution.data
             start = 0
             for child in self.children:
                 end = start + vectors_length
-                child.contingency_vector = joint_solution[start:end]
+                mask = (rows >= start) & (rows < end)
+                child_rows = rows[mask] - start
+                child_data = data[mask]
+                child.contingency_vector = sp.csc_matrix(
+                    (child_data, (child_rows, np.zeros(len(child_rows), dtype=np.int64))),
+                    shape=(vectors_length, 1),
+                    dtype=joint_solution.dtype,
+                )
+                child.contingency_vector.eliminate_zeros()
                 start = end
     
     def __str__(self) -> str:
         '''Return a detailed string representation of the node with key attributes.'''
-        has_contingency = self.contingency_vector is not None and len(self.contingency_vector) > 0
+        cv = self.contingency_vector
+        if cv is None:
+            has_contingency = False
+        elif hasattr(cv, 'nnz'):  # sparse cell-count vector (estimated state)
+            has_contingency = cv.nnz > 0
+        else:  # dense noisy measurement vector (pre-estimation state)
+            has_contingency = cv.size > 0
         has_constraints = self.constraints is not None and len(self.constraints) > 0
         path = " -> ".join(str(x) for x in self.hierarchical_path)
 

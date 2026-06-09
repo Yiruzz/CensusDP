@@ -307,12 +307,21 @@ class TopDown():
         joint_contingency_vector = node.combine_child_vectors()
         constraints = node.combine_child_constraints()
 
+        # Cells where the parent is non-zero. By non-negativity + consistency, children can only 
+        # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j} 
+        # so the optimizers instantiate variables only there.
+        support = node.contingency_vector.indices
+        n_cells = node.contingency_vector.shape[0]
+        n_joint = len(node.children) * n_cells
+        active = [k * n_cells + int(j) for k in range(len(node.children)) for j in support]
+
         t1 = time.time()
         x_tilde = self.optimizer.non_negative_real_estimation(
             noisy_measurements=joint_contingency_vector,
             node_id=node.geo_id,
             constraints=constraints,
-            query_matrix=self.Q
+            query_matrix=self.Q,
+            active=active
         )
         non_neg_time = time.time() - t1
 
@@ -320,7 +329,9 @@ class TopDown():
         joint_solution = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
             node_id=node.geo_id,
-            constraints=constraints
+            constraints=constraints,
+            active=active,
+            n=n_joint
         )
         rounding_time = time.time() - t1
 
@@ -334,10 +345,10 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to check.
         '''
-        node_sum = sum(node.contingency_vector)
+        node_sum = node.contingency_vector.sum()
         children_sum = 0
         for child in node.children:
-            children_sum += np.sum(child.contingency_vector)
+            children_sum += child.contingency_vector.sum()
 
         if node_sum != children_sum:
             print(node_sum, children_sum)
