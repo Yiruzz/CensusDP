@@ -20,10 +20,9 @@ The same applies to our mixed-radix encoding, but instead of base 10, we have di
 according to the number of values in their domains.
 """
 
-import warnings
 import numpy as np
 
-from typing import Dict, List, Mapping, Optional, Sequence, Any
+from typing import Dict, List, Mapping, Sequence, Any
 
 
 class ContingencyDomain:
@@ -56,45 +55,6 @@ class ContingencyDomain:
         # Length of the contingency table (product of sizes).)
         self.n_cells: int = int(np.prod(self.sizes))
 
-
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def build(cls, columns: Sequence[str], data, declared: Optional[Mapping[str, Sequence]] = None) -> 'ContingencyDomain':
-        """Build a domain, preferring user-declared value sets over inferred ones.
-
-        For each column, the value set is taken from declared when provided;
-        otherwise it is inferred from the observed data (np.sort(unique)) and a
-        warning is emitted, since an inferred domain is data-dependent (not DP-safe)
-        and may omit valid-but-absent values.
-
-        Args:
-            columns: Query columns, in significance order.
-            data: A pandas DataFrame holding at least columns (used only for the
-                inferred fallback).
-            declared: Optional mapping {column: possible_values}. May be None
-                or omit columns; missing columns fall back to inference.
-
-        Returns:
-            ContingencyDomain: The constructed domain.
-        """
-        declared = declared or {}
-        domains: Dict[str, np.ndarray] = {}
-        for c in columns:
-            if c in declared and declared[c] is not None:
-                # np.unique sorts and de-duplicates - required for the rank/index space.
-                domains[c] = np.unique(np.asarray(declared[c]))
-            else:
-                warnings.warn(
-                    f"No domain declared for column '{c}'; inferring it from the data "
-                    f"(np.sort(unique)). This is data-dependent (not DP-safe) and may "
-                    f"omit valid-but-absent values. Pass domain={{'{c}': [...]}} to fix.",
-                    stacklevel=2,
-                )
-                domains[c] = np.sort(data[c].unique())
-        return cls(columns, domains)
 
     # ------------------------------------------------------------------
     # Per-axis views

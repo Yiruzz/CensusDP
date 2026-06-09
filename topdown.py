@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
-from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from multiprocessing import get_context
 
 from hierarchical_tree import HierarchicalTree
@@ -27,7 +27,7 @@ class TopDown():
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism,
                  out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
-                 solver_options: Optional[dict] = None, optimizer_path: Optional[str] = None,
+                 solver_options: dict = {}, optimizer_path: Optional[str] = None,
                  domain: Optional[Dict[str, List]] = None) -> None:
         '''
         Initialize the TopDown algorithm.
@@ -40,8 +40,8 @@ class TopDown():
                 Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-column levels).
             out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
             solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
-            solver_options (Optional[dict]): Dictionary of options to pass to the solver. If None, defaults to empty dict.
-            optimizer_path (Optional[str]): Path to the optimizer executable. If None, defaults to None.
+            solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
+            optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
             domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
                 query columns, defining the contingency cell space. Should be data-independent
                 for a sound DP guarantee. When None (or a column omitted), the domain is inferred
@@ -102,10 +102,13 @@ class TopDown():
         and builds the hierarchical tree structure (without computing contingency vectors).
         '''
         print(f'Initializing TopDown algorithm...')
+
         t1 = time.time()
-        print(f'Reading data from {self.data_handler.file_path}...', end=' ')
-        self.data_handler.read_data(self.hierarchical_columns + self.query_columns, sep=';')
+        print(f'Converting CSV to Parquet if needed...', end=' ')
+        self.data_handler.convert_csv_to_parquet()
         print(f'{time.time() - t1:.2f} seconds.')
+
+        self.data_handler.create_data_view()
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
@@ -135,8 +138,6 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         t1 = time.time()
-        # Build only the tree structure; contingency vectors and constraints are
-        # materialized lazily per node during the estimation phase (DFS/BFS + spill).
         print(f'Building hierarchical tree structure...', end=' ')
         self.tree = self.data_handler.build_hierarchical_tree()
         print(f'{time.time() - t1:.2f} seconds.\n')
@@ -156,7 +157,7 @@ class TopDown():
 
         # Materialize root and its children immediately
         root = self.tree.root
-        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level], self.Q)
+        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         # First phase: resolve root's own contingency vector
@@ -179,7 +180,7 @@ class TopDown():
                 #constraints = [node.constraints]
 
                 for child in node.children:
-                    child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
+                    child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.filter_dict, self.constraints[child.level], self.Q)
                     self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
                     
                     child_path = self.data_handler.spill_path(child)

@@ -1,9 +1,11 @@
 import os
 import tempfile
 import shutil
+import warnings
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
+import duckdb
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
@@ -11,7 +13,7 @@ from domain import ContingencyDomain
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 
 class DataHandler:
@@ -72,29 +74,68 @@ class DataHandler:
         # Define path to dir to save vectors
         self.spill_dir: str = os.path.join(tempfile.gettempdir(), f'topdown_spill_{os.getpid()}')
 
+        # DuckDB connection for queries
+        self.duckdb_con: Optional[duckdb.DuckDBPyConnection] = None
+
     def initialize_output_file(self) -> None:
         '''Initialize the output CSV file with column headers.'''
         # Create empty DataFrame with the expected columns
         empty_df = pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)
         empty_df.to_csv(self.output_path, index=False, header=True)
 
-    def read_data(self, columns: List[str], sep: str = ',', nrows: Optional[int] = None) -> pd.DataFrame:
-        '''Read data from the file_path into a pandas DataFrame.
+    def convert_csv_to_parquet(self) -> None:
+        '''Convert CSV file to Parquet format using DuckDB.
 
-        Args:
-            sep (str): Separator used in the CSV file. Defaults to ",".
-            columns (List[str]): List of columns to read from the CSV file.
-            nrows (Optional[int]): Number of rows to read from the CSV file. If None, read all rows. Defaults to None.
-
-        Returns:
-            pd.DataFrame: DataFrame containing the loaded data.
+        Converts the input CSV to Parquet and stores it in the same directory
+        with the same filename but .parquet extension. Updates file_path to
+        point to the Parquet file.
         '''
-        if nrows is not None and nrows > 0:
-            self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns, nrows=nrows)
-        else:
-            self.dataframe = pd.read_csv(self.file_path, sep=sep, usecols=columns)
+        if self.file_path is None:
+            return
 
-        return self.dataframe
+        path_obj = Path(self.file_path)
+        if path_obj.suffix.lower() != '.csv':
+            return
+
+        parquet_path = path_obj.with_suffix('.parquet')
+
+        if parquet_path.exists():
+            print(f'\n Parquet file already exists: \n  {parquet_path}')
+            self.file_path = str(parquet_path)
+            return
+
+        con = duckdb.connect()
+        con.execute(f"""
+            COPY (
+                SELECT *
+                FROM read_csv_auto('{self.file_path}')
+            )
+            TO '{parquet_path}'
+            (FORMAT PARQUET);
+        """)
+        con.close()
+        self.file_path = str(parquet_path)
+
+    def create_data_view(self) -> None:
+        '''Create a DuckDB view for querying the data.
+
+        Creates a view named 'data' that reads from the Parquet file and includes
+        all hierarchical and query columns. Sets up the DuckDB connection for use
+        in tree construction queries.
+        '''
+        if self.file_path is None:
+            return
+
+        self.duckdb_con = duckdb.connect(config={'threads': 1})
+
+        all_cols = self.hierarchical_columns + self.query_columns
+        cols_str = ', '.join(all_cols)
+
+        self.duckdb_con.execute(f"""
+            CREATE OR REPLACE VIEW data AS
+            SELECT {cols_str}
+            FROM read_parquet('{self.file_path}')
+        """)
 
     def build_contingency_domain(self, query_columns: List[str]) -> ContingencyDomain:
         '''Build the mixed-radix contingency domain for the query columns.
@@ -110,25 +151,74 @@ class DataHandler:
         Returns:
             ContingencyDomain: The constructed cell space.
         '''
-        assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
+        assert self.duckdb_con is not None, "DuckDB connection not initialized. Call create_data_view first."
 
-        self.contingency_domain = ContingencyDomain.build(columns=query_columns, data=self.dataframe, declared=self.domain)
+        # Build declared domain by querying missing columns from DuckDB
+        declared = dict(self.domain) if self.domain else {}
+
+        for col in query_columns:
+            if col not in declared:
+                warnings.warn(
+                    f"No domain declared for column '{col}'; inferring it from the data "
+                    f"(SELECT DISTINCT). This is data-dependent (not DP-safe) and may "
+                    f"omit valid-but-absent values. Pass domain={{'{col}': [...]}} to fix.",
+                    stacklevel=2,
+                )
+                # Query unique values from DuckDB view
+                query = f"SELECT DISTINCT {col} FROM data ORDER BY {col}"
+                result = self.duckdb_con.execute(query).fetchall()
+                declared[col] = np.array([row[0] for row in result])
+
+        self.contingency_domain = ContingencyDomain(columns=query_columns, domains=declared)
         self.contingency_df_length = self.contingency_domain.n_cells
 
-        print("Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
+        print("\n Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
 
         return self.contingency_domain
 
-    def create_contingency_vector(self, df: pd.DataFrame) -> sp.csr_matrix:
-        '''Create a sparse contingency (column) vector for the given records.
+    def _reduce_dataframe(self, filters: Dict[str, Any]) -> pd.DataFrame:
+        '''Query contingency table with optional filters from DuckDB.
 
-        Uses the domain's mixed-radix encoder to map each record to its flat cell
-        index and scatters the counts — replacing the pandas value_counts + merge
-        against a full Cartesian table. Returned sparse so the raw histogram x is
+        Executes a SQL query to compute the contingency table grouped by query columns
+        with counts. Applies optional filters from filter_dict.
+
+        Args:
+            filters (Dict[str, Any]): Dictionary mapping column names to values for filtering.
+
+        Returns:
+            pd.DataFrame: DataFrame with query columns and "count" column.
+        '''
+        if self.duckdb_con is None:
+            raise ValueError("DuckDB connection not initialized. Call create_data_view first.")
+
+        where = ""
+
+        if filters:
+            conditions = [f'"{col}" = {repr(val)}' for col, val in filters.items()]
+            where = "WHERE " + " AND ".join(conditions)
+
+        cols_sql = ", ".join(f'"{c}"' for c in self.query_columns)
+
+        query = f"""
+            SELECT {cols_sql}, COUNT(*) AS count
+            FROM data
+            {where}
+            GROUP BY {cols_sql}
+        """
+
+        result = self.duckdb_con.execute(query).fetchall()
+        col_names = self.query_columns + ["count"]
+        return pd.DataFrame(result, columns=col_names)
+
+    def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None) -> sp.csr_matrix:
+        '''Create a sparse contingency (column) vector for records matching filters.
+
+        Queries the contingency table using tabla_contingencia, encodes cell indices,
+        and builds a sparse matrix. Returned sparse so the raw histogram x is
         never densified before Q @ x.
 
         Args:
-            df (pd.DataFrame): DataFrame containing the records to aggregate.
+            filters (Optional[Dict[str, Any]]): Dictionary mapping column names to values for filtering.
 
         Returns:
             scipy.sparse.csr_matrix: Column vector of shape (n_cells, 1) with the
@@ -137,36 +227,15 @@ class DataHandler:
         if self.contingency_domain is None:
             raise ValueError("Contingency domain is not built. Call build_contingency_domain first.")
 
-        domain = self.contingency_domain
-        flat_indices = domain.encode(df)
-        nz, counts = np.unique(flat_indices, return_counts=True)
+        data = self._reduce_dataframe(filters)
+        flat_indices = self.contingency_domain.encode(data)
+        counts = data["count"].values
+
         return sp.csr_matrix(
-            (counts, (nz, np.zeros(len(nz), dtype=np.int64))),
-            shape=(domain.n_cells, 1),
+            (counts, (flat_indices, np.zeros(len(flat_indices), dtype=np.int64))),
+            shape=(self.contingency_domain.n_cells, 1),
             dtype=self.dtype,
         )
-
-    def _query_answers(self, query_matrix: Union[sp.csr_matrix, np.ndarray], records: pd.DataFrame) -> np.ndarray:
-        '''Compute the noiseless query answers y = Q @ x for a set of records.
-
-        Builds the sparse raw histogram x for records and applies the (sparse or
-        dense) query matrix, returning a dense 1-D integer array of length n_queries.
-
-        Args:
-            query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix Q (scipy sparse CSR or dense ndarray),
-                shape (n_queries, n_cells).
-            records (pd.DataFrame): The node's records.
-
-        Returns:
-            np.ndarray: Dense length-n_queries answers.
-        '''
-        x = self.create_contingency_vector(records)  # sparse (n_cells, 1)
-        if sp.issparse(query_matrix):
-            y = np.asarray((query_matrix @ x).todense()).ravel()
-        else:
-            y = query_matrix @ x.toarray().ravel()
-        # Q is binary and x integer, so y is integer-valued; cast exactly.
-        return y.astype(self.dtype)
 
     def build_hierarchical_tree(self) -> HierarchicalTree:
         '''Build a hierarchical tree structure based on hierarchical columns.
@@ -178,27 +247,27 @@ class DataHandler:
         Returns:
             HierarchicalTree: The constructed hierarchical tree with hierarchical_path information.
         '''
-        assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
         assert self.hierarchical_columns, "Hierarchical columns not set."
+        assert self.duckdb_con is not None, "DuckDB connection not initialized. Call create_data_view first."
 
         tree = HierarchicalTree()
         root = tree.root
 
-        # Build tree structure recursively, starting with the full dataframe
-        tree._node_count = self._build_subtree(root, 0, self.dataframe)
+        # Build tree structure recursively using DuckDB queries
+        tree._node_count = self._build_subtree(root, 0, None)
         tree._levels = 1+len(self.hierarchical_columns)
 
         return tree
 
-    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, data: pd.DataFrame) -> int:
+    def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, filter_dict: Optional[Dict[str, Any]] = None) -> int:
         '''Helper method to recursively build the subtree for a given parent node.
 
-        Creates only the tree structure. Receives the pre-filtered dataframe for this node's subset.
+        Creates only the tree structure using DuckDB queries and filter conditions.
 
         Args:
             parent_node (HierarchicalNode): The parent node to which children will be added.
             level_iterator (int): An iterator for the current level in the hierarchy.
-            data (pd.DataFrame): The dataframe filtered to contain only rows for this node's subset.
+            filter_dict (Optional[Dict[str, Any]]): Dictionary mapping column names to values for WHERE clause.
 
         Returns:
             int: The number of nodes in the subtree.
@@ -209,28 +278,43 @@ class DataHandler:
             return n_nodes
 
         current_column = self.hierarchical_columns[level_iterator]
-        unique_hierarchical_values = data[current_column].unique()
+
+        # Build WHERE clause from filter_dict
+        where_clause = ""
+        if filter_dict:
+            conditions = [f"{col} = '{val}'" for col, val in filter_dict.items()]
+            where_clause = " WHERE " + " AND ".join(conditions)
+
+        # Query unique values for current level using DuckDB
+        query = f"SELECT DISTINCT {current_column} FROM data {where_clause} ORDER BY {current_column}"
+        result = self.duckdb_con.execute(query).fetchall()
+        unique_hierarchical_values = [row[0] for row in result]
 
         for value in unique_hierarchical_values:
             child_node = HierarchicalNode(geo_id=value, level=level_iterator+1)
             parent_node.add_child(child_node)
 
-            # Filter data for this child and pass to recursion
-            child_data = data[data[current_column] == value]
-            n_nodes += self._build_subtree(child_node, level_iterator + 1, child_data)
+            # Create and assign filter dict for child
+            new_filter_dict = (filter_dict.copy() if filter_dict else {})
+            new_filter_dict[current_column] = value
+            child_node.filter_dict = new_filter_dict
+            n_nodes += self._build_subtree(child_node, level_iterator + 1, new_filter_dict)
 
         return n_nodes
     
     def spill_path(self, node: HierarchicalNode) -> str:
-        '''Get the spill file path for a node based on its hierarchical_path.
+        '''Get the spill file path for a node based on its filter_dict.
 
         Args:
             node (HierarchicalNode): The node whose spill path is being determined.
 
         Returns:
-            str: File path for the spilled vector named by the node's hierarchical_path.
+            str: File path for the spilled vector named by the node's filter values.
         '''
-        name = '_'.join(str(p) for p in node.hierarchical_path)
+        if node.filter_dict:
+            name = '_'.join(f"{k}={v}" for k, v in node.filter_dict.items())
+        else:
+            name = "root"
         for ch in ('/', '\\', ' ', ':'):
             name = name.replace(ch, '_')
         return os.path.join(self.spill_dir, name + '.npy')
@@ -324,11 +408,9 @@ class DataHandler:
         # Create DataFrame for the leaf.
         leaf_df = pd.DataFrame(expanded_rows, columns=self.query_columns)
 
-        # Generate columns associated with hierarchical values.
-        # Skip the root node because all records belong to it.
-        for level, hierarchical_value in enumerate(node.hierarchical_path[1:]):
-            # Repeat the hierarchical value for all rows.
-            leaf_df[self.hierarchical_columns[level]] = hierarchical_value
+        # Generate columns associated with hierarchical values from filter_dict.
+        for column_name, value in node.filter_dict.items():
+            leaf_df[column_name] = value
 
         # Reorder columns to match output file order: hierarchical + query
         output_columns = self.hierarchical_columns + self.query_columns
@@ -346,15 +428,15 @@ class DataHandler:
         node.contingency_vector = None
         node.constraints = None
 
-    def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
+    def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
-        Filters data once based on hierarchical path, then creates the (sparse-backed)
+        Queries the contingency table based on filter_dict, then creates the (sparse-backed)
         measurement vector y = Q @ x and prepares all constraints for the node against
         the mixed-radix contingency domain.
 
         Args:
-            hierarchical_path (List[int]): The node's hierarchical path for filtering.
+            filter_dict (Dict[str, Any]): The node's filter conditions (column -> value mapping).
             constraints (List[Constraint]): Constraints for the node considering its level.
             query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix for aggregating contingency vectors.
 
@@ -364,18 +446,17 @@ class DataHandler:
         if self.contingency_domain is None:
             raise ValueError("Contingency domain is not built. Call build_contingency_domain first.")
 
-        # Filter data once based on hierarchical path
-        filtered_df = self.dataframe
-        if len(hierarchical_path) > 1:
-            for level_idx, value in enumerate(hierarchical_path[1:]):
-                column = self.hierarchical_columns[level_idx]
-                filtered_df = filtered_df[filtered_df[column] == value]
+        # Build the measurement vector y = Q @ x from the sparse histogram using DuckDB query
+        x = self._create_contingency_vector(filter_dict)  # sparse (n_cells, 1)
 
-        # Build the measurement vector y = Q @ x from the sparse histogram of the
-        # filtered records (raw cell counts x are never densified).
-        contingency_vector = self._query_answers(query_matrix, filtered_df)
+        if sp.issparse(query_matrix):
+            y = np.asarray((query_matrix @ x).todense()).ravel()
+        else:
+            y = query_matrix @ x.toarray().ravel()
 
-        # Prepare constraints using the same filtered data, targeting the sparse domain.
+        contingency_vector = y.astype(self.dtype)
+
+        # Prepare constraints for the node (placeholder for constraint implementation)
         level_constraints = []
         # for constraint in constraints:
         #     # Apply aggregation for constraints that compute dynamically
