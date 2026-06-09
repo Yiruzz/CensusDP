@@ -15,7 +15,7 @@ from queries import QueryWorkload, col
 
 
 
-def main(process_until: str, queries: list[str], user_constraints: bool, traversal_method: str = 'bfs'):
+def main(process_until: str, queries: list[str], user_constraints: bool):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -107,7 +107,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool, travers
         solver_name=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
         optimizer_path=OPT_PATH,
-        traversal_method=traversal_method
     )
 
     # Set the queries to be answered at each node of the tree.
@@ -193,10 +192,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool, travers
 
     # Finally, we can run the TopDown algorithm
     topdown.run()
-    
-    # This method can be used to check the correctness of the results.
-    # Also used for testing purposes.
-    #topdown.check_correctness()
 
     # Privacy garantee
     #print(topdown.privacy_mechanism.report_guarantee())
@@ -223,13 +218,6 @@ if __name__ == "__main__":
         help="Whether to consider user constraints during execution",
     )
 
-    parser.add_argument(
-        "--traversal_method",
-        choices=["bfs", "dfs"],
-        default="bfs",
-        help="Tree traversal method for estimation phase (bfs: breadth-first, dfs: depth-first). Defaults to bfs.",
-    )
-
     args = parser.parse_args()
 
-    main(args.process_until, args.queries, args.user_constraints, args.traversal_method)
+    main(args.process_until, args.queries, args.user_constraints)

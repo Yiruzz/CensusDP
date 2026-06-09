@@ -5,24 +5,23 @@ import pandas as pd
 import numpy as np
 import scipy.sparse as sp
 
-from typing import Dict, List, Optional, Sequence, Tuple
-from pathlib import Path
-
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
 from domain import ContingencyDomain
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 
+from typing import Dict, List, Optional, Sequence, Tuple, Union
+from pathlib import Path
+
 class DataHandler:
     '''Class to handle data loading, preprocessing and postprocessing.'''
 
-    def __init__(self, file_path: str, output_path: str = 'noisy_data.csv',
-                 domain: Optional[Dict[str, Sequence]] = None) -> None:
-        '''Constructror for DataHandler class.
+    def __init__(self, file_path: Optional[str] = None, output_path: str = 'noisy_data.csv', domain: Optional[Dict[str, Sequence]] = None) -> None:
+        '''Constructor for DataHandler class.
 
         Args:
-            file_path (str): Path to the data file.
+            file_path (Optional[str]): Path to the data file.
             output_path (str): Path to save the processed data.
             domain (Optional[Dict[str, Sequence]]): Per-column set of all possible
                 values, defining the contingency cell space. This should be
@@ -32,13 +31,12 @@ class DataHandler:
                 (np.sort(unique)) with a warning.
 
         Attributes:
-            file_path (str): Path to the data file.
+            file_path (Optional[str]): Path to the data file.
             output_path (str): Path to save the processed data. Defaults to "noisy_data.csv".
 
             dataframe (Optional[pd.DataFrame]): DataFrame to hold the data.
-            contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space
-                that replaces the dense Cartesian-product contingency table.
-            contingency_df_length: Optional[int]: Number of contingency cells (n_cells).
+            contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces the dense Cartesian-product contingency table.
+            contingency_df_length (Optional[int]): Number of contingency cells (n_cells).
             dtype (str): NumPy data type used for all arrays.
 
             query_columns (List[str]): List of columns to use for generating the contingency table.
@@ -114,9 +112,7 @@ class DataHandler:
         '''
         assert self.dataframe is not None, "Dataframe is not loaded. Call read_data first."
 
-        self.contingency_domain = ContingencyDomain.build(
-            columns=query_columns, data=self.dataframe, declared=self.domain
-        )
+        self.contingency_domain = ContingencyDomain.build(columns=query_columns, data=self.dataframe, declared=self.domain)
         self.contingency_df_length = self.contingency_domain.n_cells
 
         print("Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
@@ -150,14 +146,14 @@ class DataHandler:
             dtype=self.dtype,
         )
 
-    def _query_answers(self, query_matrix, records: pd.DataFrame) -> np.ndarray:
+    def _query_answers(self, query_matrix: Union[sp.csr_matrix, np.ndarray], records: pd.DataFrame) -> np.ndarray:
         '''Compute the noiseless query answers y = Q @ x for a set of records.
 
         Builds the sparse raw histogram x for records and applies the (sparse or
         dense) query matrix, returning a dense 1-D integer array of length n_queries.
 
         Args:
-            query_matrix: Query matrix Q (scipy sparse CSR or dense ndarray),
+            query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix Q (scipy sparse CSR or dense ndarray),
                 shape (n_queries, n_cells).
             records (pd.DataFrame): The node's records.
 
@@ -224,8 +220,8 @@ class DataHandler:
             n_nodes += self._build_subtree(child_node, level_iterator + 1, child_data)
 
         return n_nodes
-
-    def _spill_path(self, node: HierarchicalNode) -> str:
+    
+    def spill_path(self, node: HierarchicalNode) -> str:
         '''Get the spill file path for a node based on its hierarchical_path.
 
         Args:
@@ -239,34 +235,62 @@ class DataHandler:
             name = name.replace(ch, '_')
         return os.path.join(self.spill_dir, name + '.npy')
 
-    def spill_vector(self, node: HierarchicalNode) -> None:
-        '''Write node.contingency_vector to disk and free it from RAM.
+    def spill_vector(self, path: str, contingency_vector: np.ndarray) -> None:
+        '''Write contingency vector to disk and free it from RAM.
 
         One file per node, named by its hierarchical_path, ensuring sibling nodes don't conflict.
 
         Args:
-            node (HierarchicalNode): The node whose contingency vector should be spilled.
+            path (str): The file path where the vector will be spilled.
+            contingency_vector (np.ndarray): The contingency vector to write to disk.
         '''
         os.makedirs(self.spill_dir, exist_ok=True)
-        np.save(self._spill_path(node), np.ascontiguousarray(node.contingency_vector))
-        node.contingency_vector = None
-        node.constraints = None
+        np.save(path, np.ascontiguousarray(contingency_vector))
 
-    def load_vector(self, node: HierarchicalNode) -> None:
-        '''Reload node.contingency_vector from disk and delete the file (used once).
+    def load_vector(self, path: str) -> np.ndarray:
+        '''Reload contingency vector from disk and delete the file.
 
         Args:
-            node (HierarchicalNode): The node whose contingency vector should be reloaded.
+            path (str): The file path to load the vector from.
+
+        Returns:
+            np.ndarray: The loaded contingency vector.
         '''
-        node.contingency_vector = np.load(self._spill_path(node))
-        os.remove(self._spill_path(node))
+        contingency_vector = np.load(path)
+        os.remove(path)
+        return contingency_vector
+    
+    def combine_child_vectors(self, paths: List[str]) -> np.ndarray:
+        '''Combine multiple child contingency vectors into a single joint vector.
+
+        Args:
+            paths (List[str]): List of file paths for child contingency vectors.
+
+        Returns:
+            np.ndarray: Concatenated vector of all children's contingency vectors.
+        '''
+        return np.concatenate([self.load_vector(path) for path in paths]) 
+
+    def update_child_vectors(self, joint_solution: np.ndarray, vectors_length: int, paths: List[str]) -> None:
+        '''Split joint solution into individual child vectors and spill to disk.
+
+        Args:
+            joint_solution (np.ndarray): The combined solution vector for all children.
+            vectors_length (int): The length of each individual child vector.
+            paths (List[str]): List of file paths where each child vector will be spilled.
+        '''
+        start = 0
+        for path in paths:
+            end = start + vectors_length
+            self.spill_vector(path, joint_solution[start:end])
+            start = end
 
     def cleanup_spill(self) -> None:
         '''Delete the spill directory and all remaining spilled vectors.'''
         if os.path.isdir(self.spill_dir):
             shutil.rmtree(self.spill_dir, ignore_errors=True)
 
-    def _construct_microdata_for_leaf(self, node) -> pd.DataFrame:
+    def _construct_microdata_for_leaf(self, node: HierarchicalNode) -> pd.DataFrame:
         '''Construct microdata for a specific leaf node.
 
         Args:
@@ -322,7 +346,7 @@ class DataHandler:
         node.contingency_vector = None
         node.constraints = None
 
-    def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint], query_matrix: np.ndarray) -> Tuple[np.ndarray, List]:
+    def materialize_node_data(self, hierarchical_path: List[int], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
         Filters data once based on hierarchical path, then creates the (sparse-backed)
@@ -332,7 +356,7 @@ class DataHandler:
         Args:
             hierarchical_path (List[int]): The node's hierarchical path for filtering.
             constraints (List[Constraint]): Constraints for the node considering its level.
-            query_matrix (np.ndarray): Query matrix for aggregating contingency vectors.
+            query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix for aggregating contingency vectors.
 
         Returns:
             Tuple[np.ndarray, List[Constraint]]: Contingency vector and constraint callables for this node.
@@ -353,13 +377,13 @@ class DataHandler:
 
         # Prepare constraints using the same filtered data, targeting the sparse domain.
         level_constraints = []
-        for constraint in constraints:
-            # Apply aggregation for constraints that compute dynamically
-            match constraint:
-                case ContextualAggregateConstraint():
-                    constraint.apply_aggregation_function(filtered_df)
+        # for constraint in constraints:
+        #     # Apply aggregation for constraints that compute dynamically
+        #     match constraint:
+        #         case ContextualAggregateConstraint():
+        #             constraint.apply_aggregation_function(filtered_df)
 
-            # Convert to optimizer callable against the contingency domain
-            level_constraints.append(constraint.to_constraint(self.contingency_domain))
+        #     # Convert to optimizer callable against the contingency domain
+        #     level_constraints.append(constraint.to_constraint(self.contingency_domain))
 
         return contingency_vector, level_constraints
