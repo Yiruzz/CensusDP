@@ -468,10 +468,9 @@ class DataHandler:
 
         contingency_vector = y.astype(self.dtype)
 
-        # Prepare constraints for the node (placeholder for constraint implementation)
+        # Prepare constraints for the node
         level_constraints = []
         for constraint in constraints:
-            # Apply aggregation for constraints that compute dynamically
             match constraint:
                 case ContextualAggregateConstraint():
                     constraint.apply_aggregation_function(counts)

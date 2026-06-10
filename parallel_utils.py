@@ -35,7 +35,7 @@ def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.
     '''
-    global _optimizer, _data_handler, _Q, _vectors_length, _check, _privacy_mechanism, _query_sensitivity  # _constraints
+    global _optimizer, _data_handler, _Q, _vectors_length, _check, _privacy_mechanism, _query_sensitivity, _constraints
 
     _optimizer = OptimizationModel(solver_options=solver_options)
 
@@ -55,6 +55,7 @@ def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query
     _data_handler.worker_microdata_file = os.path.join(microdata_dir, f'worker_{os.getpid()}.csv')
     # File will be created when first data is written
 
+    _constraints = constraints_dict
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
     # TODO: constraints support - uncomment when ready
@@ -91,15 +92,15 @@ def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray
     joint_constraints = []
 
     # Wrap child publication constraints with adjusted indices
-    # start = 0
-    # for child in range(num_children):
-    #     end = start + _vectors_length
-    #     for constraint in constraints[child]:
-    #         joint_constraints.append(
-    #             lambda joint_array, s=start, e=end, c=constraint:
-    #                 c({i - s: joint_array[i] for i in range(s, e)})
-    #         )
-    #     start = end
+    start = 0     
+    for child_constraints in constraints:
+        end = start + _data_handler.contingency_df_length
+        for constraint in child_constraints:
+            joint_constraints.append(
+                lambda joint_array, s=start, e=end, c=constraint:
+                    c({i - s: joint_array[i] for i in range(s, e)})
+            )
+        start = end
 
     # Add consistency constraints: parent value at each index = sum of child values at that index
     for index in range(_data_handler.contingency_df_length):
@@ -127,7 +128,7 @@ def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndar
         print(f"\nError: The sum of the children nodes' contingency vectors "
               f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
 
-def estimate_and_update_children(geo_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, is_leaf: bool = False, constraints: List[Callable] = []) -> Optional[float]:
+def estimate_and_update_children(geo_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, is_leaf: bool = False) -> float:
     '''Solve optimization for a node considering its children and update their vectors.
 
     Args:
@@ -136,30 +137,28 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
         children_filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         children_level (int): Level of all children (they all share the same level).
         is_leaf (bool): Whether children are leaf nodes. Defaults to False.
-        constraints (List[Callable]): List of constraint functions for the optimization. Defaults to empty List.
 
     Returns:
-        Optional[float]: Time spent writing microdata files, or None if not writing.
+        float: Time spent writing microdata files
     '''
     contingency_vector = _data_handler.load_vector(node_path)
 
-    # Materialize and combine children vectors in memory
+    # Materialize and combine children vectors and constraints
     children_vectors = []
+    children_constraints = []
 
     for filter_dict in children_filter_dicts:
-        # TODO: constraints support - uncomment when ready
-        # child_constraints = _constraints[children_level]
-        child_constraints = []  # placeholder: use empty constraints for now
-
-        # Materialize the child node in this worker
-        child_vector, _ = _data_handler.materialize_node_data(filter_dict, child_constraints, _Q)
+        child_vector, child_constraint = _data_handler.materialize_node_data(filter_dict, _constraints[children_level], _Q)
         _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+        
         children_vectors.append(child_vector)
+        children_constraints.append(child_constraint)
 
-    # Concatenate children vectors in memory
+    # Concatenate children vectors, and constraints are adapted to the new vector size.
+    # Also create others to ensure consistency in the number of rows per category in the parent.
+    # The number of rows in the parent category must match the sum of rows of that category across all children.
     joint_contingency_vector = np.concatenate(children_vectors)
-
-    joint_constraints = _combine_child_constraints(len(children_filter_dicts), contingency_vector, constraints)
+    joint_constraints = _combine_child_constraints(len(children_filter_dicts), contingency_vector, children_constraints)
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(
@@ -181,9 +180,7 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
     if _check: _check_node_correctness(contingency_vector, joint_contingency_vector)
 
     microdata_time = 0.0
-
-    if not is_leaf:
-        _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_filter_dicts)
+    if not is_leaf: _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_filter_dicts)
     else:
         t_microdata = time.time()
         start = 0

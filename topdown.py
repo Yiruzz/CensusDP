@@ -190,9 +190,7 @@ class TopDown():
                                                                     self.hierarchical_columns,
                                                                     self.query_columns,
                                                                     self.data_handler.contingency_domain.domains,
-                                                                    # TODO: constraints support - pass self.constraints when ready
-                                                                    # self.constraints,
-                                                                    None,  # placeholder for constraints_dict
+                                                                    self.constraints,
                                                                     privacy_name,
                                                                     level_params,
                                                                     delta,
@@ -216,7 +214,7 @@ class TopDown():
 
                 for fut in done:
                     worker_microdata_time = fut.result()
-                    total_microdata_time += worker_microdata_time if worker_microdata_time is not None else 0.0
+                    total_microdata_time += worker_microdata_time
                     node = futures.pop(fut)
 
                     if not node.children[0].is_leaf():

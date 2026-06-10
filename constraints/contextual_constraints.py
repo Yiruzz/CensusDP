@@ -48,13 +48,15 @@ class ContextualAggregateConstraint(AggregateConstraint, ABC):
 
 class SumEqualRealTotal(ContextualAggregateConstraint):
     """Convenience class for the user to easily set the Real Total constraint."""
+
+    @staticmethod
+    def get_real_total(counts):
+        return counts.sum()
+    
     def __init__(self, expression: LogicalExpression) -> None:
 
-        # Function to calculate the real total from the counts array
-        get_real_total = lambda counts: counts.sum()
-
         # The true total is the sum of all counts in the node's context
-        super().__init__(expression=expression, aggregation_function=get_real_total)
+        super().__init__(expression=expression, aggregation_function=SumEqualRealTotal.get_real_total)
 
     @staticmethod
     def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
