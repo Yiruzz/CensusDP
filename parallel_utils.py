@@ -51,7 +51,7 @@ def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query
 
     _data_handler.create_data_view()
 
-    # Create worker-specific microdata file (without headers)
+    # Create worker-specific microdata file (CSV format)
     _data_handler.worker_microdata_file = os.path.join(microdata_dir, f'worker_{os.getpid()}.csv')
     # File will be created when first data is written
 
@@ -190,11 +190,7 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
         for filter_dict in children_filter_dicts:
             end = start + _data_handler.contingency_df_length
             updated_vector = joint_solution[start:end]
-
-            # Construct microdata and append to worker's CSV file
-            leaf_microdata = _data_handler._construct_microdata_for_leaf(updated_vector, filter_dict)
-            leaf_microdata.to_csv(_data_handler.worker_microdata_file, mode='a', header=False, index=False)
-
+            _data_handler.append_microdata_to_worker_file(updated_vector, filter_dict)
             start = end
         microdata_time = time.time() - t_microdata
 

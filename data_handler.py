@@ -381,11 +381,12 @@ class DataHandler:
 
     def merge_microdata_files(self) -> None:
         '''Merge microdata files from workers into the output CSV.'''
+
         worker_files = [
             os.path.join(self.microdata_dir, f) for f in os.listdir(self.microdata_dir)
             if f.startswith('worker_') and f.endswith('.csv')
         ]
-
+  
         for worker_file in worker_files:
             try:
                 with open(worker_file, 'rb') as src:
@@ -428,6 +429,16 @@ class DataHandler:
         # Reorder columns to match output file order: hierarchical + query
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
+
+    def append_microdata_to_worker_file(self, contingency_vector: np.ndarray, filter_dict: Dict[str, Any]) -> None:
+        '''Construct microdata and append to worker's microdata file (CSV format).
+
+        Args:
+            contingency_vector (np.ndarray): The contingency vector (cell counts).
+            filter_dict (Dict[str, Any]): Filter dictionary for hierarchical values.
+        '''
+        leaf_microdata = self._construct_microdata_for_leaf(contingency_vector, filter_dict)
+        leaf_microdata.to_csv(self.worker_microdata_file, mode='a', header=False, index=False)
 
     def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
