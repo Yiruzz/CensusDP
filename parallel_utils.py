@@ -4,25 +4,67 @@ from scipy.sparse import spmatrix
 
 from optimizer import OptimizationModel
 from data_handler import DataHandler
+from domain import ContingencyDomain
+from privacy import PureDP, ZCDP, ApproximateDP, RenyiDP
 
-from typing import List, Callable
+from typing import List, Callable, Dict, Any, Optional
 
-def init_process(solver_options: dict, dir: str, query_matrix: spmatrix, length: int, check: bool = False) -> None:
+def init_process(solver_options: dict, dir: str, query_matrix: spmatrix,
+                 parquet_path: str, hierarchical_columns: List[str], query_columns: List[str],
+                 domain_dict: Dict[str, Any], constraints_dict: Optional[Dict[int, List]], privacy_name: str,
+                 level_params: List[float], delta: Optional[float] = None,
+                 alphas: Optional[List[float]] = None, query_sensitivity: int = 1,
+                 check: bool = False) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
         solver_options (dict): Dictionary of options to pass to the optimization solver.
         dir (str): Directory path for spilling vectors to disk.
         query_matrix (spmatrix): The sparse query matrix Q used in optimization.
-        length (int): The length of the contingency vectors.
+        parquet_path (str): Path to the parquet file.
+        hierarchical_columns (List[str]): Hierarchical column names.
+        query_columns (List[str]): Query column names.
+        domain_dict (Dict[str, Any]): Domain mapping for query columns.
+        constraints_dict (Optional[Dict[int, List]]): Constraints mapped by level. TODO: implement constraints support.
+        privacy_name (str): Name of the privacy mechanism ("PureDP", "ZCDP", "ApproximateDP", "RenyiDP").
+        level_params (List[float]): Per-level privacy parameters.
+        delta (Optional[float]): Delta parameter for ApproximateDP and RenyiDP.
+        alphas (Optional[List[float]]): Alpha values for RenyiDP.
+        query_sensitivity (int): Query sensitivity for noise addition.
+        check (bool): Whether to check node correctness.
     '''
-    global _optimizer, _data_handler, _Q, _vectors_length, _check
+    global _optimizer, _data_handler, _Q, _vectors_length, _check, _privacy_mechanism, _query_sensitivity  # _constraints
 
     _optimizer = OptimizationModel(solver_options=solver_options)
+
     _data_handler = DataHandler()
     _data_handler.spill_dir = dir
+    _data_handler.hierarchical_columns = hierarchical_columns
+    _data_handler.query_columns = query_columns
+    _data_handler.file_path = parquet_path
+
+    _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
+    _data_handler.contingency_df_length = _data_handler.contingency_domain.n_cells
+
+    _data_handler.create_data_view()
+
     _Q = query_matrix
-    _vectors_length = length
+    _query_sensitivity = query_sensitivity
+    # TODO: constraints support - uncomment when ready
+    # _constraints = constraints_dict
+
+    # Instantiate privacy mechanism
+    if privacy_name == "PureDP":
+        _privacy_mechanism = PureDP(level_params)
+    elif privacy_name == "ZCDP":
+        _privacy_mechanism = ZCDP(level_params)
+    elif privacy_name == "ApproximateDP":
+        _privacy_mechanism = ApproximateDP(level_params, delta)
+    elif privacy_name == "RenyiDP":
+        _privacy_mechanism = RenyiDP(level_params, delta, alphas)
+    else:
+        raise ValueError(f"Unknown privacy mechanism: {privacy_name}")
+    
     _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray, constraints: List) -> List[Callable]:
@@ -78,18 +120,40 @@ def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndar
         print(f"\nError: The sum of the children nodes' contingency vectors "
               f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
 
-def estimate_and_update_children(geo_id: int, node_path: str, children_paths: List[str], constraints: List[Callable] = []) -> None:
+def estimate_and_update_children(geo_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, constraints: List[Callable] = []) -> None:
     '''Solve optimization for a node considering its children and update their vectors.
 
     Args:
         geo_id (int): The geographic ID of the parent node.
-        node_path (str): File path to the parent node's contingency vector.
-        children_paths (List[str]): List of file paths to children's contingency vectors.
+        node_path (str): Path to contigency vector file.
+        children_filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
+        children_level (int): Level of all children (they all share the same level).
         constraints (List[Callable]): List of constraint functions for the optimization. Defaults to empty List.
     '''
 
-    contingency_vector = _data_handler.load_vector(node_path) 
+    contingency_vector = _data_handler.load_vector(node_path)
+
+    # Materialize children in this worker process
+    children_paths = []
+    for filter_dict in children_filter_dicts:
+        # TODO: constraints support - uncomment when ready
+        # child_constraints = _constraints[children_level]
+        child_constraints = []  # placeholder: use empty constraints for now
+
+        # Materialize the child node in this worker
+        child_vector, _ = _data_handler.materialize_node_data(filter_dict, child_constraints, _Q)
+
+        # Add noise to the child vector
+        _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+
+        # Spill to disk for consistency with existing workflow
+        child_path = _data_handler.spill_path(filter_dict)
+        _data_handler.spill_vector(child_path, child_vector)
+        children_paths.append(child_path)
+
+    # Load children vectors (this also deletes the files)
     joint_contingency_vector = _data_handler.combine_child_vectors(children_paths)
+
     joint_constraints = _combine_child_constraints(len(children_paths), contingency_vector, constraints)
 
     t1 = time.time()
@@ -108,7 +172,7 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_paths: Li
         constraints=joint_constraints
     )
     rounding_time = time.time() - t1
-    
+
     if _check: _check_node_correctness(contingency_vector, joint_contingency_vector)
 
     _data_handler.update_child_vectors(joint_solution, _vectors_length, children_paths)

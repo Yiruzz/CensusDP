@@ -121,11 +121,8 @@ class DataHandler:
 
         Creates a view named 'data' that reads from the Parquet file and includes
         all hierarchical and query columns. Sets up the DuckDB connection for use
-        in tree construction queries.
+        in tree construction queries. Always uses threads=1.
         '''
-        if self.file_path is None:
-            return
-
         self.duckdb_con = duckdb.connect(config={'threads': 1})
 
         all_cols = self.hierarchical_columns + self.query_columns
@@ -304,17 +301,17 @@ class DataHandler:
 
         return n_nodes
     
-    def spill_path(self, node: HierarchicalNode) -> str:
-        '''Get the spill file path for a node based on its filter_dict.
+    def spill_path(self, filter_dict: Dict[str, Any]) -> str:
+        '''Get the spill file path from a filter dictionary.
 
         Args:
-            node (HierarchicalNode): The node whose spill path is being determined.
+            filter_dict (Dict[str, Any]): The filter dictionary (column -> value mapping).
 
         Returns:
-            str: File path for the spilled vector named by the node's filter values.
+            str: File path for the spilled vector named by the filter values.
         '''
-        if node.filter_dict:
-            name = '_'.join(f"{k}={v}" for k, v in node.filter_dict.items())
+        if filter_dict:
+            name = '_'.join(f"{k}={v}" for k, v in filter_dict.items())
         else:
             name = "root"
         for ch in ('/', '\\', ' ', ':'):

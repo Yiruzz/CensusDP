@@ -163,33 +163,41 @@ class TopDown():
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
 
-        root_path = self.data_handler.spill_path(root)
+        root_path = self.data_handler.spill_path(root.filter_dict)
         self.data_handler.spill_vector(root_path, root.contingency_vector)
         root.contingency_vector = None
 
-         # Process remaining nodes
+        # Extract privacy mechanism parameters for passing to workers
+        privacy_name = self.privacy_mechanism.name
+        level_params = self.privacy_mechanism.level_params
+        delta = getattr(self.privacy_mechanism, 'delta', None)
+        alphas = getattr(self.privacy_mechanism, 'alphas', None)
+
+        # Process remaining nodes
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
-                                initializer=init_process, initargs=(self.solver_options, 
+                                initializer=init_process, initargs=(self.solver_options,
                                                                     self.data_handler.spill_dir,
                                                                     self.Q,
-                                                                    self.data_handler.contingency_df_length)) as executor:
+                                                                    self.data_handler.file_path,
+                                                                    self.hierarchical_columns,
+                                                                    self.query_columns,
+                                                                    self.data_handler.contingency_domain.domains,
+                                                                    # TODO: constraints support - pass self.constraints when ready
+                                                                    # self.constraints,
+                                                                    None,  # placeholder for constraints_dict
+                                                                    privacy_name,
+                                                                    level_params,
+                                                                    delta,
+                                                                    alphas,
+                                                                    self.query_sensitivity)) as executor:
 
             def _submit(node):
-                node_path = self.data_handler.spill_path(node)
-                children_paths = []
-                #constraints = [node.constraints]
+                node_path = self.data_handler.spill_path(node.filter_dict)
+                children_filter_dicts = [child.filter_dict for child in node.children]
+                children_level = node.children[0].level
 
-                for child in node.children:
-                    child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.filter_dict, self.constraints[child.level], self.Q)
-                    self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
-                    
-                    child_path = self.data_handler.spill_path(child)
-                    self.data_handler.spill_vector(child_path, child.contingency_vector)
-
-                    child.contingency_vector = None #; child.constraints = None
-                    children_paths.append(child_path); #constraints.append(child.constraints)
-                
-                return executor.submit(estimate_and_update_children, node.geo_id, node_path, children_paths)
+                return executor.submit(estimate_and_update_children, node.geo_id, node_path,
+                                     children_filter_dicts, children_level)
             
             futures = {_submit(root): root}
             while futures:
@@ -201,7 +209,7 @@ class TopDown():
 
                     if node.children[0].is_leaf():
                         for child in node.children:
-                            child.contingency_vector = self.data_handler.load_vector(self.data_handler.spill_path(child))
+                            child.contingency_vector = self.data_handler.load_vector(self.data_handler.spill_path(child.filter_dict))
                             self.data_handler.write_microdata_for_leaf(child)
                             child.contingency_vector = None
                     else:
