@@ -25,11 +25,9 @@ class TopDown():
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism,
-                 out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
-                 solver_options: dict = {}, optimizer_path: Optional[str] = None,
-                 domain: Optional[Dict[str, List]] = None, num_workers: int = 2,
-                 check_correctness: bool = False) -> None:
+                 privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
+                 solver_name: str = 'gurobi', solver_options: dict = {}, optimizer_path: Optional[str] = None,
+                 domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -116,7 +114,7 @@ class TopDown():
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
-        self.data_handler.build_contingency_domain(self.query_columns)
+        self.data_handler.build_contingency_domain()
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
@@ -146,11 +144,10 @@ class TopDown():
         self.tree = self.data_handler.build_hierarchical_tree()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
-        # Initialize output file with headers
+        # Initialize directories to temporarily save vectors and microdata
+        # Also output to put microdata
+        self.data_handler.initialize_directories()
         self.data_handler.initialize_output_file()
-
-        # Initialize temporary directory for worker microdata files
-        self.data_handler.initialize_microdata_dir()
 
         print(self.tree, "\n")
 
@@ -162,7 +159,7 @@ class TopDown():
         print(f'Running estimation phase (BFS)...')
         t1 = time.time()
 
-        # Materialize root and its children immediately
+        # Materialize root
         root = self.tree.root
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
@@ -170,6 +167,7 @@ class TopDown():
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
 
+        # Save the contingency vector to disk.
         root_path = self.data_handler.spill_path(root.filter_dict)
         self.data_handler.spill_vector(root_path, root.contingency_vector)
         root.contingency_vector = None
@@ -204,7 +202,7 @@ class TopDown():
                 children_level = node.children[0].level
                 is_leaf = node.children[0].is_leaf()
 
-                return executor.submit(estimate_and_update_children, node.geo_id, node_path,
+                return executor.submit(estimate_and_update_children, node.id, node_path,
                                      children_filter_dicts, children_level, is_leaf)
             
             total_microdata_time = 0.0
@@ -230,8 +228,7 @@ class TopDown():
             print(f'  Worker microdata time: {total_microdata_time:.2f}s')
             print(f'  Total microdata (workers + merge): {total_microdata_time + merge_time:.2f}s')
 
-        self.data_handler.cleanup_spill()
-        self.data_handler.cleanup_microdata_dir()
+        self.data_handler.cleanup_directories()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
@@ -244,7 +241,7 @@ class TopDown():
         t1 = time.time()
         x_tilde = self.optimizer.non_negative_real_estimation(
             noisy_measurements=node.contingency_vector,
-            node_id=node.geo_id,
+            node_id=node.id,
             constraints=node.constraints,
             query_matrix=self.Q
         )
@@ -253,12 +250,12 @@ class TopDown():
         t1 = time.time()
         node.contingency_vector = self.optimizer.rounding_estimation(
             x_tilde=x_tilde,
-            node_id=node.geo_id,
+            node_id=node.id,
             constraints=node.constraints
         )
         rounding_time = time.time() - t1
 
-        print(f'  [Node {node.geo_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+        print(f'  [Node {node.id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
@@ -301,9 +298,8 @@ class TopDown():
         This method executes the full TopDown algorithm, including initialization,
         estimation phase, and microdata construction.
         '''
-        self.initialize()
         try:
+            self.initialize()
             self.estimation_phase()
         finally:
-            self.data_handler.cleanup_spill()
-            self.data_handler.cleanup_microdata_dir()
+            self.data_handler.cleanup_directories()

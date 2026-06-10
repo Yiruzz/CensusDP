@@ -12,8 +12,8 @@ from typing import List, Callable, Dict, Any, Optional
 
 def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query_matrix: spmatrix,
                  parquet_path: str, hierarchical_columns: List[str], query_columns: List[str],
-                 domain_dict: Dict[str, Any], constraints_dict: Optional[Dict[int, List]], privacy_name: str,
-                 level_params: List[float], delta: Optional[float] = None,
+                 domain_dict: Dict[str, Any], constraints_dict: Optional[Dict[int, List]],
+                 privacy_name: str, level_params: List[float], delta: Optional[float] = None,
                  alphas: Optional[List[float]] = None, query_sensitivity: int = 1,
                  check: bool = False) -> None:
     '''Initialize global variables for parallel worker processes.
@@ -27,7 +27,7 @@ def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query
         hierarchical_columns (List[str]): Hierarchical column names.
         query_columns (List[str]): Query column names.
         domain_dict (Dict[str, Any]): Domain mapping for query columns.
-        constraints_dict (Optional[Dict[int, List]]): Constraints mapped by level. TODO: implement constraints support.
+        constraints_dict (Dict[int, List]): Constraints mapped by level.
         privacy_name (str): Name of the privacy mechanism ("PureDP", "ZCDP", "ApproximateDP", "RenyiDP").
         level_params (List[float]): Per-level privacy parameters.
         delta (Optional[float]): Delta parameter for ApproximateDP and RenyiDP.
@@ -113,14 +113,14 @@ def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray
     return joint_constraints 
 
 def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndarray) -> None:
-    """
+    '''
     Checks that the sum of the values in the parent node vector 
     is equal to the sum of the values in its children vectors.
 
     Args:
         parent_vector (np.ndarray): Contingency vector of the parent node.
         children_vectors (np.ndarray): Contingency vectors of the child nodes.
-    """
+    '''
     parent_sum = np.sum(parent_vector)
     children_sum = np.sum(children_vectors)
     
@@ -128,11 +128,11 @@ def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndar
         print(f"\nError: The sum of the children nodes' contingency vectors "
               f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
 
-def estimate_and_update_children(geo_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, is_leaf: bool = False) -> float:
+def estimate_and_update_children(node_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, is_leaf: bool = False) -> float:
     '''Solve optimization for a node considering its children and update their vectors.
 
     Args:
-        geo_id (int): The geographic ID of the parent node.
+        node_id (int): The unique ID of the parent node.
         node_path (str): Path to contigency vector file.
         children_filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         children_level (int): Level of all children (they all share the same level).
@@ -163,7 +163,7 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(
         noisy_measurements=joint_contingency_vector,
-        node_id=geo_id,
+        node_id=node_id,
         constraints=joint_constraints,
         query_matrix=_Q
     )
@@ -172,7 +172,7 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
     t1 = time.time()
     joint_solution = _optimizer.rounding_estimation(
         x_tilde=x_tilde,
-        node_id=geo_id,
+        node_id=node_id,
         constraints=joint_constraints
     )
     rounding_time = time.time() - t1
@@ -191,6 +191,6 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
             start = end
         microdata_time = time.time() - t_microdata
 
-    print(f'  [Node {geo_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+    print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
 
     return microdata_time

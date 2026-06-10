@@ -12,35 +12,34 @@ class HierarchicalNode:
     This class focuses solely on node specific data and operations,
     without any tree traversal or tree-wide operation logic.
     '''
-    def __init__(self, geo_id: int, level: int) -> None:
+    def __init__(self, level: int, filter_dict: Dict[str, Any]) -> None:
         '''
         Initialize a hierarchical node.
 
         Args:
-            geo_id (int): Identifier related to geography.
             level (int): Level where the node is located.
+            filter_dict (Dict[str, Any]): Dictionary mapping column names to their filter values.
+                Default is an empty dictionary. Example: {} for root, {'Region': 'A'} for region A,
+                {'Region': 'A', 'Comuna': 'A1'} for region A + comuna A1.
 
         Attributes:
-            geo_id (int): Identifier related to geography.
+            id (Optional[int]): Unique incremental ID assigned via BFS traversal after tree construction.
 
             children (List[HierarchicalNode]): List of child nodes.
             parent (HierarchicalNode): Reference to the parent node.
 
-            filter_dict (Dict[str, Any]): Dictionary mapping column names to their filter values.
-                                         Example: {} for root, {'Region': 'A'} for region A,
-                                         {'Region': 'A', 'Comuna': 'A1'} for region A + comuna A1.
-                                         Used to filter the data to get this node's data subset.
+            filter_dict (Dict[str, Any]): Dictionary mapping column names to their filter values. Used to filter the data to get this node's data subset.
             level (int): Level where the node is located.
 
             contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
             constraints (Optional[List[Callable]]): List of constraints for this node.
         '''
-        self.geo_id: int = geo_id
+        self.id: Optional[int] = None
 
         self.children: List[HierarchicalNode] = []
         self.parent: Optional[HierarchicalNode] = None
 
-        self.filter_dict: Dict[str, Any] = {}
+        self.filter_dict: Dict[str, Any] = filter_dict 
         self.level: int = level
 
         self.contingency_vector: Optional[np.ndarray] = None
@@ -78,7 +77,7 @@ class HierarchicalNode:
         filter_str = ", ".join(f"{k}={v}" for k, v in self.filter_dict.items()) if self.filter_dict else "root"
 
         result = "--- HierarchicalNode ---\n"
-        result += f"Geo ID: {self.geo_id}\n"
+        result += f"ID: {self.id}\n"
         result += f"Nivel: {self.level}\n"
         result += f"Filtros: {filter_str}\n"
         result += f"Cantidad de hijos: {len(self.children)}\n"
