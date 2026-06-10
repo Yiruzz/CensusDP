@@ -6,32 +6,27 @@ from scipy.sparse import spmatrix
 from optimizer import OptimizationModel
 from data_handler import DataHandler
 from domain import ContingencyDomain
-from privacy import PureDP, ZCDP, ApproximateDP, RenyiDP
+from privacy import PrivacyMechanism
 
-from typing import List, Callable, Dict, Any, Optional
+from typing import List, Callable, Dict, Any
 
-def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query_matrix: spmatrix,
-                 parquet_path: str, hierarchical_columns: List[str], query_columns: List[str],
-                 domain_dict: Dict[str, Any], constraints_dict: Optional[Dict[int, List]],
-                 privacy_name: str, level_params: List[float], delta: Optional[float] = None,
-                 alphas: Optional[List[float]] = None, query_sensitivity: int = 1,
-                 check: bool = False) -> None:
+def init_process(solver_options: dict, constraints_dict: Dict[int, List],
+                 spill_dir: str, microdata_dir: str, parquet_path: str,
+                 domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
+                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
         solver_options (dict): Dictionary of options to pass to the optimization solver.
+        constraints_dict (Dict[int, List]): Constraints mapped by level.
         spill_dir (str): Directory path for spilling vectors to disk.
         microdata_dir (str): Directory path for temporary microdata files.
-        query_matrix (spmatrix): The sparse query matrix Q used in optimization.
         parquet_path (str): Path to the parquet file.
+        domain_dict (Dict[str, Any]): Domain mapping for query columns.
         hierarchical_columns (List[str]): Hierarchical column names.
         query_columns (List[str]): Query column names.
-        domain_dict (Dict[str, Any]): Domain mapping for query columns.
-        constraints_dict (Dict[int, List]): Constraints mapped by level.
-        privacy_name (str): Name of the privacy mechanism ("PureDP", "ZCDP", "ApproximateDP", "RenyiDP").
-        level_params (List[float]): Per-level privacy parameters.
-        delta (Optional[float]): Delta parameter for ApproximateDP and RenyiDP.
-        alphas (Optional[List[float]]): Alpha values for RenyiDP.
+        privacy_mechanism (PrivacyMechanism): Privacy mechanism instance for noise addition.
+        query_matrix (spmatrix): The sparse query matrix Q used in optimization.
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.
     '''
@@ -51,28 +46,10 @@ def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query
 
     _data_handler.create_data_view()
 
-    # Create worker-specific microdata file (CSV format)
-    _data_handler.worker_microdata_file = os.path.join(microdata_dir, f'worker_{os.getpid()}.csv')
-    # File will be created when first data is written
-
     _constraints = constraints_dict
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
-    # TODO: constraints support - uncomment when ready
-    # _constraints = constraints_dict
-
-    # Instantiate privacy mechanism
-    if privacy_name == "PureDP":
-        _privacy_mechanism = PureDP(level_params)
-    elif privacy_name == "ZCDP":
-        _privacy_mechanism = ZCDP(level_params)
-    elif privacy_name == "ApproximateDP":
-        _privacy_mechanism = ApproximateDP(level_params, delta)
-    elif privacy_name == "RenyiDP":
-        _privacy_mechanism = RenyiDP(level_params, delta, alphas)
-    else:
-        raise ValueError(f"Unknown privacy mechanism: {privacy_name}")
-
+    _privacy_mechanism = privacy_mechanism
     _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray, constraints: List) -> List[Callable]:
@@ -113,8 +90,7 @@ def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray
     return joint_constraints 
 
 def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndarray) -> None:
-    '''
-    Checks that the sum of the values in the parent node vector 
+    '''Checks that the sum of the values in the parent node vector 
     is equal to the sum of the values in its children vectors.
 
     Args:
@@ -179,16 +155,23 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
     if _check: _check_node_correctness(contingency_vector, joint_contingency_vector)
 
+    joint_contingency_vector = None
+    joint_constraints = None
+
     microdata_time = 0.0
     if not is_leaf: _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_filter_dicts)
     else:
         t_microdata = time.time()
+        child_vectors = []
         start = 0
-        for filter_dict in children_filter_dicts:
+
+        for _ in children_filter_dicts:
             end = start + _data_handler.contingency_df_length
             updated_vector = joint_solution[start:end]
-            _data_handler.append_microdata_to_worker_file(updated_vector, filter_dict)
+            child_vectors.append(updated_vector)
             start = end
+
+        _data_handler.write_microdata(node_id, child_vectors, children_filter_dicts)
         microdata_time = time.time() - t_microdata
 
     print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')

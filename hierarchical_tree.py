@@ -51,8 +51,7 @@ class HierarchicalTree:
         return result.strip()
 
     def _count_nodes_per_level(self) -> dict:
-        '''
-        Count the number of nodes at each level of the tree using BFS.
+        '''Count the number of nodes at each level of the tree using BFS.
 
         Returns:
             dict: Dictionary with level as key and node count as value.

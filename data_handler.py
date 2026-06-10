@@ -24,7 +24,7 @@ class DataHandler:
 
         Args:
             file_path (Optional[str]): Path to the data file. Can be CSV or Parquet.
-            output_path (Optional[str]): Path to save the processed noisy data. Validated in initialize_output_file().
+            output_path (Optional[str]): Path to save the processed noisy data.
             domain (Optional[Dict[str, Sequence]]): Per-column set of all possible values, defining the contingency cell space.
                 Should be data-independent for a sound DP guarantee. When None or for any query column omitted,
                 the domain is inferred from the observed data (SELECT DISTINCT) with a warning.
@@ -32,25 +32,32 @@ class DataHandler:
         Attributes:
             file_path (Optional[str]): Path to the input data file.
             output_path (Optional[str]): Path where the noisy output CSV will be saved.
-            
+
             domain (Optional[Dict[str, Sequence]]): User-provided domain for query columns.
             contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces dense Cartesian-product table.
             contingency_df_length (Optional[int]): Total number of contingency cells (n_cells).
             dtype (str): NumPy data type for all arrays (default: 'int64').
-            
+
             hierarchical_columns (List[str]): Columns defining the tree hierarchy levels.
             query_columns (List[str]): Columns for generating the contingency table.
-            
+
             spill_dir (Optional[str]): Temporary directory for spilled node vectors. Set by initialize_directories().
             microdata_dir (Optional[str]): Temporary directory for worker microdata files. Set by initialize_directories().
             worker_microdata_file (Optional[str]): Path to the current worker's microdata file.
-            
+
             duckdb_con (Optional[duckdb.DuckDBPyConnection]): DuckDB connection for queries.
             data_view_name (str): Name of the DuckDB view for the input data.
         '''
         # Input and output paths
         self.file_path: Optional[str] = file_path
         self.output_path: Optional[str] = output_path
+
+        # Validate output file path
+        if output_path is not None:
+            path_obj = Path(output_path)
+            if not (path_obj.parent.exists() and path_obj.parent.is_dir()):
+                print(f"Warning: Output path {output_path} is not valid. 'noisy_data.csv' will be saved in the current directory instead.")
+                self.output_path = 'noisy_data.csv'
 
         # Mixed-radix cell space; the contingency vectors are indexed by its flat
         # cell index. Replaces the dense Cartesian-product DataFrame.
@@ -80,17 +87,6 @@ class DataHandler:
         self.microdata_dir = os.path.join(temp_dir, f'topdown_microdata_{pid}')
         os.makedirs(self.spill_dir, exist_ok=True)
         os.makedirs(self.microdata_dir, exist_ok=True)
-
-    def initialize_output_file(self) -> None:
-        '''Initialize the output CSV file with column headers.'''
-        path_obj = Path(self.output_path)
-        if not (path_obj.parent.exists() and path_obj.parent.is_dir()):
-            print(f"Warning: Output path {self.output_path} is not valid. 'noisy_data.csv' will be saved in the current directory instead.")
-            self.output_path = 'noisy_data.csv'
-
-        # Create empty DataFrame with the expected columns
-        empty_df = pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)
-        empty_df.to_csv(self.output_path, index=False, header=True)
 
     def cleanup_directories(self) -> None:
         '''Delete spill and microdata directories recursively.'''
@@ -408,28 +404,24 @@ class DataHandler:
             filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         '''
         start = 0
-        for filter_dict in filter_dicts:
+        for child_filter_dict in filter_dicts:
             end = start + vectors_length
-            path = self.spill_path(filter_dict)
+            path = self.spill_path(child_filter_dict)
             self.spill_vector(path, joint_solution[start:end])
             start = end
 
     def merge_microdata_files(self) -> None:
-        '''Merge microdata files from workers into the output CSV.'''
+        '''Merge Parquet microdata files into the output CSV using DuckDB.'''
+        parquet_pattern = os.path.join(self.microdata_dir, '*.parquet')
 
-        worker_files = [
-            os.path.join(self.microdata_dir, f) for f in os.listdir(self.microdata_dir)
-            if f.startswith('worker_') and f.endswith('.csv')
-        ]
-  
-        for worker_file in worker_files:
-            try:
-                with open(worker_file, 'rb') as src:
-                    with open(self.output_path, 'ab') as dst:
-                        shutil.copyfileobj(src, dst, length=1024 * 1024)
-                os.remove(worker_file)
-            except Exception as e:
-                print(f"Warning: Error merging microdata file {worker_file}: {e}")
+        try:
+            self.duckdb_con.execute(f"""
+                COPY (SELECT * FROM read_parquet('{parquet_pattern}'))
+                TO '{self.output_path}'
+                (FORMAT CSV, HEADER TRUE, DELIMITER ';')
+            """)
+        except Exception as e:
+            print(f"Warning: Error merging microdata files: {e}")
 
     def _construct_microdata_for_leaf(self, contingency_vector: np.ndarray, filter_dict: Dict[str, Any]) -> pd.DataFrame:
         '''Construct microdata for a leaf node.
@@ -465,12 +457,20 @@ class DataHandler:
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
 
-    def append_microdata_to_worker_file(self, contingency_vector: np.ndarray, filter_dict: Dict[str, Any]) -> None:
-        '''Construct microdata and append to worker's microdata file (CSV format).
+    def write_microdata(self, node_id: int, contingency_vectors: List[np.ndarray], filter_dicts: List[Dict[str, Any]]) -> List[str]:
+        '''Construct microdata for each child and write to separate Parquet files using DuckDB.
 
         Args:
-            contingency_vector (np.ndarray): The contingency vector (cell counts).
-            filter_dict (Dict[str, Any]): Filter dictionary for hierarchical values.
+            node_id (int): The parent node ID (used for naming the output files).
+            contingency_vectors (List[np.ndarray]): List of contingency vectors for each child.
+            filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
+
+        Returns:
+            List[str]: List of paths to the created Parquet files.
         '''
-        leaf_microdata = self._construct_microdata_for_leaf(contingency_vector, filter_dict)
-        leaf_microdata.to_csv(self.worker_microdata_file, mode='a', header=False, index=False)
+     
+        for i, (contingency_vector, filter_dict) in enumerate(zip(contingency_vectors, filter_dicts)):
+            df = self._construct_microdata_for_leaf(contingency_vector, filter_dict)
+            output_path = os.path.join(self.microdata_dir, f'node_{node_id}_child_{i}_microdata.parquet')
+            df.to_parquet(output_path, index=False)
+    

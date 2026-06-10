@@ -145,9 +145,7 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         # Initialize directories to temporarily save vectors and microdata
-        # Also output to put microdata
         self.data_handler.initialize_directories()
-        self.data_handler.initialize_output_file()
 
         print(self.tree, "\n")
 
@@ -172,28 +170,16 @@ class TopDown():
         self.data_handler.spill_vector(root_path, root.contingency_vector)
         root.contingency_vector = None
 
-        # Extract privacy mechanism parameters for passing to workers
-        privacy_name = self.privacy_mechanism.name
-        level_params = self.privacy_mechanism.level_params
-        delta = getattr(self.privacy_mechanism, 'delta', None)
-        alphas = getattr(self.privacy_mechanism, 'alphas', None)
-
         # Process remaining nodes
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
-                                initializer=init_process, initargs=(self.solver_options,
+                                initializer=init_process, initargs=(self.solver_options, self.constraints,
                                                                     self.data_handler.spill_dir,
                                                                     self.data_handler.microdata_dir,
-                                                                    self.Q,
                                                                     self.data_handler.file_path,
-                                                                    self.hierarchical_columns,
-                                                                    self.query_columns,
                                                                     self.data_handler.contingency_domain.domains,
-                                                                    self.constraints,
-                                                                    privacy_name,
-                                                                    level_params,
-                                                                    delta,
-                                                                    alphas,
-                                                                    self.query_sensitivity,
+                                                                    self.hierarchical_columns, self.query_columns,
+                                                                    self.privacy_mechanism,
+                                                                    self.Q, self.query_sensitivity,
                                                                     self.check_correctness)) as executor:
 
             def _submit(node):
@@ -221,7 +207,7 @@ class TopDown():
 
             # Merge microdata files from workers
             t_merge = time.time()
-            print(f'Merging microdata files...', end=' ')
+            print(f'\nMerging microdata files...', end=' ')
             self.data_handler.merge_microdata_files()
             merge_time = time.time() - t_merge
             print(f'{merge_time:.2f}s')
