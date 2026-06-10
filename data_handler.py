@@ -210,7 +210,7 @@ class DataHandler:
         col_names = self.query_columns + ["count"]
         return pd.DataFrame(result, columns=col_names)
 
-    def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None) -> sp.csr_matrix:
+    def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None) -> Tuple[sp.csr_matrix, np.ndarray]:
         '''Create a sparse contingency (column) vector for records matching filters.
 
         Queries the contingency table using tabla_contingencia, encodes cell indices,
@@ -221,21 +221,23 @@ class DataHandler:
             filters (Optional[Dict[str, Any]]): Dictionary mapping column names to values for filtering.
 
         Returns:
-            scipy.sparse.csr_matrix: Column vector of shape (n_cells, 1) with the
-                count for each contingency cell.
+            Tuple[scipy.sparse.csr_matrix, np.ndarray]: Column vector of shape (n_cells, 1) with
+                the count for each contingency cell, and the counts array (int64) for aggregation.
         '''
         if self.contingency_domain is None:
             raise ValueError("Contingency domain is not built. Call build_contingency_domain first.")
 
         data = self._reduce_dataframe(filters)
         flat_indices = self.contingency_domain.encode(data)
-        counts = data["count"].values
+        counts = data["count"].values.astype(self.dtype)
 
-        return sp.csr_matrix(
+        sparse_vector = sp.csr_matrix(
             (counts, (flat_indices, np.zeros(len(flat_indices), dtype=np.int64))),
             shape=(self.contingency_domain.n_cells, 1),
             dtype=self.dtype,
         )
+
+        return sparse_vector, counts
 
     def build_hierarchical_tree(self) -> HierarchicalTree:
         '''Build a hierarchical tree structure based on hierarchical columns.
@@ -447,7 +449,7 @@ class DataHandler:
             raise ValueError("Contingency domain is not built. Call build_contingency_domain first.")
 
         # Build the measurement vector y = Q @ x from the sparse histogram using DuckDB query
-        x = self._create_contingency_vector(filter_dict)  # sparse (n_cells, 1)
+        x, counts = self._create_contingency_vector(filter_dict)  # sparse (n_cells, 1), counts array
 
         if sp.issparse(query_matrix):
             y = np.asarray((query_matrix @ x).todense()).ravel()
@@ -458,13 +460,13 @@ class DataHandler:
 
         # Prepare constraints for the node (placeholder for constraint implementation)
         level_constraints = []
-        # for constraint in constraints:
-        #     # Apply aggregation for constraints that compute dynamically
-        #     match constraint:
-        #         case ContextualAggregateConstraint():
-        #             constraint.apply_aggregation_function(filtered_df)
+        for constraint in constraints:
+            # Apply aggregation for constraints that compute dynamically
+            match constraint:
+                case ContextualAggregateConstraint():
+                    constraint.apply_aggregation_function(counts)
 
-        #     # Convert to optimizer callable against the contingency domain
-        #     level_constraints.append(constraint.to_constraint(self.contingency_domain))
+            # Convert to optimizer callable against the contingency domain
+            level_constraints.append(constraint.to_constraint(self.contingency_domain))
 
         return contingency_vector, level_constraints
