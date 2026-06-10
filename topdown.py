@@ -28,7 +28,8 @@ class TopDown():
                  privacy_mechanism: PrivacyMechanism,
                  out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
                  solver_options: dict = {}, optimizer_path: Optional[str] = None,
-                 domain: Optional[Dict[str, List]] = None) -> None:
+                 domain: Optional[Dict[str, List]] = None, num_workers: int = 2,
+                 check_correctness: bool = False) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -46,6 +47,8 @@ class TopDown():
                 query columns, defining the contingency cell space. Should be data-independent
                 for a sound DP guarantee. When None (or a column omitted), the domain is inferred
                 from the observed data with a warning. Passed through to DataHandler.
+            num_workers (int): Number of parallel workers for the estimation phase. Defaults to 2.
+            check_correctness (bool): Whether to check correctness during execution. Defaults to False.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -93,8 +96,9 @@ class TopDown():
         
         self.solver_options = solver_options
 
-        self.workers = 2
-        
+        self.workers = num_workers
+        self.check_correctness = check_correctness
+
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
 
@@ -189,7 +193,8 @@ class TopDown():
                                                                     level_params,
                                                                     delta,
                                                                     alphas,
-                                                                    self.query_sensitivity)) as executor:
+                                                                    self.query_sensitivity,
+                                                                    self.check_correctness)) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)

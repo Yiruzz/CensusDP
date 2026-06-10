@@ -95,8 +95,8 @@ def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray
     #     start = end
 
     # Add consistency constraints: parent value at each index = sum of child values at that index
-    for index in range(_vectors_length):
-        indices_to_sum = [index + i * _vectors_length for i in range(num_children)]
+    for index in range(_data_handler.contingency_df_length):
+        indices_to_sum = [index + i * _data_handler.contingency_df_length for i in range(num_children)]
         joint_constraints.append(
             lambda joint_array, idxs=indices_to_sum, value=contingency_vector[index]:
                 sum(joint_array[j] for j in idxs) == value
@@ -175,6 +175,6 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
 
     if _check: _check_node_correctness(contingency_vector, joint_contingency_vector)
 
-    _data_handler.update_child_vectors(joint_solution, _vectors_length, children_paths)
+    _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_paths)
 
     print(f'  [Node {geo_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
