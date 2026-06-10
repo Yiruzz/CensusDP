@@ -149,6 +149,9 @@ class TopDown():
         # Initialize output file with headers
         self.data_handler.initialize_output_file()
 
+        # Initialize temporary directory for worker microdata files
+        self.data_handler.initialize_microdata_dir()
+
         print(self.tree, "\n")
 
     def estimation_phase(self) -> None:
@@ -181,6 +184,7 @@ class TopDown():
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
                                 initializer=init_process, initargs=(self.solver_options,
                                                                     self.data_handler.spill_dir,
+                                                                    self.data_handler.microdata_dir,
                                                                     self.Q,
                                                                     self.data_handler.file_path,
                                                                     self.hierarchical_columns,
@@ -200,28 +204,36 @@ class TopDown():
                 node_path = self.data_handler.spill_path(node.filter_dict)
                 children_filter_dicts = [child.filter_dict for child in node.children]
                 children_level = node.children[0].level
+                is_leaf = node.children[0].is_leaf()
 
                 return executor.submit(estimate_and_update_children, node.geo_id, node_path,
-                                     children_filter_dicts, children_level)
+                                     children_filter_dicts, children_level, is_leaf)
             
+            total_microdata_time = 0.0
             futures = {_submit(root): root}
             while futures:
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
                 for fut in done:
-                    fut.result()
+                    worker_microdata_time = fut.result()
+                    total_microdata_time += worker_microdata_time if worker_microdata_time is not None else 0.0
                     node = futures.pop(fut)
 
-                    if node.children[0].is_leaf():
-                        for child in node.children:
-                            child.contingency_vector = self.data_handler.load_vector(self.data_handler.spill_path(child.filter_dict))
-                            self.data_handler.write_microdata_for_leaf(child)
-                            child.contingency_vector = None
-                    else:
+                    if not node.children[0].is_leaf():
                         for child in node.children:
                             futures[_submit(child)] = child
 
+            # Merge microdata files from workers
+            t_merge = time.time()
+            print(f'Merging microdata files...', end=' ')
+            self.data_handler.merge_microdata_files()
+            merge_time = time.time() - t_merge
+            print(f'{merge_time:.2f}s')
+            print(f'  Worker microdata time: {total_microdata_time:.2f}s')
+            print(f'  Total microdata (workers + merge): {total_microdata_time + merge_time:.2f}s')
+
         self.data_handler.cleanup_spill()
+        self.data_handler.cleanup_microdata_dir()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
@@ -296,3 +308,4 @@ class TopDown():
             self.estimation_phase()
         finally:
             self.data_handler.cleanup_spill()
+            self.data_handler.cleanup_microdata_dir()

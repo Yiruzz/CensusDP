@@ -74,6 +74,12 @@ class DataHandler:
         # Define path to dir to save vectors
         self.spill_dir: str = os.path.join(tempfile.gettempdir(), f'topdown_spill_{os.getpid()}')
 
+        # Directory for temporary microdata files
+        self.microdata_dir: Optional[str] = None
+
+        # Worker-specific microdata file path
+        self.worker_microdata_file: Optional[str] = None
+
         # DuckDB connection for queries
         self.duckdb_con: Optional[duckdb.DuckDBPyConnection] = None
 
@@ -82,6 +88,16 @@ class DataHandler:
         # Create empty DataFrame with the expected columns
         empty_df = pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)
         empty_df.to_csv(self.output_path, index=False, header=True)
+
+    def initialize_microdata_dir(self) -> None:
+        '''Initialize the temporary directory for worker microdata files.'''
+        self.microdata_dir = os.path.join(tempfile.gettempdir(), f'topdown_microdata_{os.getpid()}')
+        os.makedirs(self.microdata_dir, exist_ok=True)
+
+    def cleanup_microdata_dir(self) -> None:
+        '''Delete the temporary microdata directory.'''
+        if self.microdata_dir and os.path.isdir(self.microdata_dir):
+            shutil.rmtree(self.microdata_dir, ignore_errors=True)
 
     def convert_csv_to_parquet(self) -> None:
         '''Convert CSV file to Parquet format using DuckDB.
@@ -342,29 +358,19 @@ class DataHandler:
         contingency_vector = np.load(path)
         os.remove(path)
         return contingency_vector
-    
-    def combine_child_vectors(self, paths: List[str]) -> np.ndarray:
-        '''Combine multiple child contingency vectors into a single joint vector.
 
-        Args:
-            paths (List[str]): List of file paths for child contingency vectors.
-
-        Returns:
-            np.ndarray: Concatenated vector of all children's contingency vectors.
-        '''
-        return np.concatenate([self.load_vector(path) for path in paths]) 
-
-    def update_child_vectors(self, joint_solution: np.ndarray, vectors_length: int, paths: List[str]) -> None:
+    def update_child_vectors(self, joint_solution: np.ndarray, vectors_length: int, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
 
         Args:
             joint_solution (np.ndarray): The combined solution vector for all children.
             vectors_length (int): The length of each individual child vector.
-            paths (List[str]): List of file paths where each child vector will be spilled.
+            filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         '''
         start = 0
-        for path in paths:
+        for filter_dict in filter_dicts:
             end = start + vectors_length
+            path = self.spill_path(filter_dict)
             self.spill_vector(path, joint_solution[start:end])
             start = end
 
@@ -373,11 +379,28 @@ class DataHandler:
         if os.path.isdir(self.spill_dir):
             shutil.rmtree(self.spill_dir, ignore_errors=True)
 
-    def _construct_microdata_for_leaf(self, node: HierarchicalNode) -> pd.DataFrame:
-        '''Construct microdata for a specific leaf node.
+    def merge_microdata_files(self) -> None:
+        '''Merge microdata files from workers into the output CSV.'''
+        worker_files = [
+            os.path.join(self.microdata_dir, f) for f in os.listdir(self.microdata_dir)
+            if f.startswith('worker_') and f.endswith('.csv')
+        ]
+
+        for worker_file in worker_files:
+            try:
+                with open(worker_file, 'rb') as src:
+                    with open(self.output_path, 'ab') as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+                os.remove(worker_file)
+            except Exception as e:
+                print(f"Warning: Error merging microdata file {worker_file}: {e}")
+
+    def _construct_microdata_for_leaf(self, contingency_vector: np.ndarray, filter_dict: Dict[str, Any]) -> pd.DataFrame:
+        '''Construct microdata for a leaf node.
 
         Args:
-            node (HierarchicalNode): The leaf node with materialized contingency vector.
+            contingency_vector (np.ndarray): The contingency vector (cell counts).
+            filter_dict (Dict[str, Any]): Filter dictionary for hierarchical values.
 
         Returns:
             pd.DataFrame: Microdata for this leaf node.
@@ -385,47 +408,26 @@ class DataHandler:
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
         domain = self.contingency_domain
 
-        if not node.is_leaf():
-            raise ValueError("Node must be a leaf node.")
-
-        if node.contingency_vector is None:
-            raise ValueError("Node contingency vector is not materialized.")
-
-        # After estimation, the node's vector holds the estimated cell counts x_hat
-        # (length n_cells). Select only positive frequencies.
-        contingency_vector = node.contingency_vector
+        # Select only positive frequencies
         nonzero_idx = np.flatnonzero(contingency_vector > 0)
 
-        # Decode only the nonzero cells into their attribute combinations,
-        # avoiding any full (n_cells x k) combination table.
+        # Decode only the nonzero cells into their attribute combinations
         filtered_query_values = domain.decode(nonzero_idx)
         filtered_counts = contingency_vector[nonzero_idx]
 
-        # Repeat each combination according to its frequency.
+        # Repeat each combination according to its frequency
         expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
 
-        # Create DataFrame for the leaf.
+        # Create DataFrame for the leaf
         leaf_df = pd.DataFrame(expanded_rows, columns=self.query_columns)
 
-        # Generate columns associated with hierarchical values from filter_dict.
-        for column_name, value in node.filter_dict.items():
+        # Generate columns associated with hierarchical values from filter_dict
+        for column_name, value in filter_dict.items():
             leaf_df[column_name] = value
 
         # Reorder columns to match output file order: hierarchical + query
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
-
-    def write_microdata_for_leaf(self, node: HierarchicalNode) -> None:
-        '''Construct microdata for a leaf node and append to output file.
-
-        Args:
-            node (HierarchicalNode): The leaf node with materialized contingency vector.
-        '''
-        # Construct microdata for this leaf
-        leaf_microdata = self._construct_microdata_for_leaf(node)
-        leaf_microdata.to_csv(self.output_path, mode='a', header=False, index=False)
-        node.contingency_vector = None
-        node.constraints = None
 
     def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.

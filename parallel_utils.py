@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import os
 from scipy.sparse import spmatrix
 
 from optimizer import OptimizationModel
@@ -9,7 +10,7 @@ from privacy import PureDP, ZCDP, ApproximateDP, RenyiDP
 
 from typing import List, Callable, Dict, Any, Optional
 
-def init_process(solver_options: dict, dir: str, query_matrix: spmatrix,
+def init_process(solver_options: dict, spill_dir: str, microdata_dir: str, query_matrix: spmatrix,
                  parquet_path: str, hierarchical_columns: List[str], query_columns: List[str],
                  domain_dict: Dict[str, Any], constraints_dict: Optional[Dict[int, List]], privacy_name: str,
                  level_params: List[float], delta: Optional[float] = None,
@@ -19,7 +20,8 @@ def init_process(solver_options: dict, dir: str, query_matrix: spmatrix,
 
     Args:
         solver_options (dict): Dictionary of options to pass to the optimization solver.
-        dir (str): Directory path for spilling vectors to disk.
+        spill_dir (str): Directory path for spilling vectors to disk.
+        microdata_dir (str): Directory path for temporary microdata files.
         query_matrix (spmatrix): The sparse query matrix Q used in optimization.
         parquet_path (str): Path to the parquet file.
         hierarchical_columns (List[str]): Hierarchical column names.
@@ -38,7 +40,8 @@ def init_process(solver_options: dict, dir: str, query_matrix: spmatrix,
     _optimizer = OptimizationModel(solver_options=solver_options)
 
     _data_handler = DataHandler()
-    _data_handler.spill_dir = dir
+    _data_handler.spill_dir = spill_dir
+    _data_handler.microdata_dir = microdata_dir
     _data_handler.hierarchical_columns = hierarchical_columns
     _data_handler.query_columns = query_columns
     _data_handler.file_path = parquet_path
@@ -47,6 +50,10 @@ def init_process(solver_options: dict, dir: str, query_matrix: spmatrix,
     _data_handler.contingency_df_length = _data_handler.contingency_domain.n_cells
 
     _data_handler.create_data_view()
+
+    # Create worker-specific microdata file (without headers)
+    _data_handler.worker_microdata_file = os.path.join(microdata_dir, f'worker_{os.getpid()}.csv')
+    # File will be created when first data is written
 
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
@@ -64,7 +71,7 @@ def init_process(solver_options: dict, dir: str, query_matrix: spmatrix,
         _privacy_mechanism = RenyiDP(level_params, delta, alphas)
     else:
         raise ValueError(f"Unknown privacy mechanism: {privacy_name}")
-    
+
     _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray, constraints: List) -> List[Callable]:
@@ -120,7 +127,7 @@ def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndar
         print(f"\nError: The sum of the children nodes' contingency vectors "
               f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
 
-def estimate_and_update_children(geo_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, constraints: List[Callable] = []) -> None:
+def estimate_and_update_children(geo_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, is_leaf: bool = False, constraints: List[Callable] = []) -> Optional[float]:
     '''Solve optimization for a node considering its children and update their vectors.
 
     Args:
@@ -128,13 +135,17 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
         node_path (str): Path to contigency vector file.
         children_filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         children_level (int): Level of all children (they all share the same level).
+        is_leaf (bool): Whether children are leaf nodes. Defaults to False.
         constraints (List[Callable]): List of constraint functions for the optimization. Defaults to empty List.
-    '''
 
+    Returns:
+        Optional[float]: Time spent writing microdata files, or None if not writing.
+    '''
     contingency_vector = _data_handler.load_vector(node_path)
 
-    # Materialize children in this worker process
-    children_paths = []
+    # Materialize and combine children vectors in memory
+    children_vectors = []
+
     for filter_dict in children_filter_dicts:
         # TODO: constraints support - uncomment when ready
         # child_constraints = _constraints[children_level]
@@ -142,19 +153,13 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
 
         # Materialize the child node in this worker
         child_vector, _ = _data_handler.materialize_node_data(filter_dict, child_constraints, _Q)
-
-        # Add noise to the child vector
         _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+        children_vectors.append(child_vector)
 
-        # Spill to disk for consistency with existing workflow
-        child_path = _data_handler.spill_path(filter_dict)
-        _data_handler.spill_vector(child_path, child_vector)
-        children_paths.append(child_path)
+    # Concatenate children vectors in memory
+    joint_contingency_vector = np.concatenate(children_vectors)
 
-    # Load children vectors (this also deletes the files)
-    joint_contingency_vector = _data_handler.combine_child_vectors(children_paths)
-
-    joint_constraints = _combine_child_constraints(len(children_paths), contingency_vector, constraints)
+    joint_constraints = _combine_child_constraints(len(children_filter_dicts), contingency_vector, constraints)
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(
@@ -175,6 +180,24 @@ def estimate_and_update_children(geo_id: int, node_path: str, children_filter_di
 
     if _check: _check_node_correctness(contingency_vector, joint_contingency_vector)
 
-    _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_paths)
+    microdata_time = 0.0
+
+    if not is_leaf:
+        _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_filter_dicts)
+    else:
+        t_microdata = time.time()
+        start = 0
+        for filter_dict in children_filter_dicts:
+            end = start + _data_handler.contingency_df_length
+            updated_vector = joint_solution[start:end]
+
+            # Construct microdata and append to worker's CSV file
+            leaf_microdata = _data_handler._construct_microdata_for_leaf(updated_vector, filter_dict)
+            leaf_microdata.to_csv(_data_handler.worker_microdata_file, mode='a', header=False, index=False)
+
+            start = end
+        microdata_time = time.time() - t_microdata
 
     print(f'  [Node {geo_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+
+    return microdata_time
