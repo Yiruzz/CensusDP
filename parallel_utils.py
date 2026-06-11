@@ -153,7 +153,7 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     )
     rounding_time = time.time() - t1
 
-    if _check: _check_node_correctness(contingency_vector, joint_contingency_vector)
+    if _check: _check_node_correctness(contingency_vector, joint_solution)
 
     joint_contingency_vector = None
     joint_constraints = None
