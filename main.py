@@ -15,7 +15,8 @@ from queries import QueryWorkload, col
 
 
 
-def main(process_until: str, queries: list[str], user_constraints: bool, traversal_method: str = 'bfs'):
+def main(process_until: str, queries: list[str], user_constraints: bool,
+         num_workers: int, check_correctness: bool):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -107,7 +108,8 @@ def main(process_until: str, queries: list[str], user_constraints: bool, travers
         solver_name=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
         optimizer_path=OPT_PATH,
-        traversal_method=traversal_method
+        num_workers=num_workers,
+        check_correctness=check_correctness,
     )
 
     # Set the queries to be answered at each node of the tree.
@@ -193,10 +195,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool, travers
 
     # Finally, we can run the TopDown algorithm
     topdown.run()
-    
-    # This method can be used to check the correctness of the results.
-    # Also used for testing purposes.
-    #topdown.check_correctness()
 
     # Privacy garantee
     #print(topdown.privacy_mechanism.report_guarantee())
@@ -224,12 +222,18 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--traversal_method",
-        choices=["bfs", "dfs"],
-        default="bfs",
-        help="Tree traversal method for estimation phase (bfs: breadth-first, dfs: depth-first). Defaults to bfs.",
+        "--num_workers",
+        type=int,
+        default=2,
+        help="Number of workers for parallel execution (default: 2)",
+    )
+
+    parser.add_argument(
+        "--check_correctness",
+        action="store_true",
+        help="Whether to check correctness during execution",
     )
 
     args = parser.parse_args()
 
-    main(args.process_until, args.queries, args.user_constraints, args.traversal_method)
+    main(args.process_until, args.queries, args.user_constraints, args.num_workers, args.check_correctness)

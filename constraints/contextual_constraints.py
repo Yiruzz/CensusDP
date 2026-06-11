@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 from functools import partial
 from typing import Callable, List
 
@@ -19,29 +18,29 @@ class ContextualAggregateConstraint(AggregateConstraint, ABC):
     That means that the value of the constraint can be dynamically calculated based on the
     DataFrame associated with the node's context.
     """
-    def __init__(self, expression: LogicalExpression, aggregation_function: Callable[[pd.DataFrame], int]) -> None:
+    def __init__(self, expression: LogicalExpression, aggregation_function: Callable[[np.ndarray], int]) -> None:
         """
         Constructor of a ContextualAggregateConstraint.
         Args:
             expression (LogicalExpression): A logical expression to aggregate over.
-            aggregation_function (Callable[[pd.DataFrame], int], optional): A function 
-                to calculate the value dynamically using the node's DataFrame. Defaults to None.
+            aggregation_function (Callable[[np.ndarray], int], optional): A function
+                to calculate the value dynamically using the node's counts array. Defaults to None.
         """
         # We initialize the base AggregateConstraint with a placeholder value (-1).
-        # It will be changed later when we apply the aggregation function at runtime. 
+        # It will be changed later when we apply the aggregation function at runtime.
         super().__init__(expression=expression, value=-1)
         self.aggregation_function = aggregation_function
         
-    def apply_aggregation_function(self, contextualized_df: pd.DataFrame) -> int:
+    def apply_aggregation_function(self, counts: np.ndarray) -> int:
         """Calculate the value for the aggregate expression.
 
         Args:
-            contingency_df (pd.DataFrame): The DataFrame to use for calculation.
+            counts (np.ndarray): The counts array to use for calculation.
         Returns:
             int: The calculated value.
         """
         if self.aggregation_function is not None:
-            self.value = self.aggregation_function(contextualized_df)
+            self.value = self.aggregation_function(counts)
             return self.value
         else:
             raise ValueError("No aggregation_function provided to compute the value.")
@@ -49,13 +48,15 @@ class ContextualAggregateConstraint(AggregateConstraint, ABC):
 
 class SumEqualRealTotal(ContextualAggregateConstraint):
     """Convenience class for the user to easily set the Real Total constraint."""
+
+    @staticmethod
+    def get_real_total(counts):
+        return counts.sum()
+    
     def __init__(self, expression: LogicalExpression) -> None:
 
-        # Function to calculate the real total from the DataFrame
-        get_real_total = lambda df: len(df)
-        
-        # The true total is the count of rows in the node's context
-        super().__init__(expression=expression, aggregation_function=get_real_total)
+        # The true total is the sum of all counts in the node's context
+        super().__init__(expression=expression, aggregation_function=SumEqualRealTotal.get_real_total)
 
     @staticmethod
     def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
