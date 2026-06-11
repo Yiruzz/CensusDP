@@ -1,10 +1,14 @@
-import pandas as pd
 import numpy as np
 import scipy.sparse as sp
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from multiprocessing import get_context
+
 from hierarchical_tree import HierarchicalTree
+from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
+from parallel_utils import init_process, estimate_and_update_children
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
@@ -21,11 +25,9 @@ class TopDown():
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism,
-                 out_path: str = 'noisy_data.csv', solver_name: str = 'gurobi',
-                 solver_options: dict = None, optimizer_path: str = None,
-                 traversal_method: str = 'bfs',
-                 domain: Optional[Dict[str, List]] = None) -> None:
+                 privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
+                 solver_name: str = 'gurobi', solver_options: dict = {}, optimizer_path: Optional[str] = None,
+                 domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
         '''
         Initialize the TopDown algorithm.
 
@@ -39,12 +41,12 @@ class TopDown():
             solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
             solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
             optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
-            traversal_method (str): Tree traversal method for estimation phase: 'bfs' or 'dfs'. Defaults to 'bfs'.
-                DFS is the most natural for resource savings (one root-to-leaf branch resident at a time).
             domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
                 query columns, defining the contingency cell space. Should be data-independent
                 for a sound DP guarantee. When None (or a column omitted), the domain is inferred
                 from the observed data with a warning. Passed through to DataHandler.
+            num_workers (int): Number of parallel workers for the estimation phase. Defaults to 2.
+            check_correctness (bool): Whether to check correctness during execution. Defaults to False.
 
         Attributes:
             data_handler (DataHandler): Instance of DataHandler for managing data operations.
@@ -57,9 +59,9 @@ class TopDown():
             tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
             optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
 
-            constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints
+            constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints.
 
-            traversal_method (str): The traversal method to use in estimation phase ('bfs' or 'dfs').
+            workers (int): Number of parallel workers for estimation phase.
         '''
         n_levels = len(hierarchy) + 1
         if len(privacy_mechanism.level_params) != n_levels:
@@ -84,17 +86,17 @@ class TopDown():
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
-        if solver_options is None:
-            solver_options = {}
-
         self.optimizer: OptimizationModel = OptimizationModel(
             solver_name=solver_name,
             solver_options=solver_options,
             optimizer_path=optimizer_path
         )
-
-        self.traversal_method: str = traversal_method
         
+        self.solver_options = solver_options
+
+        self.workers = num_workers
+        self.check_correctness = check_correctness
+
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
 
@@ -102,14 +104,17 @@ class TopDown():
         and builds the hierarchical tree structure (without computing contingency vectors).
         '''
         print(f'Initializing TopDown algorithm...')
+
         t1 = time.time()
-        print(f'Reading data from {self.data_handler.file_path}...', end=' ')
-        self.data_handler.read_data(self.hierarchical_columns + self.query_columns, sep=';')
+        print(f'Converting CSV to Parquet if needed...', end=' ')
+        self.data_handler.convert_csv_to_parquet()
         print(f'{time.time() - t1:.2f} seconds.')
+
+        self.data_handler.create_data_view()
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
-        self.data_handler.build_contingency_domain(self.query_columns)
+        self.data_handler.build_contingency_domain()
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
@@ -135,18 +140,16 @@ class TopDown():
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         t1 = time.time()
-        # Build only the tree structure; contingency vectors and constraints are
-        # materialized lazily per node during the estimation phase (DFS/BFS + spill).
         print(f'Building hierarchical tree structure...', end=' ')
         self.tree = self.data_handler.build_hierarchical_tree()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
-        # Initialize output file with headers
-        self.data_handler.initialize_output_file()
+        # Initialize directories to temporarily save vectors and microdata
+        self.data_handler.initialize_directories()
 
         print(self.tree, "\n")
 
-    def estimation_phase_bfs(self) -> None:
+    def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
 
         Uses breadth-first traversal with lazy materialization to minimize memory usage.
@@ -154,85 +157,91 @@ class TopDown():
         print(f'Running estimation phase (BFS)...')
         t1 = time.time()
 
-        # Materialize root and its children immediately
+        # Materialize root
         root = self.tree.root
-        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level], self.Q)
+        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
         self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
-        self.data_handler.spill_vector(root) 
 
-        queue = deque([root])
-        
+        # Save the contingency vector to disk.
+        root_path = self.data_handler.spill_path(root.filter_dict)
+        self.data_handler.spill_vector(root_path, root.contingency_vector)
+        root.contingency_vector = None
+
         # Process remaining nodes
-        while queue:
-            node = queue.popleft()
-            self.data_handler.load_vector(node)
+        with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
+                                initializer=init_process, initargs=(self.solver_options, self.constraints,
+                                                                    self.data_handler.spill_dir,
+                                                                    self.data_handler.microdata_dir,
+                                                                    self.data_handler.file_path,
+                                                                    self.data_handler.contingency_domain.domains,
+                                                                    self.hierarchical_columns, self.query_columns,
+                                                                    self.privacy_mechanism,
+                                                                    self.Q, self.query_sensitivity,
+                                                                    self.check_correctness)) as executor:
 
-            # Materialize all children's vectors
-            for child in node.children:
-                child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
-                self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
+            def _submit(node):
+                node_path = self.data_handler.spill_path(node.filter_dict)
+                children_filter_dicts = [child.filter_dict for child in node.children]
+                children_level = node.children[0].level
+                is_leaf = node.children[0].is_leaf()
 
-            self._estimate_and_update_children(node)
-            self._check_correctness_node(node)
-            node.contingency_vector = None
-            node.constraints = None
-        
-            if node.children[0].is_leaf():
-                for child in node.children:
-                    self.data_handler.write_microdata_for_leaf(child)
-            else:
-                for child in node.children:
-                    self.data_handler.spill_vector(child)
-                    queue.append(child)
+                return executor.submit(estimate_and_update_children, node.id, node_path,
+                                     children_filter_dicts, children_level, is_leaf)
+            
+            total_microdata_time = 0.0
+            futures = {_submit(root): root}
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
-        self.data_handler.cleanup_spill()
+                for fut in done:
+                    worker_microdata_time = fut.result()
+                    total_microdata_time += worker_microdata_time
+                    node = futures.pop(fut)
+
+                    if not node.children[0].is_leaf():
+                        for child in node.children:
+                            futures[_submit(child)] = child
+
+            # Merge microdata files from workers
+            t_merge = time.time()
+            print(f'\nMerging microdata files...', end=' ')
+            self.data_handler.merge_microdata_files()
+            merge_time = time.time() - t_merge
+            print(f'{merge_time:.2f}s')
+            print(f'  Worker microdata time: {total_microdata_time:.2f}s')
+            print(f'  Total microdata (workers + merge): {total_microdata_time + merge_time:.2f}s')
+
+        self.data_handler.cleanup_directories()
         print(f'{time.time() - t1:.2f} seconds.\n')
-    
-    def estimation_phase_dfs(self) -> None:
-        '''Perform the estimation phase using depth-first traversal.
 
-        Uses DFS with lazy materialization to minimize memory usage.
-        Processes leaf nodes as they are encountered during traversal.
-        '''
-        print(f'Running estimation phase (DFS)...')
-        t1 = time.time()
-
-        root = self.tree.root
-        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.hierarchical_path, self.constraints[root.level], self.Q)
-        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
-        self._estimate_node_individually(root)
-
-        self._dfs_process_children(root)
-        self.data_handler.cleanup_spill()
-        print(f'{time.time() - t1:.2f} seconds.\n')
-
-    def _dfs_process_children(self, node) -> None:
-        '''Recursively process children using DFS.
+    def _estimate_node_individually(self, node: HierarchicalNode) -> None:
+        '''Solve optimization for a node's own contingency vector.
 
         Args:
-            node (HierarchicalNode): The current node being processed.
+            node (HierarchicalNode): The node to process.
         '''
-        for child in node.children:
-            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.hierarchical_path, self.constraints[child.level], self.Q)
-            self.privacy_mechanism.add_noise(child.contingency_vector, child.level, self.query_sensitivity)
 
-        self._estimate_and_update_children(node)
-        self._check_correctness_node(node)
-        node.contingency_vector = None
-        node.constraints = None
+        t1 = time.time()
+        x_tilde = self.optimizer.non_negative_real_estimation(
+            noisy_measurements=node.contingency_vector,
+            node_id=node.id,
+            constraints=node.constraints,
+            query_matrix=self.Q
+        )
+        real_time = time.time() - t1
 
-        if node.children[0].is_leaf():
-            for child in node.children:
-                self.data_handler.write_microdata_for_leaf(child)
-        else:
-            for child in node.children:
-                self.data_handler.spill_vector(child)
-            for child in node.children:
-                self.data_handler.load_vector(child)
-                self._dfs_process_children(child)
+        t1 = time.time()
+        node.contingency_vector = self.optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.id,
+            constraints=node.constraints
+        )
+        rounding_time = time.time() - t1
+
+        print(f'  [Node {node.id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
@@ -269,102 +278,14 @@ class TopDown():
         '''
         self.Q = query_matrix
 
-    def _estimate_node_individually(self, node) -> None:
-        '''Solve optimization for a node's own contingency vector.
-
-        Args:
-            node (HierarchicalNode): The node to process.
-        '''
-        print(f'  Estimating node {node.geo_id} individually...', end=' ')
-
-        t1 = time.time()
-        x_tilde = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=node.contingency_vector,
-            node_id=node.geo_id,
-            constraints=node.constraints,
-            query_matrix=self.Q
-        )
-        non_neg_time = time.time() - t1
-
-        t1 = time.time()
-        node.contingency_vector = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            node_id=node.geo_id,
-            constraints=node.constraints
-        )
-        rounding_time = time.time() - t1
-
-        print(f'non negative {non_neg_time:.1f}s - rounding {rounding_time:.1f}s')
-
-    def _estimate_and_update_children(self, node) -> None:
-        '''Solve optimization for a node considering its children and update their vectors.
-
-        Args:
-            node (HierarchicalNode): The node to process.
-        '''
-        print(f'  Estimating node {node.geo_id} with children...', end=' ')
-
-        joint_contingency_vector = node.combine_child_vectors()
-        constraints = node.combine_child_constraints()
-
-        # Cells where the parent is non-zero. By non-negativity + consistency, children can only 
-        # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j} 
-        # so the optimizers instantiate variables only there.
-        support = node.contingency_vector.indices
-        n_cells = node.contingency_vector.shape[0]
-        n_joint = len(node.children) * n_cells
-        active = [k * n_cells + int(j) for k in range(len(node.children)) for j in support]
-
-        t1 = time.time()
-        x_tilde = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=joint_contingency_vector,
-            node_id=node.geo_id,
-            constraints=constraints,
-            query_matrix=self.Q,
-            active=active
-        )
-        non_neg_time = time.time() - t1
-
-        t1 = time.time()
-        joint_solution = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            node_id=node.geo_id,
-            constraints=constraints,
-            active=active,
-            n=n_joint
-        )
-        rounding_time = time.time() - t1
-
-        node.update_child_vectors(joint_solution)
-
-        print(f'non negative {non_neg_time:.1f}s - rounding {rounding_time:.1f}s')
-  
-    def _check_correctness_node(self, node) -> None:
-        '''Checks that the sum of the values of the current node are equal to the sum of the values of its children.
-
-        Args:
-            node (HierarchicalNode): The node to check.
-        '''
-        node_sum = node.contingency_vector.sum()
-        children_sum = 0
-        for child in node.children:
-            children_sum += child.contingency_vector.sum()
-
-        if node_sum != children_sum:
-            print(node_sum, children_sum)
-            print(f'\nError: The sum of the contingency vectors of the children nodes is not equal to the parent node\'s contingency vector.')
-
     def run(self) -> None:
         '''Run the TopDown algorithm end-to-end.
 
         This method executes the full TopDown algorithm, including initialization,
         estimation phase, and microdata construction.
         '''
-        self.initialize()
         try:
-            if self.traversal_method == 'bfs':
-                self.estimation_phase_bfs()
-            else:
-                self.estimation_phase_dfs()
+            self.initialize()
+            self.estimation_phase()
         finally:
-            self.data_handler.cleanup_spill()
+            self.data_handler.cleanup_directories()
