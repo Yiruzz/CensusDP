@@ -1,5 +1,4 @@
 import os
-import tempfile
 import shutil
 import warnings
 import pandas as pd
@@ -80,11 +79,11 @@ class DataHandler:
         self.data_view_name: str = 'data'
 
     def initialize_directories(self) -> None:
-        '''Create directories for spilled vectors and temporary microdata.'''
-        temp_dir = tempfile.gettempdir()
+        '''Create directories for spilled vectors and temporary microdata in project root.'''
+        cache_dir = os.path.join(os.getcwd(), 'data_cache')
         pid = os.getpid()
-        self.spill_dir = os.path.join(temp_dir, f'topdown_spill_{pid}')
-        self.microdata_dir = os.path.join(temp_dir, f'topdown_microdata_{pid}')
+        self.spill_dir = os.path.join(cache_dir, f'topdown_spill_{pid}')
+        self.microdata_dir = os.path.join(cache_dir, f'topdown_microdata_{pid}')
         os.makedirs(self.spill_dir, exist_ok=True)
         os.makedirs(self.microdata_dir, exist_ok=True)
 
