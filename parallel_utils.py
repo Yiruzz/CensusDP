@@ -43,7 +43,7 @@ def init_process(solver_options: dict, constraints_dict: Dict[int, List],
     _data_handler.file_path = parquet_path
 
     _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
-    _data_handler.contingency_df_length = _data_handler.contingency_domain.n_cells
+    _data_handler.n_cells = _data_handler.contingency_domain.n_cells
 
     _data_handler.create_data_view()
 
@@ -53,7 +53,7 @@ def init_process(solver_options: dict, constraints_dict: Dict[int, List],
     _privacy_mechanism = privacy_mechanism
     _check = check
 
-def _combine_child_constraints(num_children: int, n_cells: int, contingency_vector: sp.csc_matrix, constraints: List) -> List[Callable]:
+def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List) -> List[Callable]:
     '''Combine child publication constraints into joint constraints.
 
     Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
@@ -65,13 +65,13 @@ def _combine_child_constraints(num_children: int, n_cells: int, contingency_vect
 
     Args:
         num_children (int): Number of child nodes.
-        n_cells (int): Length of each individual child vector.
         contingency_vector (sp.csc_matrix): The parent's sparse cell-count vector, shape (n_cells, 1).
         constraints (List): List of child constraints.
 
     Returns:
         List: List of constraint functions for the joint optimization problem.
     '''
+    n_cells = _data_handler.n_cells
 
     joint_constraints = []
 
@@ -145,11 +145,11 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     # Also create others to ensure consistency in the number of rows per category in the parent.
     # The number of rows in the parent category must match the sum of rows of that category across all children.
     joint_contingency_vector = np.concatenate(children_vectors)
-    n_cells = _data_handler.contingency_df_length
+    n_cells = _data_handler.n_cells
     num_children = len(children_filter_dicts)
     n_joint = num_children * n_cells
 
-    joint_constraints = _combine_child_constraints(num_children, n_cells, contingency_vector, children_constraints)
+    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints)
 
     # Cells where the parent is non-zero. By non-negativity + consistency, children can only
     # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j}
@@ -183,7 +183,7 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     joint_constraints = None
 
     microdata_time = 0.0
-    if not is_leaf: _data_handler.update_child_vectors(joint_solution, n_cells, children_filter_dicts)
+    if not is_leaf: _data_handler.update_child_vectors(joint_solution, children_filter_dicts)
     else:
         t_microdata = time.time()
         child_vectors = []

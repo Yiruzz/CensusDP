@@ -34,7 +34,7 @@ class DataHandler:
 
             domain (Optional[Dict[str, Sequence]]): User-provided domain for query columns.
             contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces dense Cartesian-product table.
-            contingency_df_length (Optional[int]): Total number of contingency cells (n_cells).
+            n_cells (Optional[int]): Total number of contingency cells.
             dtype (str): NumPy data type for all arrays (default: 'int64').
 
             hierarchical_columns (List[str]): Columns defining the tree hierarchy levels.
@@ -62,7 +62,7 @@ class DataHandler:
         # cell index. Replaces the dense Cartesian-product DataFrame.
         self.domain: Optional[Dict[str, Sequence]] = domain
         self.contingency_domain: Optional[ContingencyDomain] = None
-        self.contingency_df_length: Optional[int] = None
+        self.n_cells: Optional[int] = None
         self.dtype: str = 'int64'
 
         # Columns to use
@@ -175,7 +175,7 @@ class DataHandler:
                 declared[col] = np.array([row[0] for row in result])
 
         self.contingency_domain = ContingencyDomain(columns=self.query_columns, domains=declared)
-        self.contingency_df_length = self.contingency_domain.n_cells
+        self.n_cells = self.contingency_domain.n_cells
 
         print("\n Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
 
@@ -397,18 +397,17 @@ class DataHandler:
         os.remove(path)
         return contingency_vector
 
-    def update_child_vectors(self, joint_solution: sp.csc_matrix, vectors_length: int, filter_dicts: List[Dict[str, Any]]) -> None:
+    def update_child_vectors(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
 
         Args:
             joint_solution (sp.csc_matrix): The combined sparse solution vector for all children,
-                shape (num_children * vectors_length, 1).
-            vectors_length (int): The length of each individual child vector (n_cells).
+                shape (num_children * n_cells, 1).
             filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         '''
         start = 0
         for child_filter_dict in filter_dicts:
-            end = start + vectors_length
+            end = start + self.n_cells
             path = self.spill_path(child_filter_dict)
             self.spill_vector(path, joint_solution[start:end])
             start = end
