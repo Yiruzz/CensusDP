@@ -80,7 +80,7 @@ class DataHandler:
 
     def initialize_directories(self) -> None:
         '''Create directories for spilled vectors and temporary microdata in project root.'''
-        cache_dir = os.path.join(os.getcwd(), 'data_cache')
+        cache_dir = os.path.join(os.getcwd(), 'data/data_cache')
         pid = os.getpid()
         self.spill_dir = os.path.join(cache_dir, f'topdown_spill_{pid}')
         self.microdata_dir = os.path.join(cache_dir, f'topdown_microdata_{pid}')
