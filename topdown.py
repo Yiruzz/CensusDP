@@ -1,6 +1,6 @@
 import numpy as np
 import scipy.sparse as sp
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from multiprocessing import get_context
 
 from hierarchical_tree import HierarchicalTree
@@ -8,7 +8,7 @@ from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from parallel_utils import init_process, estimate_and_update_children
+from parallel_utils import init_process, estimate_and_update_children, _combine_child_constraints, _check_node_correctness, _real_and_round_estimation, _split_child_vectors
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
@@ -150,36 +150,66 @@ class TopDown():
         print(self.tree, "\n")
 
     def estimation_phase(self) -> None:
+        '''Run the estimation phase of the TopDown algorithm.
+
+        Processes all nodes in the hierarchical tree, solving joint optimization
+        problems that enforce consistency between parent and child contingency vectors.
+        After processing, merges all partial microdata files into the final output.
+        '''
+        print(f'Running estimation phase...')
+        t1 = time.time()
+        self._estimation_phase_root()
+        self._estimation_phase_subtree()
+        print(f'{time.time() - t1:.2f} seconds.\n')
+
+        print(f'Merging microdata files...', end=' ')
+        t_merge = time.time()
+        self.data_handler.merge_microdata_files()
+        self.data_handler.cleanup_directories()
+        print(f'{time.time() - t_merge:.2f} seconds.\n')
+
+    def _estimation_phase_root(self) -> None:
+        '''Process the root and its direct children entirely in memory.
+
+        Materializes contingency vectors for the root and its children, adds noise
+        in parallel, solves the root individually, then solves the joint optimization
+        problem over all children to enforce parent-child consistency.
+        '''
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            root = self.tree.root
+     
+            # Materialize all vectors, root and children
+            to_process = [root] + root.children
+            to_process_length = len(to_process)
+            for node in to_process:
+                node.contingency_vector, node.constraints = self.data_handler.materialize_node_data(node.filter_dict,
+                                                                                                    self.constraints[node.level],
+                                                                                                    self.Q)
+            list(executor.map(self.privacy_mechanism.add_noise,
+                              [node.contingency_vector for node in to_process],
+                              [node.level]*to_process_length, [self.query_sensitivity]*to_process_length))
+        
+            # Solve first problem, only root
+            self._estimate_node_individually(root)
+
+            # Solve with children
+            self._estimate_and_update_children_in_memory(root)
+
+    def _estimation_phase_subtree(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
 
         Uses breadth-first traversal with lazy materialization to minimize memory usage.
         '''
-        print(f'Running estimation phase (BFS)...')
-        t1 = time.time()
 
-        # Materialize root
         root = self.tree.root
-        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
-        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
-
-        # First phase: resolve root's own contingency vector
-        self._estimate_node_individually(root)
-
-        # Save the contingency vector to disk.
-        root_path = self.data_handler.spill_path(root.filter_dict)
-        self.data_handler.spill_vector(root_path, root.contingency_vector)
-        root.contingency_vector = None
-
         # Process remaining nodes
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
                                 initializer=init_process, initargs=(self.solver_options, self.constraints,
-                                                                    self.data_handler.spill_dir,
-                                                                    self.data_handler.microdata_dir,
+                                                                    self.data_handler.spill_dir, self.data_handler.microdata_dir,
                                                                     self.data_handler.file_path,
                                                                     self.data_handler.contingency_domain.domains,
                                                                     self.hierarchical_columns, self.query_columns,
-                                                                    self.privacy_mechanism,
-                                                                    self.Q, self.query_sensitivity,
+                                                                    self.privacy_mechanism, self.Q, self.query_sensitivity,
                                                                     self.check_correctness)) as executor:
 
             def _submit(node):
@@ -192,7 +222,7 @@ class TopDown():
                                      children_filter_dicts, children_level, is_leaf)
             
             total_microdata_time = 0.0
-            futures = {_submit(root): root}
+            futures = {_submit(node): node for node in root.children}
             while futures:
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
@@ -205,18 +235,6 @@ class TopDown():
                         for child in node.children:
                             futures[_submit(child)] = child
 
-            # Merge microdata files from workers
-            t_merge = time.time()
-            print(f'\nMerging microdata files...', end=' ')
-            self.data_handler.merge_microdata_files()
-            merge_time = time.time() - t_merge
-            print(f'{merge_time:.2f}s')
-            print(f'  Worker microdata time: {total_microdata_time:.2f}s')
-            print(f'  Total microdata (workers + merge): {total_microdata_time + merge_time:.2f}s')
-
-        self.data_handler.cleanup_directories()
-        print(f'{time.time() - t1:.2f} seconds.\n')
-
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.
 
@@ -224,24 +242,51 @@ class TopDown():
             node (HierarchicalNode): The node to process.
         '''
 
-        t1 = time.time()
-        x_tilde = self.optimizer.non_negative_real_estimation(
-            noisy_measurements=node.contingency_vector,
-            node_id=node.id,
-            constraints=node.constraints,
-            query_matrix=self.Q
+        node.contingency_vector = _real_and_round_estimation(
+            self.optimizer, node.contingency_vector, node.id, node.constraints, self.Q
         )
-        real_time = time.time() - t1
 
-        t1 = time.time()
-        node.contingency_vector = self.optimizer.rounding_estimation(
-            x_tilde=x_tilde,
-            node_id=node.id,
-            constraints=node.constraints
-        )
-        rounding_time = time.time() - t1
+    def _estimate_and_update_children_in_memory(self, node: HierarchicalNode) -> float:
+        '''Solve the joint optimization for a node's children and update their vectors.
 
-        print(f'  [Node {node.id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+        Collects children contingency vectors and constraints, concatenates them into
+        a joint problem that also enforces consistency with the parent, solves it, then
+        either updates the spilled child vectors (non-leaf) or writes microdata (leaf).
+
+        Args:
+            node (HierarchicalNode): The parent node whose children are processed.
+
+        Returns:
+            float: Time spent writing microdata files (0.0 if children are not leaves).
+        '''
+        is_leaf = node.children[0].is_leaf()
+        children_vectors = []
+        children_constraints = []
+        children_filter_dicts = []
+
+        for child in node.children:
+            children_vectors.append(child.contingency_vector)
+            children_constraints.append(child.constraints)
+            children_filter_dicts.append(child.filter_dict)
+
+        joint_contingency_vector = np.concatenate(children_vectors)
+        joint_constraints = _combine_child_constraints(len(node.children), node.contingency_vector, children_constraints)
+        joint_solution = _real_and_round_estimation(self.optimizer, joint_contingency_vector, node.id, joint_constraints, self.Q)
+
+        if self.check_correctness: _check_node_correctness(node.contingency_vector, joint_solution)
+        joint_contingency_vector = None
+        joint_constraints = None
+
+        microdata_time = 0
+        if not is_leaf:
+            self.data_handler.update_child_vectors(joint_solution, self.data_handler.contingency_df_length, children_filter_dicts)
+        else:
+            t_microdata = time.time()
+            child_vectors = _split_child_vectors(joint_solution, len(node.children), self.data_handler.contingency_df_length)
+            self.data_handler.write_microdata(node.id, child_vectors, children_filter_dicts)
+            microdata_time = time.time() - t_microdata
+
+        return microdata_time
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.

@@ -67,11 +67,12 @@ def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray
     '''   
 
     joint_constraints = []
+    contingency_df_length = len(contingency_vector)
 
     # Wrap child publication constraints with adjusted indices
     start = 0     
     for child_constraints in constraints:
-        end = start + _data_handler.contingency_df_length
+        end = start + contingency_df_length
         for constraint in child_constraints:
             joint_constraints.append(
                 lambda joint_array, s=start, e=end, c=constraint:
@@ -80,14 +81,64 @@ def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray
         start = end
 
     # Add consistency constraints: parent value at each index = sum of child values at that index
-    for index in range(_data_handler.contingency_df_length):
-        indices_to_sum = [index + i * _data_handler.contingency_df_length for i in range(num_children)]
+    for index in range(contingency_df_length):
+        indices_to_sum = [index + i * contingency_df_length for i in range(num_children)]
         joint_constraints.append(
             lambda joint_array, idxs=indices_to_sum, value=contingency_vector[index]:
                 sum(joint_array[j] for j in idxs) == value
         )
 
-    return joint_constraints 
+    return joint_constraints
+
+def _real_and_round_estimation(optimizer: OptimizationModel, measurements: np.ndarray, node_id: int, constraints: List[Callable], Q: spmatrix) -> np.ndarray:
+    '''Run non-negative real estimation followed by rounding estimation for a node.
+
+    Args:
+        optimizer (OptimizationModel): Solver instance used for both estimation steps.
+        measurements (np.ndarray): Noisy contingency measurements to optimize over.
+        node_id (int): Unique ID of the node being processed.
+        constraints (List): Constraint functions to enforce during optimization.
+        Q (spmatrix): Query matrix applied in the real estimation step.
+
+    Returns:
+        np.ndarray: Solution vector.
+    '''
+    t1 = time.time()
+    x_tilde = optimizer.non_negative_real_estimation(
+        noisy_measurements=measurements,
+        node_id=node_id,
+        constraints=constraints,
+        query_matrix=Q
+    )
+    real_time = time.time() - t1
+
+    t1 = time.time()
+    solution = optimizer.rounding_estimation(
+        x_tilde=x_tilde,
+        node_id=node_id,
+        constraints=constraints
+    )
+    rounding_time = time.time() - t1
+
+    print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+    return solution
+
+def _split_child_vectors(joint_solution: np.ndarray, num_children: int, vec_length: int) -> List[np.ndarray]:
+    '''Split a concatenated joint solution vector into individual child vectors.
+
+    Args:
+        joint_solution (np.ndarray): Concatenated solution vector for all children.
+        num_children (int): Number of child nodes.
+        vec_length (int): Length of each individual child vector.
+
+    Returns:
+        List[np.ndarray]: List of child solution vectors, one per child.
+    '''
+    slices, start = [], 0
+    for _ in range(num_children):
+        slices.append(joint_solution[start:start + vec_length])
+        start += vec_length
+    return slices
 
 def _check_node_correctness(parent_vector: np.ndarray, children_vectors: np.ndarray) -> None:
     '''Checks that the sum of the values in the parent node vector 
@@ -135,45 +186,19 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     # The number of rows in the parent category must match the sum of rows of that category across all children.
     joint_contingency_vector = np.concatenate(children_vectors)
     joint_constraints = _combine_child_constraints(len(children_filter_dicts), contingency_vector, children_constraints)
-
-    t1 = time.time()
-    x_tilde = _optimizer.non_negative_real_estimation(
-        noisy_measurements=joint_contingency_vector,
-        node_id=node_id,
-        constraints=joint_constraints,
-        query_matrix=_Q
-    )
-    real_time = time.time() - t1
-
-    t1 = time.time()
-    joint_solution = _optimizer.rounding_estimation(
-        x_tilde=x_tilde,
-        node_id=node_id,
-        constraints=joint_constraints
-    )
-    rounding_time = time.time() - t1
+    joint_solution = _real_and_round_estimation(_optimizer, joint_contingency_vector, node_id, joint_constraints, _Q)
 
     if _check: _check_node_correctness(contingency_vector, joint_solution)
-
     joint_contingency_vector = None
     joint_constraints = None
 
     microdata_time = 0.0
-    if not is_leaf: _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_filter_dicts)
+    if not is_leaf:
+        _data_handler.update_child_vectors(joint_solution, _data_handler.contingency_df_length, children_filter_dicts)
     else:
         t_microdata = time.time()
-        child_vectors = []
-        start = 0
-
-        for _ in children_filter_dicts:
-            end = start + _data_handler.contingency_df_length
-            updated_vector = joint_solution[start:end]
-            child_vectors.append(updated_vector)
-            start = end
-
+        child_vectors = _split_child_vectors(joint_solution, len(children_filter_dicts), _data_handler.contingency_df_length)
         _data_handler.write_microdata(node_id, child_vectors, children_filter_dicts)
         microdata_time = time.time() - t_microdata
-
-    print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
 
     return microdata_time
