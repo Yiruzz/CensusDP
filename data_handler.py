@@ -414,6 +414,7 @@ class DataHandler:
         parquet_pattern = os.path.join(self.microdata_dir, '*.parquet')
 
         try:
+            self.duckdb_con = duckdb.connect()
             self.duckdb_con.execute(f"""
                 COPY (SELECT * FROM read_parquet('{parquet_pattern}'))
                 TO '{self.output_path}'
