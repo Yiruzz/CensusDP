@@ -63,7 +63,13 @@ class DataHandler:
         self.domain: Optional[Dict[str, Sequence]] = domain
         self.contingency_domain: Optional[ContingencyDomain] = None
         self.contingency_df_length: Optional[int] = None
+
+        # Set parameters to use
+        # dtype: data type for the final solution values after solving the problems.
+        # noise_chunk_size: window size used to split the joint contingency vector into chunks.
+        # This helps avoid switching between Rust and Python multiple times when the vectors are small.
         self.dtype: str = 'int64'
+        self.noise_chunk_size: int = 1_000_000
 
         # Columns to use
         self.hierarchical_columns: List[str] = []

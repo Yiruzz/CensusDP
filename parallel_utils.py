@@ -176,8 +176,7 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
     for filter_dict in children_filter_dicts:
         child_vector, child_constraint = _data_handler.materialize_node_data(filter_dict, _constraints[children_level], _Q)
-        _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
-        
+
         children_vectors.append(child_vector)
         children_constraints.append(child_constraint)
 
@@ -185,6 +184,13 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     # Also create others to ensure consistency in the number of rows per category in the parent.
     # The number of rows in the parent category must match the sum of rows of that category across all children.
     joint_contingency_vector = np.concatenate(children_vectors)
+    children_vectors = []
+
+    # Apply noise to joint vector in chunks
+    for chunk_start in range(0, len(joint_contingency_vector), _data_handler.noise_chunk_size):
+        chunk_end = min(chunk_start + _data_handler.noise_chunk_size, len(joint_contingency_vector))
+        _privacy_mechanism.add_noise(joint_contingency_vector[chunk_start:chunk_end], children_level, _query_sensitivity)
+    
     joint_constraints = _combine_child_constraints(len(children_filter_dicts), contingency_vector, children_constraints)
     joint_solution = _real_and_round_estimation(_optimizer, joint_contingency_vector, node_id, joint_constraints, _Q)
 

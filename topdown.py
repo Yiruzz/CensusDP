@@ -290,6 +290,13 @@ class TopDown():
             children_filter_dicts.append(child.filter_dict)
 
         joint_contingency_vector = np.concatenate(children_vectors)
+        children_vectors = []
+
+        # Apply noise to joint vector in chunks
+        for chunk_start in range(0, len(joint_contingency_vector), self.data_handler.noise_chunk_size):
+            chunk_end = min(chunk_start + self.data_handler.noise_chunk_size, len(joint_contingency_vector))
+            self.privacy_mechanism.add_noise(joint_contingency_vector[chunk_start:chunk_end], node.children[0].level, self.query_sensitivity)
+
         joint_constraints = _combine_child_constraints(len(node.children), node.contingency_vector, children_constraints)
         joint_solution = _real_and_round_estimation(self.optimizer, joint_contingency_vector, node.id, joint_constraints, self.Q)
 
