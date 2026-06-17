@@ -158,8 +158,8 @@ class TopDown():
         '''
         print(f'Running estimation phase...')
         t1 = time.time()
-        self._estimation_phase_root()
-        self._estimation_phase_subtree()
+        if self._estimation_phase_root():
+            self._estimation_phase_subtree()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         print(f'Merging microdata files...', end=' ')
@@ -168,12 +168,15 @@ class TopDown():
         self.data_handler.cleanup_directories()
         print(f'{time.time() - t_merge:.2f} seconds.\n')
 
-    def _estimation_phase_root(self) -> None:
+    def _estimation_phase_root(self) -> bool:
         '''Process the root and its direct children entirely in memory.
 
         Materializes contingency vectors for the root and its children, adds noise
         in parallel, solves the root individually, then solves the joint optimization
         problem over all children to enforce parent-child consistency.
+
+        Returns:
+            bool: True if root's children are not leaves (no microdata written), False otherwise.
         '''
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
             root = self.tree.root
@@ -193,7 +196,7 @@ class TopDown():
             self._estimate_node_individually(root)
 
             # Solve with children
-            self._estimate_and_update_children_in_memory(root)
+            return not self._estimate_and_update_children_in_memory(root)
 
     def _estimation_phase_subtree(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -222,7 +225,7 @@ class TopDown():
                                      children_filter_dicts, children_level, is_leaf)
             
             def _fill_window():
-                while pending and len(futures) < self.workers:
+                while pending and len(futures) < (self.workers)*2:
                     _, _, node = heapq.heappop(pending)
                     futures[_submit(node)] = node
 
