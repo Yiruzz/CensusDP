@@ -1,3 +1,4 @@
+import heapq
 import numpy as np
 import scipy.sparse as sp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -12,7 +13,6 @@ from parallel_utils import init_process, estimate_and_update_children, _combine_
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from collections import deque
 from typing import Dict, List, Optional, Union
 import time
 
@@ -221,19 +221,36 @@ class TopDown():
                 return executor.submit(estimate_and_update_children, node.id, node_path,
                                      children_filter_dicts, children_level, is_leaf)
             
-            total_microdata_time = 0.0
-            futures = {_submit(node): node for node in root.children}
+            def _fill_window():
+                while pending and len(futures) < self.workers:
+                    _, _, node = heapq.heappop(pending)
+                    futures[_submit(node)] = node
+
+            # Create a priority queue ordered by number of children: nodes with more
+            # children are prioritized so the executor stays busy with nodes that will take more time.
+            # id(node) is a tiebreaker to avoid comparing HierarchicalNode objects.
+            pending = []
+            for node in root.children:
+                heapq.heappush(pending, (-len(node.children), id(node), node))
+
+            # future -> node
+            # Fill the executor queue
+            futures = {}  
+            _fill_window()
+
             while futures:
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
                 for fut in done:
-                    worker_microdata_time = fut.result()
-                    total_microdata_time += worker_microdata_time
+                    fut.result()
                     node = futures.pop(fut)
 
                     if not node.children[0].is_leaf():
                         for child in node.children:
-                            futures[_submit(child)] = child
+                            heapq.heappush(pending, (-len(child.children), id(child), child))
+
+                # Update executor queue
+                _fill_window()
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.
