@@ -178,25 +178,15 @@ class TopDown():
         Returns:
             bool: True if root's children are not leaves (no microdata written), False otherwise.
         '''
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            root = self.tree.root
-     
-            # Materialize all vectors, root and children
-            to_process = [root] + root.children
-            to_process_length = len(to_process)
-            for node in to_process:
-                node.contingency_vector, node.constraints = self.data_handler.materialize_node_data(node.filter_dict,
-                                                                                                    self.constraints[node.level],
-                                                                                                    self.Q)
-            list(executor.map(self.privacy_mechanism.add_noise,
-                              [node.contingency_vector for node in to_process],
-                              [node.level]*to_process_length, [self.query_sensitivity]*to_process_length))
-        
-            # Solve first problem, only root
-            self._estimate_node_individually(root)
+        root = self.tree.root
+        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
+        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
-            # Solve with children
-            return not self._estimate_and_update_children_in_memory(root)
+        # Solve first problem, only root
+        self._estimate_node_individually(root)
+
+        # Solve with children
+        return not self._estimate_and_update_children_in_memory(root)
 
     def _estimation_phase_subtree(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -223,7 +213,7 @@ class TopDown():
 
                 return executor.submit(estimate_and_update_children, node.id, node_path,
                                      children_filter_dicts, children_level, is_leaf)
-            
+
             def _fill_window():
                 while pending and len(futures) < (self.workers)*2:
                     _, _, node = heapq.heappop(pending)
@@ -238,7 +228,7 @@ class TopDown():
 
             # future -> node
             # Fill the executor queue
-            futures = {}  
+            futures = {}
             _fill_window()
 
             while futures:
@@ -285,17 +275,23 @@ class TopDown():
         children_filter_dicts = []
 
         for child in node.children:
+            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.filter_dict, self.constraints[child.level], self.Q)
+            
             children_vectors.append(child.contingency_vector)
             children_constraints.append(child.constraints)
             children_filter_dicts.append(child.filter_dict)
 
         joint_contingency_vector = np.concatenate(children_vectors)
-        children_vectors = []
+        children_vectors = None
 
-        # Apply noise to joint vector in chunks
+        # Apply noise to joint vector in chunks using thread pool
+        chunks = []
         for chunk_start in range(0, len(joint_contingency_vector), self.data_handler.noise_chunk_size):
             chunk_end = min(chunk_start + self.data_handler.noise_chunk_size, len(joint_contingency_vector))
-            self.privacy_mechanism.add_noise(joint_contingency_vector[chunk_start:chunk_end], node.children[0].level, self.query_sensitivity)
+            chunks.append((joint_contingency_vector[chunk_start:chunk_end], node.children[0].level, self.query_sensitivity))
+
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            list(executor.map(lambda args: self.privacy_mechanism.add_noise(*args), chunks))
 
         joint_constraints = _combine_child_constraints(len(node.children), node.contingency_vector, children_constraints)
         joint_solution = _real_and_round_estimation(self.optimizer, joint_contingency_vector, node.id, joint_constraints, self.Q)
