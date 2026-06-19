@@ -53,7 +53,7 @@ def init_process(solver_options: dict, constraints_dict: Dict[int, List],
     _privacy_mechanism = privacy_mechanism
     _check = check
 
-def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List) -> List[Callable]:
+def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set) -> List[Callable]:
     '''Combine child publication constraints into joint constraints.
 
     Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
@@ -63,10 +63,16 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
     optimizer does not create child variables there, so they are structurally 0 and the
     consistency sum(children) == 0 holds automatically.
 
+    This function owns the full joint<->child<->prune index mapping. The optimizer just hands its
+    raw decision accessor (a cell-value mapping valid on the active global indices) and applies the
+    returned callables; it does not know about pruning or reindexing for constraints.
+
     Args:
         num_children (int): Number of child nodes.
         contingency_vector (sp.csc_matrix): The parent's sparse cell-count vector, shape (n_cells, 1).
         constraints (List): List of child constraints.
+        active_set (set): Active joint-space global indices {k*n_cells + j} (parent support expanded
+            over children). Cells outside it are pruned and read as 0.
 
     Returns:
         List: List of constraint functions for the joint optimization problem.
@@ -75,27 +81,29 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
 
     joint_constraints = []
 
-    # Wrap child publication constraints with adjusted indices. The optimizer passes a pruned
-    # view that reads 0 for cells it did not instantiate, so building the per-child index dict
-    # over the full range is safe.
+    # Per-child DSL constraints are closures over child-local cell indices (0..n_cells-1) that we
+    # cannot rewrite. The decision variables live in joint/global space (base+j), so we hand each
+    # constraint a {local_j: joint_value} dict translating local->global, reading 0 for pruned
+    # cells (those the optimizer did not instantiate).
     start = 0
     for child_constraints in constraints:
-        end = start + n_cells
+        base = start
         for constraint in child_constraints:
             joint_constraints.append(
-                lambda joint_array, s=start, e=end, c=constraint:
-                    c({i - s: joint_array[i] for i in range(s, e)})
+                lambda acc, base=base, c=constraint, A=active_set:
+                    c({j: (acc[base + j] if (base + j) in A else 0) for j in range(n_cells)})
             )
-        start = end
+        start += n_cells
 
     # Consistency constraints only on the parent's support: parent value at each non-zero
-    # cell = sum of child values at that cell.
+    # cell = sum of child values at that cell. Authored directly in joint space (the summed
+    # indices are all active), so they index the accessor without a translation dict.
     for index, value in zip(contingency_vector.indices, contingency_vector.data):
         index = int(index)
         indices_to_sum = [index + i * n_cells for i in range(num_children)]
         joint_constraints.append(
-            lambda joint_array, idxs=indices_to_sum, value=int(value):
-                sum(joint_array[j] for j in idxs) == value
+            lambda acc, idxs=indices_to_sum, value=int(value):
+                sum(acc[j] for j in idxs) == value
         )
 
     return joint_constraints
@@ -149,13 +157,15 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     num_children = len(children_filter_dicts)
     n_joint = num_children * n_cells
 
-    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints)
-
     # Cells where the parent is non-zero. By non-negativity + consistency, children can only
     # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j}
-    # so the optimizers instantiate variables only there.
+    # so the optimizers instantiate variables only there. `active` stays an ordered list: the
+    # optimizer aligns its solution positionally to it across the real -> rounding solves.
     support = contingency_vector.indices
     active = [k * n_cells + int(j) for k in range(num_children) for j in support]
+
+    # Combine receives the active set so it can bake prune-to-0 + reindexing into the constraints.
+    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints, set(active))
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(

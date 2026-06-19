@@ -6,32 +6,6 @@ import scipy.sparse as sp
 from typing import List, Callable, Any, Optional
 
 
-class _PrunedView:
-    '''Read-only mapping of cell index -> Pyomo expression with a 0 default.
-
-    Constraint callables index the decision space as var[i] for arbitrary
-    cell indices. When a cell is pruned (its parent is 0, so the child must be 0
-    too) no Pyomo variable is created for it; this view returns the Python int 0
-    for those indices so sum(var[i] for i in indices) keeps working.
-
-    With this we don't need to modify the constraint DSLs to be aware of pruning,
-    we just give them a view that behaves like a dict with missing keys defaulting to 0.
-
-    It holds no per-cell storage: instead of a {i: expr} dict over all active cells,
-    it wraps a lazy getter and the active index set (both already available to the
-    caller). The expression for a cell is built on demand only when a constraint
-    actually references it, so the view itself is O(1) memory.
-    '''
-    __slots__ = ('_get', '_active')
-
-    def __init__(self, get: Callable[[int], Any], active: set) -> None:
-        self._get = get          # i -> Pyomo expression, valid for i in active
-        self._active = active    # set of active global indices
-
-    def __getitem__(self, i):
-        return self._get(i) if i in self._active else 0
-
-
 class OptimizationModel:
     '''
     Represents the Pyomo model that is used to do the estimation of the contingency vectors.
@@ -92,7 +66,9 @@ class OptimizationModel:
         Args:
             noisy_measurements (np.ndarray): Concatenated noisy query answers y = Q @ x + noise.
             node_id (int): The ID of the node for which the estimation is being performed.
-            constraints (List[Callable]): List of additional constraints to apply to the model.
+            constraints (List[Callable]): Constraint callables, each given the decision accessor
+                (here the raw Var, valid on the active global indices) and returning a Pyomo
+                expression. Referencing a non-active index is the caller's responsibility to avoid.
             query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells).
             active (Optional[List[int]]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
@@ -182,15 +158,12 @@ class OptimizationModel:
 
         instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
-        # Constraints are expressed in cell space; pruned cells read as 0 via the view.
-        # We only care for the non zero cells of the parent, so the view tell the constraint function that the pruned cells are 0,
-        # and the constraint function can just write its logic as if all cells were present. The view takes care of undefined decision variables.
-        x_eff = _PrunedView(lambda i: instance.x[i], active_set)
-
+        # The decision variable x is already the cell value, indexed by the active global indices.
+        # Constraints arrive pre-adapted, so we hand them the raw Var and apply them directly.
         instance.ConstraintList = pyo.ConstraintList()
         for i, constraint_func in enumerate(constraints):
             try:
-                pyomo_expression = constraint_func(x_eff)
+                pyomo_expression = constraint_func(instance.x)
                 # Skip trivially true constraints (e.g. from empty index sets)
                 if isinstance(pyomo_expression, (bool, np.bool_)):
                     if not pyomo_expression:
@@ -223,7 +196,10 @@ class OptimizationModel:
                 aligned to active (position p is the value for cell active[p]), length
                 len(active). When active is None, this is the full vector of length n.
             node_id (int): The ID of the node for which the estimation is being performed.
-            constraints (List[Callable]): List of additional constraints to apply to the model.
+            constraints (List[Callable]): Constraint callables, each given the decision accessor
+                (here a {global_index: floor+binary} dict valid on the active indices) and returning
+                a Pyomo expression. Referencing a non-active index is the caller's responsibility to
+                avoid.
             active (Optional[List[int]]): Global joint-space indices (in 0..n-1) of the
                 non-pruned cells. Only those positions get a binary variable. When None (root /
                 individual node), every position is active and n is inferred from x_tilde.
@@ -273,16 +249,17 @@ class OptimizationModel:
 
         instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
-        # Constraint accessor: floor + binary for active cells, 0 for pruned. The expression
-        # f[i] + y[i] is built lazily, only for cells a constraint actually references.
-        active_set = set(active)
-        x_rounded = _PrunedView(lambda i: instance.f[i] + instance.y[i], active_set)
+        # The rounding decision variable is only the binary correction y[i]. The actual cell value
+        # is floor[i] + y[i]. Constraints need the full value, so expose it as a plain dict over the
+        # active indices.
+        # Combine handles any further reindexing/prune-to-0 on top of this accessor.
+        cell_value = {i: instance.f[i] + instance.y[i] for i in active}
 
         # Add constraints
         instance.ConstraintList = pyo.ConstraintList()
         for i, constraint_func in enumerate(constraints):
             try:
-                pyomo_expression = constraint_func(x_rounded)
+                pyomo_expression = constraint_func(cell_value)
                 # Skip trivially true constraints (e.g. from empty index sets)
                 if isinstance(pyomo_expression, (bool, np.bool_)):
                     if not pyomo_expression:
