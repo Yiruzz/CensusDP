@@ -1,3 +1,3 @@
-from .variants import PrivacyMechanism, PureDP, ZCDP, ApproximateDP, RenyiDP
+from .variants import PrivacyMechanism, MECHANISMS, PureDP, ZCDP, ApproximateDP, RenyiDP
 
-__all__ = ['PrivacyMechanism', 'PureDP', 'ZCDP', 'ApproximateDP', 'RenyiDP']
+__all__ = ['PrivacyMechanism', 'MECHANISMS', 'PureDP', 'ZCDP', 'ApproximateDP', 'RenyiDP']

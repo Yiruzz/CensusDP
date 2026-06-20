@@ -26,13 +26,13 @@ Noise sampling is delegated to the vectorized OpenDP-backed mechanisms in noisy.
 """
 
 import math
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
-
+import zarr
 import numpy as np
+from abc import ABC, abstractmethod
 
 from .noisy import sample_dgauss_optimized, sample_dlaplace_optimized
 
+from typing import Dict, List, Optional, Tuple
 
 class PrivacyMechanism(ABC):
     """Abstract base for a DP variant. Subclasses bind to a per-level parameter list at construction.
@@ -49,15 +49,35 @@ class PrivacyMechanism(ABC):
     @property
     def name(self) -> str:
         return type(self).__name__
+    
+    @property
+    def param_spec(self) -> str:
+        class_name = self.name
+        levels_str = "_".join(f"{p:.3f}" for p in self.level_params)
+        return f"{class_name}_{levels_str}"
 
     @abstractmethod
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         """Add calibrated discrete noise to contingency_vector in place."""
 
+    def add_noise_from_precomputed(self, noisy_arr: zarr.Array, contingency_vector: np.ndarray, node_idx: int) -> None:
+        """
+        Add pre-computed noise to contingency_vector.
+
+        Args:
+            noisy_arr: Zarr array containing pre-computed noise vectors
+            contingency_vector: Vector to add noise to (modified in place)
+            node_idx: Node ID / row index in the noise Zarr array
+        """
+        noise_vec = np.asarray(noisy_arr[node_idx, :])
+        if noise_vec is None:
+            raise ValueError(
+                f"Noise vector for node {node_idx} not pre-computed. "
+            )
+        contingency_vector += noise_vec
+
     def report_guarantee(self) -> str:
         return f"{self.name} mechanism, params={self.level_params}"
-
-
 class PureDP(PrivacyMechanism):
     """ε-DP via discrete Laplace. b = sensitivity / ε."""
 
@@ -277,3 +297,10 @@ class RenyiDP(PrivacyMechanism):
             num += 2.0 * term * math.cos(2.0 * math.pi * n * c_frac)
             den += 2.0 * term
         return math.log(num / den) if num > 0.0 else 0.0
+
+MECHANISMS = {
+    "PureDP": PureDP,
+    "ZCDP": ZCDP,
+    "ApproximateDP": ApproximateDP,
+    "RenyiDP": RenyiDP,
+}

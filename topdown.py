@@ -8,11 +8,10 @@ from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from parallel_utils import init_process, estimate_and_update_children
+from parallel_utils.estimation_phase import init_process, estimate_and_update_children
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from collections import deque
 from typing import Dict, List, Optional, Union
 import time
 
@@ -63,13 +62,6 @@ class TopDown():
 
             workers (int): Number of parallel workers for estimation phase.
         '''
-        n_levels = len(hierarchy) + 1
-        if len(privacy_mechanism.level_params) != n_levels:
-            raise ValueError(
-                f"privacy_mechanism has {len(privacy_mechanism.level_params)} per-level params; "
-                f"expected {n_levels} (= len(hierarchy) + 1)."
-            )
-
         self.hierarchical_columns: List[str] = hierarchy
         self.query_columns: List[str] = query_columns
 
@@ -77,6 +69,12 @@ class TopDown():
         self.data_handler.hierarchical_columns = hierarchy
         self.data_handler.query_columns = query_columns
 
+        n_levels = len(hierarchy) + 1
+        if len(privacy_mechanism.level_params) != n_levels:
+            raise ValueError(
+                f"privacy_mechanism has {len(privacy_mechanism.level_params)} per-level params; "
+                f"expected {n_levels} (= len(hierarchy) + 1)."
+            )
         self.privacy_mechanism: PrivacyMechanism = privacy_mechanism
 
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
@@ -147,7 +145,14 @@ class TopDown():
         # Initialize directories to temporarily save vectors and microdata
         self.data_handler.initialize_directories()
 
-        print(self.tree, "\n")
+        # Pre-generate noise vectors for all nodes
+        t1 = time.time()
+        print(f'Pre-generating noise vectors if needed...', end=' ')
+        if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec):
+            self.data_handler.generate_noise_vectors(self.workers, self.tree._node_count,
+                                                     self.tree.iter_nodes_with_levels(),
+                                                     self.privacy_mechanism.name, self.privacy_mechanism.level_params, self.query_sensitivity)
+        print(f'{time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -160,8 +165,11 @@ class TopDown():
         # Materialize root
         root = self.tree.root
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
-        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
-
+        try:
+            self.privacy_mechanism.add_noise_from_precomputed(self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], root.contingency_vector, root.id)
+        except:
+            self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
+                    
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
 
@@ -180,16 +188,19 @@ class TopDown():
                                                                     self.hierarchical_columns, self.query_columns,
                                                                     self.privacy_mechanism,
                                                                     self.Q, self.query_sensitivity,
-                                                                    self.check_correctness)) as executor:
+                                                                    self.check_correctness,
+                                                                    self.data_handler.noise_zarr_path,
+                                                                    self.data_handler.noisy_array_name)) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)
                 children_filter_dicts = [child.filter_dict for child in node.children]
+                children_ids = [child.id for child in node.children]
                 children_level = node.children[0].level
                 is_leaf = node.children[0].is_leaf()
 
                 return executor.submit(estimate_and_update_children, node.id, node_path,
-                                     children_filter_dicts, children_level, is_leaf)
+                                     children_filter_dicts, children_ids, children_level, is_leaf)
             
             total_microdata_time = 0.0
             futures = {_submit(root): root}
