@@ -344,7 +344,7 @@ class DataHandler:
                     constraint.apply_aggregation_function(x.data)
 
             # Convert to optimizer callable against the contingency domain
-            level_constraints.append(constraint.to_constraint(self.contingency_domain))
+            level_constraints.append(constraint.to_sparse_constraint(self.contingency_domain))
 
         return contingency_vector, level_constraints
 

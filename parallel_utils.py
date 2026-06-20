@@ -8,8 +8,9 @@ from optimizer import OptimizationModel
 from data_handler import DataHandler
 from domain import ContingencyDomain
 from privacy import PrivacyMechanism
+from constraints.sparse_constraint import SparseConstraint
 
-from typing import List, Callable, Dict, Any
+from typing import List, Dict, Any
 
 def init_process(solver_options: dict, constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
@@ -53,8 +54,8 @@ def init_process(solver_options: dict, constraints_dict: Dict[int, List],
     _privacy_mechanism = privacy_mechanism
     _check = check
 
-def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set) -> List[Callable]:
-    '''Combine child publication constraints into joint constraints.
+def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set) -> List[SparseConstraint]:
+    '''Combine child publication constraints into joint SparseConstraints.
 
     Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
 
@@ -63,47 +64,49 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
     optimizer does not create child variables there, so they are structurally 0 and the
     consistency sum(children) == 0 holds automatically.
 
-    This function owns the full joint<->child<->prune index mapping. The optimizer just hands its
-    raw decision accessor (a cell-value mapping valid on the active global indices) and applies the
-    returned callables; it does not know about pruning or reindexing for constraints.
+    This function translates child-local SparseConstraints (indexed 0..n_cells-1) to joint-space
+    SparseConstraints (indexed over the global indices), filtering to only active cells
+    (pruned cells are dropped from the coefficients).
 
     Args:
         num_children (int): Number of child nodes.
         contingency_vector (sp.csc_matrix): The parent's sparse cell-count vector, shape (n_cells, 1).
-        constraints (List): List of child constraints.
+        constraints (List): List of Constraint objects (one list per child). Each constraint's
+            to_sparse_constraint() method will be called to get SparseConstraint representations.
         active_set (set): Active joint-space global indices {k*n_cells + j} (parent support expanded
-            over children). Cells outside it are pruned and read as 0.
+            over children). Cells outside it are pruned and dropped from constraints.
 
     Returns:
-        List: List of constraint functions for the joint optimization problem.
+        List[SparseConstraint]: List of SparseConstraints for the joint optimization problem.
     '''
     n_cells = _data_handler.n_cells
-
     joint_constraints = []
 
-    # Per-child DSL constraints are closures over child-local cell indices (0..n_cells-1) that we
-    # cannot rewrite. The decision variables live in joint/global space (base+j), so we hand each
-    # constraint a {local_j: joint_value} dict translating local->global, reading 0 for pruned
-    # cells (those the optimizer did not instantiate).
+    # Per-child constraints: convert each constraint to SparseConstraint via to_sparse_constraint()
+    # Offset them to joint space (base + j) and filter to only active cells.
     start = 0
     for child_constraints in constraints:
         base = start
-        for constraint in child_constraints:
-            joint_constraints.append(
-                lambda acc, base=base, c=constraint, A=active_set:
-                    c({j: (acc[base + j] if (base + j) in A else 0) for j in range(n_cells)})
-            )
+
+        for sparse_constraint in child_constraints:
+            new_sparse_constraint = sparse_constraint.prune_to_active_space(base, active_set)
+            if new_sparse_constraint is not None: joint_constraints.append(new_sparse_constraint)
         start += n_cells
 
-    # Consistency constraints only on the parent's support: parent value at each non-zero
-    # cell = sum of child values at that cell. Authored directly in joint space (the summed
-    # indices are all active), so they index the accessor without a translation dict.
+    # Consistency constraints: parent value at each non-zero cell = sum of child values at that cell.
+    # Authored directly in joint space with all indices active (parent support ensures this).
     for index, value in zip(contingency_vector.indices, contingency_vector.data):
         index = int(index)
-        indices_to_sum = [index + i * n_cells for i in range(num_children)]
+        indices_to_sum = np.array([index + i * n_cells for i in range(num_children)])
+        coefs = np.ones(len(indices_to_sum))
+
         joint_constraints.append(
-            lambda acc, idxs=indices_to_sum, value=int(value):
-                sum(acc[j] for j in idxs) == value
+            SparseConstraint(
+                indices=indices_to_sum,
+                coefs=coefs,
+                sense="=",
+                rhs=float(value)
+            )
         )
 
     return joint_constraints

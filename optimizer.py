@@ -3,7 +3,9 @@ import gurobipy as gp
 
 import numpy as np
 import scipy.sparse as sp
-from typing import List, Callable, Any, Optional
+from typing import List, Callable, Any, Optional, Union
+
+from constraints.sparse_constraint import SparseConstraint
 
 
 class OptimizationModel:
@@ -52,7 +54,7 @@ class OptimizationModel:
         else:
             raise RuntimeError(f"Solver termination failed for node {node_id}. Status: {results.solver.status}, Condition: {results.solver.termination_condition}")
 
-    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, node_id: int, constraints: List[Callable], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, node_id: int, constraints: Union[List[Callable], List[SparseConstraint]], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using Pyomo ConcreteModel.
 
         Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is the concatenation
@@ -158,20 +160,26 @@ class OptimizationModel:
 
         instance.obj = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
 
-        # The decision variable x is already the cell value, indexed by the active global indices.
-        # Constraints arrive pre-adapted, so we hand them the raw Var and apply them directly.
+        # Add constraints: support both SparseConstraint and legacy callables
         instance.ConstraintList = pyo.ConstraintList()
-        for i, constraint_func in enumerate(constraints):
+        for i, constraint in enumerate(constraints):
             try:
-                pyomo_expression = constraint_func(instance.x)
-                # Skip trivially true constraints (e.g. from empty index sets)
-                if isinstance(pyomo_expression, (bool, np.bool_)):
-                    if not pyomo_expression:
-                        raise ValueError(f"Constraint {i} is statically infeasible (evaluates to False).")
-                    continue
-                instance.ConstraintList.add(pyomo_expression)
+                # SparseConstraint: build expression from indices and coefs
+                lhs = sum(float(c) * instance.x[int(idx)] for idx, c in zip(constraint.indices, constraint.coefs))
+
+                if constraint.sense == "=":
+                    pyomo_expr = lhs == constraint.rhs
+                elif constraint.sense == "<=":
+                    pyomo_expr = lhs <= constraint.rhs
+                elif constraint.sense == ">=":
+                    pyomo_expr = lhs >= constraint.rhs
+                else:
+                    raise ValueError(f"Unknown sense: {constraint.sense}")
+
+                instance.ConstraintList.add(pyomo_expr)
+                
             except Exception as e:
-                print(f"Error adding constraint {i}: {e}. Ensure the constraint function accepts Pyomo's Var and returns a Pyomo expression.")
+                print(f"Error adding constraint {i}: {e}")
                 raise e
 
         # Solve the model
@@ -182,7 +190,7 @@ class OptimizationModel:
         # index from the shared active list by position, so no index is re-stored here.
         return np.array([pyo.value(instance.x[i]) for i in active], dtype=float)
 
-    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[Callable], active: Optional[List[int]] = None, n: Optional[int] = None) -> sp.csc_matrix:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: Union[List[Callable], List[SparseConstraint]], active: Optional[List[int]] = None, n: Optional[int] = None) -> sp.csc_matrix:
         '''Rounding estimation of the contingency vector using Pyomo ConcreteModel.
 
         Uses a linearized objective: since y_i ∈ {0,1}, y_i² = y_i.
@@ -251,23 +259,29 @@ class OptimizationModel:
 
         # The rounding decision variable is only the binary correction y[i]. The actual cell value
         # is floor[i] + y[i]. Constraints need the full value, so expose it as a plain dict over the
-        # active indices.
-        # Combine handles any further reindexing/prune-to-0 on top of this accessor.
+        # active indices for legacy callables.
         cell_value = {i: instance.f[i] + instance.y[i] for i in active}
 
-        # Add constraints
+        # Add constraints: support both SparseConstraint and legacy callables
         instance.ConstraintList = pyo.ConstraintList()
-        for i, constraint_func in enumerate(constraints):
+        for i, constraint in enumerate(constraints):
             try:
-                pyomo_expression = constraint_func(cell_value)
-                # Skip trivially true constraints (e.g. from empty index sets)
-                if isinstance(pyomo_expression, (bool, np.bool_)):
-                    if not pyomo_expression:
-                        raise ValueError(f"Constraint {i} is statically infeasible (evaluates to False).")
-                    continue
-                instance.ConstraintList.add(pyomo_expression)
+                # SparseConstraint: build expression from indices and coefs
+                lhs = sum(float(c) * cell_value[int(idx)] for idx, c in zip(constraint.indices, constraint.coefs)) 
+
+                if constraint.sense == "=":
+                    pyomo_expr = lhs == constraint.rhs
+                elif constraint.sense == "<=":
+                    pyomo_expr = lhs <= constraint.rhs
+                elif constraint.sense == ">=":
+                    pyomo_expr = lhs >= constraint.rhs
+                else:
+                    raise ValueError(f"Unknown sense: {constraint.sense}")
+
+                instance.ConstraintList.add(pyomo_expr)
+               
             except Exception as e:
-                print(f"Error adding constraint {i}: {e}. Ensure the constraint function accepts Pyomo's expression dict and returns a Pyomo expression.")
+                print(f"Error adding constraint {i}: {e}")
                 raise e
 
         # Solve the model
