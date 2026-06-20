@@ -663,6 +663,10 @@ class DataHandler:
                         pending[fut] = node_id
 
                     completed_since_refill = 0
+
+            if done % max(1, n_nodes // 20) != 0:
+                print(f"    Progress: {done}/{n_nodes}")
+                
         self.noise_zarr_group.attrs["n_rows_generated"] = done
 
 
