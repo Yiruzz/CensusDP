@@ -499,29 +499,92 @@ class DataHandler:
         return output_paths
 
     def noisy_vectors_exist(self, n_nodes: int, mech_param_spec: str) -> bool:
-        '''Check if pre-computed noise vectors exist and load them if available.
+        '''Check if compatible pre-computed noise vectors exist and reuse them if possible.
 
-        Constructs a filename based on configuration parameters (nodes, cell count, mechanism)
-        and checks if the Zarr file exists. If it exists, loads it into memory for use.
-        If not, creates a new Zarr file with the appropriate structure.
+        Searches for Zarr files matching the mechanism and parameters. Selects the first
+        compatible file with n_nodes >= requested and n_cells >= requested. Requires exact
+        match on mechanism and parameters; compatible files can have more nodes/cells.
 
         Args:
-            n_nodes (int): Number of nodes in the tree
+            n_nodes (int): Requested number of nodes
             mech_param_spec (str): Mechanism parameter specification string (e.g., 'Laplace_1.0')
 
         Returns:
-            bool: True if noise vectors were already pre-computed, False if newly created
+            bool: True if compatible vectors were found and loaded, False if new file created
         '''
-        zarr_filename = f"noisy_vectors_{n_nodes}_{self.contingency_df_length}_{mech_param_spec}.zarr"
-        self.noise_zarr_path = os.path.join(self.noisy_dir, zarr_filename)
+        n_cells = self.contingency_df_length
 
-        if not os.path.exists(self.noise_zarr_path):
-            self._create_noisy_file(self.noise_zarr_path, n_nodes)
-            return False
-            
-        print(f"\n Noise vectors file exists: {zarr_filename}")
-        self.noise_zarr_group = zarr.open_group(self.noise_zarr_path, mode="r")
-        return True
+        # Try to find a compatible existing file
+        compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec)
+        if compatible_file:
+            print(f"\n Reusing compatible noise vectors file: {os.path.basename(compatible_file)}")
+            self.noise_zarr_path = compatible_file
+            self.noise_zarr_group = zarr.open_group(self.noise_zarr_path, mode="r")
+            return True
+
+        # No compatible file found; create a new one
+        zarr_filename = f"noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr"
+        self.noise_zarr_path = os.path.join(self.noisy_dir, zarr_filename)
+        self._create_noisy_file(self.noise_zarr_path, n_nodes)
+        return False
+
+    def _find_compatible_noisy_vector(self, n_nodes: int, n_cells: int, mech_param_spec: str) -> Optional[str]:
+        '''Search for a compatible pre-computed noise vector file.
+
+        Looks for files matching the pattern noisy_vectors_*_{mech_param_spec}.zarr
+        and selects one with n_nodes_file >= n_nodes and n_cells_file >= n_cells.
+        If multiple compatible files exist, returns the one with the smallest dimensions
+        to minimize memory usage.
+
+        Args:
+            n_nodes (int): Required number of nodes
+            n_cells (int): Required number of cells
+            mech_param_spec (str): Exact mechanism and parameters to match
+
+        Returns:
+            Optional[str]: Path to a compatible file, or None if none exist
+        '''
+        if not os.path.isdir(self.noisy_dir):
+            return None
+
+        candidates = []
+        pattern = f"noisy_vectors_"
+
+        for filename in os.listdir(self.noisy_dir):
+            if not filename.startswith(pattern) or not filename.endswith(".zarr"):
+                continue
+
+            # Parse filename: noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr
+            # Remove prefix and suffix
+            name_without_ext = filename[len(pattern):-5]  # Remove "noisy_vectors_" and ".zarr"
+       
+            # Split by '_' but the mech_param_spec can contain underscores
+            # Strategy: split from the right to extract mech_param_spec first
+            parts = name_without_ext.split('_', 2)  # Split from right, max 2 splits
+            if len(parts) != 3:
+                continue
+            try:
+                file_n_nodes = int(parts[0])
+                file_n_cells = int(parts[1])
+                file_mech_spec = parts[2]
+            except ValueError:
+                continue
+
+            # Check if mechanism matches
+            if file_mech_spec != mech_param_spec:
+                continue
+
+            # Check if file has enough capacity
+            if file_n_nodes >= n_nodes and file_n_cells >= n_cells:
+                candidates.append((filename, file_n_nodes, file_n_cells))
+
+        if not candidates:
+            return None
+
+        # Return the file with smallest number of nodes
+        candidates.sort(key=lambda x: x[2])
+        chosen_file = candidates[0][0]
+        return os.path.join(self.noisy_dir, chosen_file)
             
     def _create_noisy_file(self, zarr_path: str, n_nodes: int) -> None:
         '''Create a new Zarr file to store pre-computed noise vectors.

@@ -69,7 +69,7 @@ class PrivacyMechanism(ABC):
             contingency_vector: Vector to add noise to (modified in place)
             node_idx: Node ID / row index in the noise Zarr array
         """
-        noise_vec = np.asarray(noisy_arr[node_idx, :])
+        noise_vec = np.asarray(noisy_arr[node_idx, : len(contingency_vector)])
         if noise_vec is None:
             raise ValueError(
                 f"Noise vector for node {node_idx} not pre-computed. "
