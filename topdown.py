@@ -186,11 +186,10 @@ class TopDown():
                                                                     self.data_handler.file_path,
                                                                     self.data_handler.contingency_domain.domains,
                                                                     self.hierarchical_columns, self.query_columns,
-                                                                    self.privacy_mechanism,
+                                                                    self.privacy_mechanism.name, self.privacy_mechanism.level_params,
                                                                     self.Q, self.query_sensitivity,
                                                                     self.check_correctness,
-                                                                    self.data_handler.noise_zarr_path,
-                                                                    self.data_handler.noisy_array_name)) as executor:
+                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)

@@ -68,7 +68,7 @@ class DataHandler:
         self.domain: Optional[Dict[str, Sequence]] = domain
         self.contingency_domain: Optional[ContingencyDomain] = None
         self.contingency_df_length: Optional[int] = None
-        self.dtype: str = 'float64'
+        self.dtype: str = 'int32'
 
         # Columns to use
         self.hierarchical_columns: List[str] = []

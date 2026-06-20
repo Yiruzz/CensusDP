@@ -3,6 +3,7 @@ import time
 import zarr
 from scipy.sparse import spmatrix
 
+from privacy import MECHANISMS
 from optimizer import OptimizationModel
 from data_handler import DataHandler
 from domain import ContingencyDomain
@@ -13,7 +14,7 @@ from typing import List, Callable, Dict, Any
 def init_process(solver_options: dict, constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int,
+                 privacy_mech_name: str, level_params: List[float], query_matrix: spmatrix, query_sensitivity: int,
                  check: bool, zarr_path: str, noisy_array_name: str) -> None:
     '''Initialize global variables for parallel worker processes.
 
@@ -50,10 +51,10 @@ def init_process(solver_options: dict, constraints_dict: Dict[int, List],
     _constraints = constraints_dict
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
-    _privacy_mechanism = privacy_mechanism
-    _check = check
-
+    _privacy_mechanism = MECHANISMS[privacy_mech_name](level_params)
     _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
+
+    _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: np.ndarray, constraints: List) -> List[Callable]:
     '''Combine child publication constraints into joint constraints.
