@@ -73,6 +73,7 @@ class DataHandler:
         self.spill_dir: Optional[str] = None
         self.microdata_dir: Optional[str] = None
         self.worker_microdata_file: Optional[str] = None
+        self.lp_problems_dir: Optional[str] = None
 
         # DuckDB connection for queries
         self.duckdb_con: Optional[duckdb.DuckDBPyConnection] = None
@@ -80,12 +81,16 @@ class DataHandler:
 
     def initialize_directories(self) -> None:
         '''Create directories for spilled vectors and temporary microdata in project root.'''
-        cache_dir = os.path.join(os.getcwd(), 'data_cache')
+        cache_dir = os.path.join(os.getcwd(), 'data', 'data_cache')
+   
         pid = os.getpid()
         self.spill_dir = os.path.join(cache_dir, f'topdown_spill_{pid}')
         self.microdata_dir = os.path.join(cache_dir, f'topdown_microdata_{pid}')
+        self.lp_problems_dir = os.path.join(cache_dir, 'topdown_solver_problems')
+
         os.makedirs(self.spill_dir, exist_ok=True)
         os.makedirs(self.microdata_dir, exist_ok=True)
+        os.makedirs(self.lp_problems_dir, exist_ok=True)
 
     def cleanup_directories(self) -> None:
         '''Delete spill and microdata directories recursively.'''

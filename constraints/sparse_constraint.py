@@ -65,25 +65,3 @@ class SparseConstraint:
         terms = [f"{c:.4g}*x[{i}]" for i, c in zip(self.indices, self.coefs)]
         constraint_str = " + ".join(terms)
         return f"{constraint_str} {self.sense} {self.rhs}"
-
-    def to_lp_string(self) -> str:
-        '''Convert constraint to LP file format string.
-
-        Example output: "x_0 + 2 x_1 + x_2 = 5"
-        '''
-
-        # Empty constraint
-        # Does not constrain any variables
-        if len(self.indices) == 0:
-            return f"0 {self.sense} {self.rhs}"
-
-        terms = []
-        for i, c in zip(self.indices, self.coefs):
-            if c == 1.0:
-                terms.append(f"x_{int(i)}")
-            else:
-                coef_str = f"{c:.6g}"
-                terms.append(f"{coef_str} x_{int(i)}")
-
-        lp_str = " + ".join(terms)
-        return f"{lp_str} {self.sense} {self.rhs}"

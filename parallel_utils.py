@@ -1,6 +1,5 @@
 import numpy as np
 import time
-import os
 import scipy.sparse as sp
 from scipy.sparse import spmatrix
 
@@ -10,16 +9,17 @@ from domain import ContingencyDomain
 from privacy import PrivacyMechanism
 from constraints.sparse_constraint import SparseConstraint
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
-def init_process(solver_options: dict, constraints_dict: Dict[int, List],
+def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
-        solver_options (dict): Dictionary of options to pass to the optimization solver.
+        optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory 
+                                            and solver options dict).
         constraints_dict (Dict[int, List]): Constraints mapped by level.
         spill_dir (str): Directory path for spilling vectors to disk.
         microdata_dir (str): Directory path for temporary microdata files.
@@ -32,9 +32,9 @@ def init_process(solver_options: dict, constraints_dict: Dict[int, List],
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.
     '''
-    global _optimizer, _data_handler, _Q, _vectors_length, _check, _privacy_mechanism, _query_sensitivity, _constraints
+    global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints
 
-    _optimizer = OptimizationModel(solver_options=solver_options)
+    _optimizer = OptimizationModel(*optimizer)
 
     _data_handler = DataHandler()
     _data_handler.spill_dir = spill_dir
