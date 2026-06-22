@@ -234,10 +234,14 @@ class OptimizationModel:
                             if (base + j) not in active_set:
                                 continue # x pruned to 0 -> constant term, does not affect argmin
                             y_kr = float(noisy_measurements[k * n_queries + r])
+                            if y_kr == 0.0:
+                                continue  # -2*0*x = 0
                             term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} x[{base + j}]", term_count)
                     else:  # General case with lifted variables
                         for k in range(n_children):
                             y_kr = float(noisy_measurements[k * n_queries + r]) # The noisy value for the k-th child and r-th query
+                            if y_kr == 0.0: # -2*0*q_x = 0
+                                continue 
                             term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} q_x[{k},{r}]", term_count)  # just a simple squared error with the lifted variable q_x[k, r]
 
                 # Pass 2: quadratic terms
