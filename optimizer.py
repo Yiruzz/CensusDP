@@ -7,6 +7,12 @@ from typing import List, Callable, Any, Optional, Union
 
 from constraints.sparse_constraint import SparseConstraint
 
+# Using a dictionary, with the sense as the key, to parse SparseConstraint into a Pyomo expression
+ops = {
+    "=": lambda l, r: l == r,
+    "<=": lambda l, r: l <= r,
+    ">=": lambda l, r: l >= r
+}
 
 class OptimizationModel:
     '''
@@ -167,15 +173,10 @@ class OptimizationModel:
                 # SparseConstraint: build expression from indices and coefs
                 lhs = sum(float(c) * instance.x[int(idx)] for idx, c in zip(constraint.indices, constraint.coefs))
 
-                if constraint.sense == "=":
-                    pyomo_expr = lhs == constraint.rhs
-                elif constraint.sense == "<=":
-                    pyomo_expr = lhs <= constraint.rhs
-                elif constraint.sense == ">=":
-                    pyomo_expr = lhs >= constraint.rhs
-                else:
+                if constraint.sense not in ops:
                     raise ValueError(f"Unknown sense: {constraint.sense}")
-
+                
+                pyomo_expr = ops[constraint.sense](lhs, constraint.rhs)
                 instance.ConstraintList.add(pyomo_expr)
                 
             except Exception as e:
@@ -269,15 +270,10 @@ class OptimizationModel:
                 # SparseConstraint: build expression from indices and coefs
                 lhs = sum(float(c) * cell_value[int(idx)] for idx, c in zip(constraint.indices, constraint.coefs)) 
 
-                if constraint.sense == "=":
-                    pyomo_expr = lhs == constraint.rhs
-                elif constraint.sense == "<=":
-                    pyomo_expr = lhs <= constraint.rhs
-                elif constraint.sense == ">=":
-                    pyomo_expr = lhs >= constraint.rhs
-                else:
+                if constraint.sense not in ops:
                     raise ValueError(f"Unknown sense: {constraint.sense}")
-
+                
+                pyomo_expr = ops[constraint.sense](lhs, constraint.rhs)
                 instance.ConstraintList.add(pyomo_expr)
                
             except Exception as e:

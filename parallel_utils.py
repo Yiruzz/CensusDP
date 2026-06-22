@@ -119,8 +119,8 @@ def _check_node_correctness(parent_vector: sp.csc_matrix, children_vectors: sp.c
         parent_vector (sp.csc_matrix): Contingency vector of the parent node.
         children_vectors (sp.csc_matrix): Concatenated contingency vectors of the child nodes.
     '''
-    parent_sum = parent_vector.sum()
-    children_sum = children_vectors.sum()
+    parent_sum = parent_vector.data.sum()
+    children_sum = children_vectors.data.sum()
 
     if parent_sum != children_sum:
         print(f"\nError: The sum of the children nodes' contingency vectors "
