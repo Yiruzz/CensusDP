@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import zarr
 import scipy.sparse as sp
 from scipy.sparse import spmatrix
 
@@ -14,11 +15,12 @@ from typing import List, Dict, Any, Tuple
 def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool) -> None:
+                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool,
+                 zarr_path: str, noisy_array_name: str) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
-        optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory 
+        optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                             and solver options dict).
         constraints_dict (Dict[int, List]): Constraints mapped by level.
         spill_dir (str): Directory path for spilling vectors to disk.
@@ -31,8 +33,10 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
         query_matrix (spmatrix): The sparse query matrix Q used in optimization.
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.
+        zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
+        noisy_array_name (str): Name of the noise array within the Zarr group.
     '''
-    global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints
+    global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
 
     _optimizer = OptimizationModel(*optimizer)
 
@@ -52,6 +56,7 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
     _privacy_mechanism = privacy_mechanism
+    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
     _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set) -> List[SparseConstraint]:
@@ -126,13 +131,15 @@ def _check_node_correctness(parent_vector: sp.csc_matrix, children_vectors: sp.c
         print(f"\nError: The sum of the children nodes' contingency vectors "
               f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
 
-def estimate_and_update_children(node_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]], children_level: int, is_leaf: bool = False) -> float:
+def estimate_and_update_children(node_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]],
+                                 children_ids: List[int], children_level: int, is_leaf: bool = False) -> float:
     '''Solve optimization for a node considering its children and update their vectors.
 
     Args:
         node_id (int): The unique ID of the parent node.
         node_path (str): Path to contigency vector file.
         children_filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
+        children_ids (List[int]): List of node IDs for each child (for pre-computed noise lookup).
         children_level (int): Level of all children (they all share the same level).
         is_leaf (bool): Whether children are leaf nodes. Defaults to False.
 
@@ -145,9 +152,14 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     children_vectors = []
     children_constraints = []
 
-    for filter_dict in children_filter_dicts:
+    for filter_dict, child_id in zip(children_filter_dicts, children_ids):
         child_vector, child_constraint = _data_handler.materialize_node_data(filter_dict, _constraints[children_level], _Q)
-        _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+
+        # Try to use pre-computed noise, fallback to in-situ generation if not available
+        try:
+            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
+        except:
+            _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
 
         children_vectors.append(child_vector)
         children_constraints.append(child_constraint)

@@ -8,7 +8,7 @@ from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from parallel_utils import init_process, estimate_and_update_children
+from parallel_utils.estimation_phase import init_process, estimate_and_update_children
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
@@ -17,10 +17,10 @@ import time
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
-    
+
     The algorithm works by constructing a hierarchical tree structure, then adding noise to the data
     considering differential privacy principles. It propagates the noise to each node in the tree and
-    finally it solves optimization problems to ensure consistency across the tree and adherence to 
+    finally it solves optimization problems to ensure consistency across the tree and adherence to
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
@@ -50,7 +50,7 @@ class TopDown():
             query_columns (List[str]): Columns to be queried and aggregated.
             privacy_mechanism (PrivacyMechanism): DP variant and its per-level parameters.
             tree (HierarchicalTree): Hierarchical structure of the data.
-            optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory 
+            optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                                 and solver options dict).
             constraints (Dict[int, List[Constraint]]): Constraints registered per tree level.
             workers (int): Number of parallel workers for the estimation phase.
@@ -78,8 +78,8 @@ class TopDown():
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
-        self.optimizer: Tuple[type, Optional[str], Dict] = (self.data_handler.dtype, 
-                                                            self.data_handler.lp_problems_dir, 
+        self.optimizer: Tuple[type, Optional[str], Dict] = (self.data_handler.dtype,
+                                                            self.data_handler.lp_problems_dir,
                                                             solver_options)
 
         self.workers = num_workers
@@ -134,11 +134,21 @@ class TopDown():
 
         # Initialize directories to temporarily save vectors and microdata
         self.data_handler.initialize_directories()
-        self.optimizer = (self.optimizer[0], 
-                          self.data_handler.lp_problems_dir, 
+        self.optimizer = (self.optimizer[0],
+                          self.data_handler.lp_problems_dir,
                           self.optimizer[2])
 
         print(self.tree, "\n")
+
+        # Pre-generate noise vectors for all nodes
+        t1 = time.time()
+        print(f'Pre-generating noise vectors if needed...', end=' ')
+        if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec):
+            print("")
+            self.data_handler.generate_noise_vectors(self.workers, self.tree._node_count,
+                                                     self.tree.iter_nodes_with_levels(),
+                                                     self.privacy_mechanism.name, self.privacy_mechanism.level_params, self.query_sensitivity)
+        print(f'{time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
         '''Perform the estimation phase of the TopDown algorithm.
@@ -151,7 +161,10 @@ class TopDown():
         # Materialize root
         root = self.tree.root
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
-        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
+        try:
+            self.privacy_mechanism.add_noise_from_precomputed(self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], root.contingency_vector, root.id)
+        except:
+            self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
@@ -171,17 +184,19 @@ class TopDown():
                                                                     self.hierarchical_columns, self.query_columns,
                                                                     self.privacy_mechanism,
                                                                     self.Q, self.query_sensitivity,
-                                                                    self.check_correctness)) as executor:
+                                                                    self.check_correctness,
+                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)
                 children_filter_dicts = [child.filter_dict for child in node.children]
+                children_ids = [child.id for child in node.children]
                 children_level = node.children[0].level
                 is_leaf = node.children[0].is_leaf()
 
                 return executor.submit(estimate_and_update_children, node.id, node_path,
-                                     children_filter_dicts, children_level, is_leaf)
-            
+                                     children_filter_dicts, children_ids, children_level, is_leaf)
+
             total_microdata_time = 0.0
             futures = {_submit(root): root}
             while futures:
