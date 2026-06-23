@@ -664,6 +664,8 @@ class DataHandler:
                         row_data = fut.result()
                         arr[node_id, :] = row_data
                         done += 1
+                        
+                        self.noise_zarr_group.attrs["n_rows_generated"] = done
 
                         if done % max(1, n_nodes // 20) == 0:
                             print(f"    Progress: {done}/{n_nodes}")
