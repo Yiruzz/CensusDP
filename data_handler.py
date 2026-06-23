@@ -533,6 +533,7 @@ class DataHandler:
 
         Looks for files matching the pattern noisy_vectors_*_{mech_param_spec}.zarr
         and selects one with n_nodes_file >= n_nodes and n_cells_file >= n_cells.
+        Verifies that n_rows_generated >= n_expected_nodes to ensure completeness.
         If multiple compatible files exist, returns the one with the smallest dimensions
         to minimize memory usage.
 
@@ -557,7 +558,7 @@ class DataHandler:
             # Parse filename: noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr
             # Remove prefix and suffix
             name_without_ext = filename[len(pattern):-5]  # Remove "noisy_vectors_" and ".zarr"
-       
+
             # Split by '_' but the mech_param_spec can contain underscores
             # Strategy: split from the right to extract mech_param_spec first
             parts = name_without_ext.split('_', 2)  # Split from right, max 2 splits
@@ -576,7 +577,21 @@ class DataHandler:
 
             # Check if file has enough capacity
             if file_n_nodes >= n_nodes and file_n_cells >= n_cells:
-                candidates.append((filename, file_n_nodes, file_n_cells))
+                
+                # Validate metadata: ensure all expected nodes were actually generated
+                zarr_path = os.path.join(self.noisy_dir, filename)
+                try:
+                    zarr_group = zarr.open_group(zarr_path, mode="r")
+                    n_expected = zarr_group.attrs.get("n_expected_nodes", 0)
+                    n_generated = zarr_group.attrs.get("n_rows_generated", 0)
+
+                    # Only accept if generation is complete
+                    if n_generated >= n_expected:
+                        candidates.append((filename, file_n_nodes, file_n_cells))
+        
+                except Exception as e:
+                    print(f"    Warning: Could not read metadata from {filename}: {e}")
+                    continue
 
         if not candidates:
             return None
