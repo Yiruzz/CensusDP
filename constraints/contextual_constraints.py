@@ -1,7 +1,7 @@
 import numpy as np
-from functools import partial
-from typing import Callable, List
+from typing import Callable
 
+from constraints.sparse_constraint import SparseConstraint
 from constraints.logical_expressions.base import LogicalExpression
 from .aggregate_constraints import AggregateConstraint
 
@@ -51,6 +51,8 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
 
     @staticmethod
     def get_real_total(counts):
+        # This is because we can now get a count over all possible combinations for a node using group by and size.
+        # So there is no need to use len() over the DataFrame; we can simply sum the Series or list of counts computed previously.
         return counts.sum()
     
     def __init__(self, expression: LogicalExpression) -> None:
@@ -58,25 +60,22 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         # The true total is the sum of all counts in the node's context
         super().__init__(expression=expression, aggregation_function=SumEqualRealTotal.get_real_total)
 
-    @staticmethod
-    def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
-        """Check that the sum of selected indices in the contingency variable equals a target value.
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        '''Convert to sparse linear constraint (agnóstico).
 
-        Args:
-            contingency_var: A Pyomo Var/dict indexed by cell index.
-            sum_val (int): The expected sum of the selected elements.
-            indices (List[int]): Indices in contingency_var whose values will be summed.
-        Returns:
-            bool: True if the sum of the selected elements equals sum_val, otherwise False.
-        """
-        return sum(contingency_var[i] for i in indices) == sum_val
-
-    def to_constraint(self, domain):
+        Returns a SparseConstraint representation of the contextual sum constraint.
+        '''
         # Reduce to a boolean mask over the cells, then take the selected indices.
         reduced_mask = self.expression.reduce(domain)
-        indices = np.flatnonzero(reduced_mask).tolist()
-        # Return a function that checks if the sum of the contingency variable equals the value
-        return partial(SumEqualRealTotal.check_sum, sum_val=self.value, indices=indices)
+        indices = np.flatnonzero(reduced_mask)
+        coefs = np.ones(len(indices))
+
+        return SparseConstraint(
+            indices=indices,
+            coefs=coefs,
+            sense="=",
+            rhs=float(self.value)
+        )
     
 # NOTE: Add more aggregate expressions as needed
 

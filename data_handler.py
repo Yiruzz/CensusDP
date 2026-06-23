@@ -39,7 +39,7 @@ class DataHandler:
 
             domain (Optional[Dict[str, Sequence]]): User-provided domain for query columns.
             contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces dense Cartesian-product table.
-            contingency_df_length (Optional[int]): Total number of contingency cells (n_cells).
+            n_cells (Optional[int]): Total number of contingency cells.
             dtype (str): NumPy data type for all arrays (default: 'int64').
 
             hierarchical_columns (List[str]): Columns defining the tree hierarchy levels.
@@ -48,6 +48,11 @@ class DataHandler:
             spill_dir (Optional[str]): Temporary directory for spilled node vectors. Set by initialize_directories().
             microdata_dir (Optional[str]): Temporary directory for worker microdata files. Set by initialize_directories().
             worker_microdata_file (Optional[str]): Path to the current worker's microdata file.
+
+            noisy_dir (Optional[str]): Directory holding pre-computed noise Zarr files. Set by initialize_directories().
+            noise_zarr_group (Optional[zarr.hierarchy.Group]): Zarr group of pre-computed noise vectors.
+            noisy_array_name (str): Name of the noise array within the Zarr group.
+            noise_zarr_path (Optional[str]): Path to the noise Zarr group on disk.
 
             duckdb_con (Optional[duckdb.DuckDBPyConnection]): DuckDB connection for queries.
             data_view_name (str): Name of the DuckDB view for the input data.
@@ -67,8 +72,8 @@ class DataHandler:
         # cell index. Replaces the dense Cartesian-product DataFrame.
         self.domain: Optional[Dict[str, Sequence]] = domain
         self.contingency_domain: Optional[ContingencyDomain] = None
-        self.contingency_df_length: Optional[int] = None
-        self.dtype: str = 'int32'
+        self.n_cells: Optional[int] = None
+        self.dtype: str = 'int64'
 
         # Columns to use
         self.hierarchical_columns: List[str] = []
@@ -76,33 +81,36 @@ class DataHandler:
 
         # Define path to directories for vectors and temporary microdata files
         self.spill_dir: Optional[str] = None
-        self.noisy_dir: Optional[str] = None
         self.microdata_dir: Optional[str] = None
         self.worker_microdata_file: Optional[str] = None
+        self.lp_problems_dir: Optional[str] = None
+
+        # Pre-computed noise storage (Zarr)
+        self.noisy_dir: Optional[str] = None
+        self.noise_zarr_group: Optional[zarr.hierarchy.Group] = None
+        self.noisy_array_name: str = "Noise"
+        self.noise_zarr_path: Optional[str] = None
+        self.COMPRESSION_LEVEL: int = 9
 
         # DuckDB connection for queries
         self.duckdb_con: Optional[duckdb.DuckDBPyConnection] = None
         self.data_view_name: str = 'data'
 
-        self.cache_dir: str = os.path.join(os.getcwd(), 'data/data_cache')
-
-        self.noise_zarr_group: Optional[zarr.hierarchy.Group] = None
-        self.noisy_array_name = "Noise"
-        self.noise_zarr_path: Optional[str] = None
-        self.COMPRESSION_LEVEL = 9
-      
-        os.makedirs(self.cache_dir, exist_ok=True)
-
     def initialize_directories(self) -> None:
         '''Create directories for spilled vectors and temporary microdata in project root.'''
-        pid = os.getpid()
-        self.noisy_dir = os.path.join(self.cache_dir, f'topdown_noisy')
-        self.spill_dir = os.path.join(self.cache_dir, f'topdown_spill_{pid}')
-        self.microdata_dir = os.path.join(self.cache_dir, f'topdown_microdata_{pid}')
+        cache_dir = os.path.join(os.getcwd(), 'data', 'data_cache')
 
-        os.makedirs(self.noisy_dir, exist_ok=True)
+        pid = os.getpid()
+        self.spill_dir = os.path.join(cache_dir, f'topdown_spill_{pid}')
+        self.microdata_dir = os.path.join(cache_dir, f'topdown_microdata_{pid}')
+        self.lp_problems_dir = os.path.join(cache_dir, 'topdown_solver_problems')
+        # Shared across runs (no pid) so compatible noise files can be reused.
+        self.noisy_dir = os.path.join(cache_dir, 'topdown_noisy')
+
         os.makedirs(self.spill_dir, exist_ok=True)
         os.makedirs(self.microdata_dir, exist_ok=True)
+        os.makedirs(self.lp_problems_dir, exist_ok=True)
+        os.makedirs(self.noisy_dir, exist_ok=True)
 
     def cleanup_directories(self) -> None:
         '''Delete spill and microdata directories recursively.'''
@@ -192,7 +200,7 @@ class DataHandler:
                 declared[col] = np.array([row[0] for row in result])
 
         self.contingency_domain = ContingencyDomain(columns=self.query_columns, domains=declared)
-        self.contingency_df_length = self.contingency_domain.n_cells
+        self.n_cells = self.contingency_domain.n_cells
 
         print("\n Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
 
@@ -220,19 +228,19 @@ class DataHandler:
         tree._index_nodes()
 
         return tree
-    
+
     def _build_subtree(self, parent_node: HierarchicalNode, level_iterator: int, filter_dict: Dict[str, Any]) -> int:
         '''Helper method to recursively build the subtree for a given parent node.
 
         Creates only the tree structure using DuckDB queries and filter conditions.
 
         Args:
-            parent_node (HierarchicalNode): The parent node to which children will be added
-            level_iterator (int): Current level in the hierarchy
-            filter_dict (Dict[str, Any]): Dictionary mapping column names to values for WHERE clause
+            parent_node (HierarchicalNode): The parent node to which children will be added.
+            level_iterator (int): An iterator for the current level in the hierarchy.
+            filter_dict (Dict[str, Any]): Dictionary mapping column names to values for WHERE clause.
 
         Returns:
-            int: The number of nodes in the subtree
+            int: The number of nodes in the subtree.
         '''
         n_nodes = 1
 
@@ -263,7 +271,7 @@ class DataHandler:
             n_nodes += self._build_subtree(child_node, level_iterator + 1, new_filter_dict)
 
         return n_nodes
-    
+
     def _reduce_dataframe(self, filters: Dict[str, Any]) -> pd.DataFrame:
         '''Query contingency table with optional filters from DuckDB.
 
@@ -271,10 +279,10 @@ class DataHandler:
         with counts. Applies optional filters from filter_dict.
 
         Args:
-            filters (Dict[str, Any]): Dictionary mapping column names to values for filtering
+            filters (Dict[str, Any]): Dictionary mapping column names to values for filtering.
 
         Returns:
-            pd.DataFrame: DataFrame with query columns and "count" column
+            pd.DataFrame: DataFrame with query columns and "count" column.
         '''
         assert self.duckdb_con is not None, "DuckDB connection not initialized. Call create_data_view first."
 
@@ -298,19 +306,19 @@ class DataHandler:
         # Hierarchical columns are not used.
         col_names = self.query_columns + ["count"]
         return pd.DataFrame(result, columns=col_names)
-    
+
     def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None) -> sp.csr_matrix:
         '''Create a sparse contingency (column) vector for records matching filters.
 
-        Queries the contingency table based on filters, encodes cell indices using the
-        contingency domain, and builds a sparse column vector. Returned sparse to avoid
-        densification before matrix multiplication (Q @ x).
+        Queries the contingency table using tabla_contingencia, encodes cell indices,
+        and builds a sparse matrix. Returned sparse so the raw histogram x is
+        never densified before Q @ x.
 
         Args:
-            filters (Optional[Dict[str, Any]]): Dictionary mapping column names to values for filtering. If None, uses all records
+            filters (Optional[Dict[str, Any]]): Dictionary mapping column names to values for filtering.
 
         Returns:
-            sp.csr_matrix: Sparse vector of shape (n_cells, 1) with cell counts
+            scipy.sparse.csr_matrix:
         '''
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
 
@@ -325,7 +333,7 @@ class DataHandler:
         )
 
         return sparse_vector
-    
+
     def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
@@ -334,12 +342,12 @@ class DataHandler:
         the mixed-radix contingency domain.
 
         Args:
-            filter_dict (Dict[str, Any]): The node's filter conditions (column -> value mapping)
-            constraints (List[Constraint]): Constraints for the node considering its level
-            query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix for aggregating contingency vectors
+            filter_dict (Dict[str, Any]): The node's filter conditions (column -> value mapping).
+            constraints (List[Constraint]): Constraints for the node considering its level.
+            query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix for aggregating contingency vectors.
 
         Returns:
-            Tuple[np.ndarray, List]: Contingency vector and constraint callables for this node
+            Tuple[np.ndarray, List[Constraint]]: Contingency vector and constraint callables for this node.
         '''
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
 
@@ -361,7 +369,7 @@ class DataHandler:
                     constraint.apply_aggregation_function(x.data)
 
             # Convert to optimizer callable against the contingency domain
-            level_constraints.append(constraint.to_constraint(self.contingency_domain))
+            level_constraints.append(constraint.to_sparse_constraint(self.contingency_domain))
 
         return contingency_vector, level_constraints
 
@@ -369,10 +377,10 @@ class DataHandler:
         '''Get the spill file path from a filter dictionary.
 
         Args:
-            filter_dict (Dict[str, Any]): The filter dictionary (column -> value mapping)
+            filter_dict (Dict[str, Any]): The filter dictionary (column -> value mapping).
 
         Returns:
-            str: File path for the spilled vector named by the filter values
+            str: File path for the spilled vector named by the filter values.
         '''
 
         # Create filename
@@ -382,46 +390,49 @@ class DataHandler:
         # Avoid problematic characters
         for ch in ('/', '\\', ' ', ':'):
             name = name.replace(ch, '_')
-        
         # Build file path
-        return os.path.join(self.spill_dir, name + '.npy')
+        return os.path.join(self.spill_dir, name + '.npz')
 
-    def spill_vector(self, path: str, contingency_vector: np.ndarray) -> None:
+    def spill_vector(self, path: str, contingency_vector: Union[np.ndarray, sp.spmatrix]) -> None:
         '''Write contingency vector to disk and free it from RAM.
 
-        One file per node, named by its hierarchical path, ensuring sibling nodes don't conflict.
+        The vector is serialized with scipy's sparse .npz format. Dense vectors (the root's
+        noisy measurement) are converted to a sparse CSC column first. One file per node,
+        named by its filter values, ensuring sibling nodes don't conflict.
 
         Args:
-            path (str): The file path where the vector will be spilled
-            contingency_vector (np.ndarray): The contingency vector to write to disk
+            path (str): The file path where the vector will be spilled.
+            contingency_vector (Union[np.ndarray, sp.spmatrix]): The contingency vector to write to disk.
         '''
         os.makedirs(self.spill_dir, exist_ok=True)
-        np.save(path, np.ascontiguousarray(contingency_vector))
+        if not sp.issparse(contingency_vector):
+            contingency_vector = sp.csc_matrix(contingency_vector.reshape(-1, 1))
+        sp.save_npz(path, contingency_vector)
 
-    def load_vector(self, path: str) -> np.ndarray:
+    def load_vector(self, path: str) -> sp.csc_matrix:
         '''Reload contingency vector from disk and delete the file.
 
         Args:
-            path (str): The file path to load the vector from
+            path (str): The file path to load the vector from.
 
         Returns:
-            np.ndarray: The loaded contingency vector
+            scipy.sparse.csc_matrix: The loaded contingency vector, shape (n, 1).
         '''
-        contingency_vector = np.load(path)
+        contingency_vector = sp.load_npz(path)
         os.remove(path)
         return contingency_vector
 
-    def update_child_vectors(self, joint_solution: np.ndarray, vectors_length: int, filter_dicts: List[Dict[str, Any]]) -> None:
+    def update_child_vectors(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
 
         Args:
-            joint_solution (np.ndarray): The combined solution vector for all children
-            vectors_length (int): The length of each individual child vector
-            filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child
+            joint_solution (sp.csc_matrix): The combined sparse solution vector for all children,
+                shape (num_children * n_cells, 1).
+            filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         '''
         start = 0
         for child_filter_dict in filter_dicts:
-            end = start + vectors_length
+            end = start + self.n_cells
             path = self.spill_path(child_filter_dict)
             self.spill_vector(path, joint_solution[start:end])
             start = end
@@ -439,25 +450,26 @@ class DataHandler:
         except Exception as e:
             print(f"Warning: Error merging microdata files: {e}")
 
-    def _construct_microdata_for_leaf(self, contingency_vector: np.ndarray, filter_dict: Dict[str, Any]) -> pd.DataFrame:
+    def _construct_microdata_for_leaf(self, contingency_vector: sp.csc_matrix, filter_dict: Dict[str, Any]) -> pd.DataFrame:
         '''Construct microdata for a leaf node.
 
         Args:
-            contingency_vector (np.ndarray): The contingency vector (cell counts)
-            filter_dict (Dict[str, Any]): Filter dictionary for hierarchical values
+            contingency_vector (sp.csc_matrix): The estimated cell counts as a sparse CSC
+                column (n_cells, 1), storing only positive cells.
+            filter_dict (Dict[str, Any]): Filter dictionary for hierarchical values.
 
         Returns:
-            pd.DataFrame: Microdata for this leaf node
+            pd.DataFrame: Microdata for this leaf node.
         '''
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
         domain = self.contingency_domain
 
-        # Select only positive frequencies
-        nonzero_idx = np.flatnonzero(contingency_vector > 0)
+        # The vector stores only positive cells (canonical CSC: no explicit zeros).
+        nonzero_idx = contingency_vector.indices
+        filtered_counts = contingency_vector.data
 
         # Decode only the nonzero cells into their attribute combinations
         filtered_query_values = domain.decode(nonzero_idx)
-        filtered_counts = contingency_vector[nonzero_idx]
 
         # Repeat each combination according to its frequency
         expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
@@ -473,30 +485,19 @@ class DataHandler:
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
 
-    def write_microdata(self, node_id: int, contingency_vectors: List[np.ndarray], filter_dicts: List[Dict[str, Any]]) -> List[str]:
-        '''Construct microdata for each child and write to separate Parquet files.
-
-        For each contingency vector, reconstructs the original microdata by decoding cells
-        according to the contingency domain and repeating rows by frequency. Results are
-        written to individual Parquet files for later merging.
+    def write_microdata(self, node_id: int, contingency_vectors: List[sp.csc_matrix], filter_dicts: List[Dict[str, Any]]) -> None:
+        '''Construct microdata for each child and write to separate Parquet files using DuckDB.
 
         Args:
-            node_id (int): The parent node ID (used for naming the output files)
-            contingency_vectors (List[np.ndarray]): List of contingency vectors (cell counts) for each child
-            filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child (hierarchical values)
-
-        Returns:
-            List[str]: Paths to the created Parquet files
+            node_id (int): The parent node ID (used for naming the output files).
+            contingency_vectors (List[sp.csc_matrix]): List of sparse cell-count vectors for each child.
+            filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         '''
-        output_paths = []
 
         for i, (contingency_vector, filter_dict) in enumerate(zip(contingency_vectors, filter_dicts)):
             df = self._construct_microdata_for_leaf(contingency_vector, filter_dict)
             output_path = os.path.join(self.microdata_dir, f'node_{node_id}_child_{i}_microdata.parquet')
             df.to_parquet(output_path, index=False)
-            output_paths.append(output_path)
-
-        return output_paths
 
     def noisy_vectors_exist(self, n_nodes: int, mech_param_spec: str) -> bool:
         '''Check if compatible pre-computed noise vectors exist and reuse them if possible.
@@ -512,7 +513,7 @@ class DataHandler:
         Returns:
             bool: True if compatible vectors were found and loaded, False if new file created
         '''
-        n_cells = self.contingency_df_length
+        n_cells = self.n_cells
 
         # Try to find a compatible existing file
         compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec)
@@ -577,7 +578,7 @@ class DataHandler:
 
             # Check if file has enough capacity
             if file_n_nodes >= n_nodes and file_n_cells >= n_cells:
-                
+
                 # Validate metadata: ensure all expected nodes were actually generated
                 zarr_path = os.path.join(self.noisy_dir, filename)
                 try:
@@ -588,7 +589,7 @@ class DataHandler:
                     # Only accept if generation is complete
                     if n_generated >= n_expected:
                         candidates.append((filename, file_n_nodes, file_n_cells))
-        
+
                 except Exception as e:
                     print(f"    Warning: Could not read metadata from {filename}: {e}")
                     continue
@@ -600,7 +601,7 @@ class DataHandler:
         candidates.sort(key=lambda x: x[2])
         chosen_file = candidates[0][0]
         return os.path.join(self.noisy_dir, chosen_file)
-            
+
     def _create_noisy_file(self, zarr_path: str, n_nodes: int) -> None:
         '''Create a new Zarr file to store pre-computed noise vectors.
 
@@ -615,11 +616,11 @@ class DataHandler:
         compressor = numcodecs.Blosc(cname="zstd", clevel=self.COMPRESSION_LEVEL, shuffle=numcodecs.Blosc.BITSHUFFLE)
 
         self.noise_zarr_group = zarr.open_group(zarr_path, mode="w", zarr_format=2)
-        self.noise_zarr_group.create_array(self.noisy_array_name, shape=(n_nodes, self.contingency_df_length),
-                                      chunks=(1, self.contingency_df_length), dtype=self.dtype, compressor=compressor)
+        self.noise_zarr_group.create_array(self.noisy_array_name, shape=(n_nodes, self.n_cells),
+                                      chunks=(1, self.n_cells), dtype=self.dtype, compressor=compressor)
 
         self.noise_zarr_group.attrs["n_expected_nodes"] = n_nodes
-        self.noise_zarr_group.attrs["n_cells"] = self.contingency_df_length
+        self.noise_zarr_group.attrs["n_cells"] = self.n_cells
         self.noise_zarr_group.attrs["n_rows_generated"] = 0
 
     def generate_noise_vectors(self, n_workers: int, n_nodes: int, gen: Iterable[Tuple[int, int]],
@@ -647,7 +648,7 @@ class DataHandler:
 
         with ProcessPoolExecutor(max_workers=n_workers, initializer=initialize_mechanism,
                                  initargs=(privacy_mech_name, level_params,
-                                           self.contingency_df_length, self.dtype, query_sensitivity)) as executor:
+                                           self.n_cells, self.dtype, query_sensitivity)) as executor:
 
             for node_id, level in itertools.islice(task_iter, WINDOW_SIZE):
                 fut = executor.submit(generate_noise_row, level)
@@ -659,12 +660,12 @@ class DataHandler:
 
                 for fut in finished:
                     node_id = pending.pop(fut)
-                    
+
                     try:
                         row_data = fut.result()
                         arr[node_id, :] = row_data
                         done += 1
-                        
+
                         self.noise_zarr_group.attrs["n_rows_generated"] = done
 
                         if done % max(1, n_nodes // 20) == 0:
@@ -683,7 +684,5 @@ class DataHandler:
 
             if done % max(1, n_nodes // 20) != 0:
                 print(f"    Progress: {done}/{n_nodes}")
-                
+
         self.noise_zarr_group.attrs["n_rows_generated"] = done
-
-

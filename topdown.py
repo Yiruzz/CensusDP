@@ -12,56 +12,56 @@ from parallel_utils.estimation_phase import init_process, estimate_and_update_ch
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 import time
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
-    
+
     The algorithm works by constructing a hierarchical tree structure, then adding noise to the data
     considering differential privacy principles. It propagates the noise to each node in the tree and
-    finally it solves optimization problems to ensure consistency across the tree and adherence to 
+    finally it solves optimization problems to ensure consistency across the tree and adherence to
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
-                 solver_name: str = 'gurobi', solver_options: dict = {}, optimizer_path: Optional[str] = None,
-                 domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
-        '''
-        Initialize the TopDown algorithm.
+                 solver_options: dict = {}, domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
+        """Initialize the TopDown algorithm.
 
         Args:
             data_path (str): Path to the input data file.
             hierarchy (List[str]): List of columns representing the hierarchy levels.
             query_columns (List[str]): List of columns to be queried and aggregated.
             privacy_mechanism (PrivacyMechanism): DP variant carrying per-level parameters.
-                Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-column levels).
-            out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
-            solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
-            solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
-            optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
+                Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-level).
+            num_workers (int): Number of parallel workers for the estimation phase.
+            out_path (str): Path to save the noisy output data. Defaults to 'noisy_data.csv'.
+            solver_options (dict): Dictionary of Gurobi parameters passed to the optimizer environment.
+                Defaults to empty dict.
             domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
                 query columns, defining the contingency cell space. Should be data-independent
                 for a sound DP guarantee. When None (or a column omitted), the domain is inferred
                 from the observed data with a warning. Passed through to DataHandler.
-            num_workers (int): Number of parallel workers for the estimation phase. Defaults to 2.
-            check_correctness (bool): Whether to check correctness during execution. Defaults to False.
+            check_correctness (bool): Whether to run correctness checks during execution. Defaults to False.
 
         Attributes:
-            data_handler (DataHandler): Instance of DataHandler for managing data operations.
+            data_handler (DataHandler): Manages data loading, preprocessing, and output.
+            hierarchical_columns (List[str]): Columns representing the hierarchy levels.
+            query_columns (List[str]): Columns to be queried and aggregated.
+            privacy_mechanism (PrivacyMechanism): DP variant and its per-level parameters.
+            tree (HierarchicalTree): Hierarchical structure of the data.
+            optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
+                                                and solver options dict).
+            constraints (Dict[int, List[Constraint]]): Constraints registered per tree level.
+            workers (int): Number of parallel workers for the estimation phase.
+        """
+        n_levels = len(hierarchy) + 1
+        if len(privacy_mechanism.level_params) != n_levels:
+            raise ValueError(
+                f"privacy_mechanism has {len(privacy_mechanism.level_params)} per-level params; "
+                f"expected {n_levels} (= len(hierarchy) + 1)."
+            )
 
-            hierarchical_columns (List[str]): List of columns representing the hierarchy levels.
-            query_columns (List[str]): List of columns to be queried and aggregated.
-
-            privacy_mechanism (PrivacyMechanism): The DP variant + per-level parameters.
-
-            tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
-            optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
-
-            constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints.
-
-            workers (int): Number of parallel workers for estimation phase.
-        '''
         self.hierarchical_columns: List[str] = hierarchy
         self.query_columns: List[str] = query_columns
 
@@ -69,12 +69,6 @@ class TopDown():
         self.data_handler.hierarchical_columns = hierarchy
         self.data_handler.query_columns = query_columns
 
-        n_levels = len(hierarchy) + 1
-        if len(privacy_mechanism.level_params) != n_levels:
-            raise ValueError(
-                f"privacy_mechanism has {len(privacy_mechanism.level_params)} per-level params; "
-                f"expected {n_levels} (= len(hierarchy) + 1)."
-            )
         self.privacy_mechanism: PrivacyMechanism = privacy_mechanism
 
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
@@ -84,13 +78,9 @@ class TopDown():
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
-        self.optimizer: OptimizationModel = OptimizationModel(
-            solver_name=solver_name,
-            solver_options=solver_options,
-            optimizer_path=optimizer_path
-        )
-        
-        self.solver_options = solver_options
+        self.optimizer: Tuple[type, Optional[str], Dict] = (self.data_handler.dtype,
+                                                            self.data_handler.lp_problems_dir,
+                                                            solver_options)
 
         self.workers = num_workers
         self.check_correctness = check_correctness
@@ -144,6 +134,11 @@ class TopDown():
 
         # Initialize directories to temporarily save vectors and microdata
         self.data_handler.initialize_directories()
+        self.optimizer = (self.optimizer[0],
+                          self.data_handler.lp_problems_dir,
+                          self.optimizer[2])
+
+        print(self.tree, "\n")
 
         # Pre-generate noise vectors for all nodes
         t1 = time.time()
@@ -170,7 +165,7 @@ class TopDown():
             self.privacy_mechanism.add_noise_from_precomputed(self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], root.contingency_vector, root.id)
         except:
             self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
-                    
+
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
 
@@ -181,13 +176,13 @@ class TopDown():
 
         # Process remaining nodes
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
-                                initializer=init_process, initargs=(self.solver_options, self.constraints,
+                                initializer=init_process, initargs=(self.optimizer, self.constraints,
                                                                     self.data_handler.spill_dir,
                                                                     self.data_handler.microdata_dir,
                                                                     self.data_handler.file_path,
                                                                     self.data_handler.contingency_domain.domains,
                                                                     self.hierarchical_columns, self.query_columns,
-                                                                    self.privacy_mechanism.name, self.privacy_mechanism.level_params,
+                                                                    self.privacy_mechanism,
                                                                     self.Q, self.query_sensitivity,
                                                                     self.check_correctness,
                                                                     self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)) as executor:
@@ -201,7 +196,7 @@ class TopDown():
 
                 return executor.submit(estimate_and_update_children, node.id, node_path,
                                      children_filter_dicts, children_ids, children_level, is_leaf)
-            
+
             total_microdata_time = 0.0
             futures = {_submit(root): root}
             while futures:
@@ -234,9 +229,10 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
+        optimizer = OptimizationModel(*self.optimizer)
 
         t1 = time.time()
-        x_tilde = self.optimizer.non_negative_real_estimation(
+        x_tilde = optimizer.non_negative_real_estimation(
             noisy_measurements=node.contingency_vector,
             node_id=node.id,
             constraints=node.constraints,
@@ -245,7 +241,7 @@ class TopDown():
         real_time = time.time() - t1
 
         t1 = time.time()
-        node.contingency_vector = self.optimizer.rounding_estimation(
+        node.contingency_vector = optimizer.rounding_estimation(
             x_tilde=x_tilde,
             node_id=node.id,
             constraints=node.constraints
