@@ -1,22 +1,21 @@
 from abc import ABC, abstractmethod
-from typing import Callable
+from constraints.sparse_constraint import SparseConstraint
 
 class Constraint(ABC):
     """Base interface for all constraints.
 
-    Implementations must provide to_constraint(domain) which returns a callable
-    constraint function that receives a contingency variable and returns a boolean
-    expression that will be used by the optimizer.
+    Implementations must provide to_constraint(domain), which returns a SparseConstraint.
+    It encapsulates the selected indices so that, when the optimizer receives a contingency variable,
+    it selects the corresponding variables and uses them to evaluate the expressed condition.
     """
 
     @abstractmethod
-    def to_constraint(self, domain) -> Callable:
-        """Convert the constraint into a callable function.
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        """Convert the constraint into a SparseConstraint over the given domain.
 
         Args:
             domain: ContingencyDomain used as the cell space for evaluation.
         Returns:
-            Callable: A function that takes a contingency variable and returns a boolean
-                      expression that will be used by the optimizer.
+            SparseConstraint: Sparse linear representation consumed by the optimizer.
         """
         raise NotImplementedError()
