@@ -34,7 +34,7 @@ class DataHandler:
 
             domain (Optional[Dict[str, Sequence]]): User-provided domain for query columns.
             contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces dense Cartesian-product table.
-            contingency_df_length (Optional[int]): Total number of contingency cells (n_cells).
+            n_cells (Optional[int]): Total number of contingency cells.
             dtype (str): NumPy data type for all arrays (default: 'int64').
 
             hierarchical_columns (List[str]): Columns defining the tree hierarchy levels.
@@ -62,7 +62,7 @@ class DataHandler:
         # cell index. Replaces the dense Cartesian-product DataFrame.
         self.domain: Optional[Dict[str, Sequence]] = domain
         self.contingency_domain: Optional[ContingencyDomain] = None
-        self.contingency_df_length: Optional[int] = None
+        self.n_cells: Optional[int] = None
         self.dtype: str = 'int64'
 
         # Columns to use
@@ -73,6 +73,7 @@ class DataHandler:
         self.spill_dir: Optional[str] = None
         self.microdata_dir: Optional[str] = None
         self.worker_microdata_file: Optional[str] = None
+        self.lp_problems_dir: Optional[str] = None
 
         # DuckDB connection for queries
         self.duckdb_con: Optional[duckdb.DuckDBPyConnection] = None
@@ -80,12 +81,16 @@ class DataHandler:
 
     def initialize_directories(self) -> None:
         '''Create directories for spilled vectors and temporary microdata in project root.'''
-        cache_dir = os.path.join(os.getcwd(), 'data/data_cache')
+        cache_dir = os.path.join(os.getcwd(), 'data', 'data_cache')
+   
         pid = os.getpid()
         self.spill_dir = os.path.join(cache_dir, f'topdown_spill_{pid}')
         self.microdata_dir = os.path.join(cache_dir, f'topdown_microdata_{pid}')
+        self.lp_problems_dir = os.path.join(cache_dir, 'topdown_solver_problems')
+
         os.makedirs(self.spill_dir, exist_ok=True)
         os.makedirs(self.microdata_dir, exist_ok=True)
+        os.makedirs(self.lp_problems_dir, exist_ok=True)
 
     def cleanup_directories(self) -> None:
         '''Delete spill and microdata directories recursively.'''
@@ -175,7 +180,7 @@ class DataHandler:
                 declared[col] = np.array([row[0] for row in result])
 
         self.contingency_domain = ContingencyDomain(columns=self.query_columns, domains=declared)
-        self.contingency_df_length = self.contingency_domain.n_cells
+        self.n_cells = self.contingency_domain.n_cells
 
         print("\n Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
 
@@ -344,7 +349,7 @@ class DataHandler:
                     constraint.apply_aggregation_function(x.data)
 
             # Convert to optimizer callable against the contingency domain
-            level_constraints.append(constraint.to_constraint(self.contingency_domain))
+            level_constraints.append(constraint.to_sparse_constraint(self.contingency_domain))
 
         return contingency_vector, level_constraints
 
@@ -365,46 +370,49 @@ class DataHandler:
         # Avoid problematic characters
         for ch in ('/', '\\', ' ', ':'):
             name = name.replace(ch, '_')
-        
         # Build file path
-        return os.path.join(self.spill_dir, name + '.npy')
+        return os.path.join(self.spill_dir, name + '.npz')
 
-    def spill_vector(self, path: str, contingency_vector: np.ndarray) -> None:
+    def spill_vector(self, path: str, contingency_vector: Union[np.ndarray, sp.spmatrix]) -> None:
         '''Write contingency vector to disk and free it from RAM.
 
-        One file per node, named by its hierarchical path, ensuring sibling nodes don't conflict.
+        The vector is serialized with scipy's sparse .npz format. Dense vectors (the root's
+        noisy measurement) are converted to a sparse CSC column first. One file per node,
+        named by its filter values, ensuring sibling nodes don't conflict.
 
         Args:
             path (str): The file path where the vector will be spilled.
-            contingency_vector (np.ndarray): The contingency vector to write to disk.
+            contingency_vector (Union[np.ndarray, sp.spmatrix]): The contingency vector to write to disk.
         '''
         os.makedirs(self.spill_dir, exist_ok=True)
-        np.save(path, np.ascontiguousarray(contingency_vector))
+        if not sp.issparse(contingency_vector):
+            contingency_vector = sp.csc_matrix(contingency_vector.reshape(-1, 1))
+        sp.save_npz(path, contingency_vector)
 
-    def load_vector(self, path: str) -> np.ndarray:
+    def load_vector(self, path: str) -> sp.csc_matrix:
         '''Reload contingency vector from disk and delete the file.
 
         Args:
             path (str): The file path to load the vector from.
 
         Returns:
-            np.ndarray: The loaded contingency vector.
+            scipy.sparse.csc_matrix: The loaded contingency vector, shape (n, 1).
         '''
-        contingency_vector = np.load(path)
+        contingency_vector = sp.load_npz(path)
         os.remove(path)
         return contingency_vector
 
-    def update_child_vectors(self, joint_solution: np.ndarray, vectors_length: int, filter_dicts: List[Dict[str, Any]]) -> None:
+    def update_child_vectors(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
 
         Args:
-            joint_solution (np.ndarray): The combined solution vector for all children.
-            vectors_length (int): The length of each individual child vector.
+            joint_solution (sp.csc_matrix): The combined sparse solution vector for all children,
+                shape (num_children * n_cells, 1).
             filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
         '''
         start = 0
         for child_filter_dict in filter_dicts:
-            end = start + vectors_length
+            end = start + self.n_cells
             path = self.spill_path(child_filter_dict)
             self.spill_vector(path, joint_solution[start:end])
             start = end
@@ -422,11 +430,12 @@ class DataHandler:
         except Exception as e:
             print(f"Warning: Error merging microdata files: {e}")
 
-    def _construct_microdata_for_leaf(self, contingency_vector: np.ndarray, filter_dict: Dict[str, Any]) -> pd.DataFrame:
+    def _construct_microdata_for_leaf(self, contingency_vector: sp.csc_matrix, filter_dict: Dict[str, Any]) -> pd.DataFrame:
         '''Construct microdata for a leaf node.
 
         Args:
-            contingency_vector (np.ndarray): The contingency vector (cell counts).
+            contingency_vector (sp.csc_matrix): The estimated cell counts as a sparse CSC
+                column (n_cells, 1), storing only positive cells.
             filter_dict (Dict[str, Any]): Filter dictionary for hierarchical values.
 
         Returns:
@@ -435,12 +444,12 @@ class DataHandler:
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
         domain = self.contingency_domain
 
-        # Select only positive frequencies
-        nonzero_idx = np.flatnonzero(contingency_vector > 0)
+        # The vector stores only positive cells (canonical CSC: no explicit zeros).
+        nonzero_idx = contingency_vector.indices
+        filtered_counts = contingency_vector.data
 
         # Decode only the nonzero cells into their attribute combinations
         filtered_query_values = domain.decode(nonzero_idx)
-        filtered_counts = contingency_vector[nonzero_idx]
 
         # Repeat each combination according to its frequency
         expanded_rows = np.repeat(filtered_query_values, filtered_counts, axis=0)
@@ -456,16 +465,13 @@ class DataHandler:
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
 
-    def write_microdata(self, node_id: int, contingency_vectors: List[np.ndarray], filter_dicts: List[Dict[str, Any]]) -> List[str]:
+    def write_microdata(self, node_id: int, contingency_vectors: List[sp.csc_matrix], filter_dicts: List[Dict[str, Any]]) -> None:
         '''Construct microdata for each child and write to separate Parquet files using DuckDB.
 
         Args:
             node_id (int): The parent node ID (used for naming the output files).
-            contingency_vectors (List[np.ndarray]): List of contingency vectors for each child.
+            contingency_vectors (List[sp.csc_matrix]): List of sparse cell-count vectors for each child.
             filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
-
-        Returns:
-            List[str]: List of paths to the created Parquet files.
         '''
      
         for i, (contingency_vector, filter_dict) in enumerate(zip(contingency_vectors, filter_dicts)):

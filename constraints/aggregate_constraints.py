@@ -1,8 +1,7 @@
 import numpy as np
-from functools import partial
-from typing import Callable, List
 
 from .logical_expressions import LogicalExpression
+from constraints.sparse_constraint import SparseConstraint
 from constraints.constraint import Constraint
 from abc import ABC
 
@@ -23,26 +22,27 @@ class AggregateConstraint(Constraint, ABC):
 class SumEqual(AggregateConstraint):
     """Represents a sum equality constraint: Sum(expression) == value"""
 
-    @staticmethod
-    def check_sum(contingency_var, sum_val: int, indices: List[int]) -> bool:
-        """Check that the sum of selected indices in the contingency variable equals a target value.
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        '''Convert logical expression to sparse linear constraint.
 
         Args:
-            contingency_var: A Pyomo Var/dict indexed by cell index.
-            sum_val (int): The expected sum of the selected elements.
-            indices (List[int]): Indices in contingency_var whose values will be summed.
+            domain: The domain over which to reduce the logical expression.
+
         Returns:
-            bool: True if the sum of the selected elements equals sum_val, otherwise False.
-        """
-
-        return sum(contingency_var[i] for i in indices) == sum_val
-
-    def to_constraint(self, domain) -> Callable:
+            SparseConstraint: Sparse representation of sum(x[indices]) == self.value
+        '''
         # Reduce to a boolean mask over the cells, then take the selected indices.
         reduced_mask = self.expression.reduce(domain)
-        indices = np.flatnonzero(reduced_mask).tolist()
-        # Return a function that checks if the sum of the contingency variable equals the value
-        return partial(SumEqual.check_sum, sum_val=self.value, indices=indices)
+        indices = np.flatnonzero(reduced_mask)
+        coefs = np.ones(len(indices))
+
+        # Return a constraint that encapsulates that several values of the contingency variable must sum to the given value.
+        return SparseConstraint(
+            indices=indices,
+            coefs=coefs,
+            sense="=",
+            rhs=float(self.value)
+        )
     
 # NOTE: Add more aggregate expressions as needed
 

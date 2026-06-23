@@ -1,9 +1,8 @@
 import numpy as np
-from functools import partial
-from typing import Callable, List
 from abc import ABC, abstractmethod
 
 from constraints.constraint import Constraint
+from constraints.sparse_constraint import SparseConstraint
 
 class LogicalExpression(Constraint, ABC):
     """Base class for all logical expressions.
@@ -23,26 +22,20 @@ class LogicalExpression(Constraint, ABC):
         """
         raise NotImplementedError()
 
-    @staticmethod
-    def no_true_constraint(contingency_var, indices: List[int]) -> bool:
-        """Check that selected indices in the contingency variable are False.
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        """Convert the logical expression into a sparse linear constraint.
 
-        Args:
-            contingency_var: A Pyomo Var/dict indexed by cell index.
-            indices (List[int]): Indices in contingency_var that must all be zero.
-        Returns:
-            bool: True if all selected indices are zero (False), otherwise False.
-        """
-        return sum(contingency_var[i] for i in indices) == 0
+        Returns a SparseConstraint representing: sum(x[indices_where_negated_mask_true]) == 0
 
-    def to_constraint(self, domain) -> Callable:
-        """Convert the logical expression into a constraint function.
+        This enforces the logical constraint: if the logical condition is True, then the sum
+        of variables at those cells must be non-zero (cells in the support). Conversely, cells
+        where the condition is False must all be zero (negated_mask indices sum to 0).
 
         Args:
             domain: ContingencyDomain used as the cell space for evaluation.
+
         Returns:
-            Callable: A function that takes a contingency variable and returns a
-                      Pyomo expression / boolean for the optimizer.
+            SparseConstraint: Sparse representation of the logical constraint.
         """
         # Get reduced boolean mask over the cells.
         reduced_mask = self.reduce(domain)
@@ -54,10 +47,16 @@ class LogicalExpression(Constraint, ABC):
         # where the constraint is False is zero. Hence, we negate the reduced mask.
         negated_mask = ~reduced_mask
 
-        # Get the integer cell indices where the (negated) constraint holds.
-        # .tolist() yields plain python ints for safe use as Pyomo Var keys.
-        indices = np.flatnonzero(negated_mask).tolist()
+        # Indices of variables that do not satisfy the condition.
+        # Coefficients are all 1.
+        # TODO: Check whether the dtypes are appropriate; they default to float64, which consumes a lot of memory.
+        indices = np.flatnonzero(negated_mask)
+        coefs = np.ones(len(indices))
 
-        # Return a function that checks if there are no True values in the negated indices.
-        # This will be the function used as a constraint in the optimizer.
-        return partial(LogicalExpression.no_true_constraint, indices=indices)
+        # Return a constraint that enforces the sum of the variables at the selected domain indices to be zero.
+        return SparseConstraint(
+            indices=indices,
+            coefs=coefs,
+            sense="=",
+            rhs=0.0
+        )

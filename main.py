@@ -61,20 +61,9 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
     #######################
     # Solver configuration #
     #######################
-
-    # Set the solver to use and its options
-    SOLVER_NAME = 'gurobi'
-    OPT_PATH = None  # Path to the solver executable if needed, for example: /opt/gurobi/gurobi910/linux64/bin/gurobi_cl
-
-    # Define solver-specific options
-    if SOLVER_NAME == 'gurobi':
-        SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1}  # Suppress Gurobi output
-    elif SOLVER_NAME == 'cplex':
-        SOLVER_OPTIONS = {'timelimit': 300}  # Example CPLEX options
-    elif SOLVER_NAME == 'glpk':
-        SOLVER_OPTIONS = {}
-    else:
-        SOLVER_OPTIONS = {}
+    
+    # Solver: Gurobi
+    SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1}  # Suppress Gurobi output
 
     ######################################################
     # Differential privacy budget and mechanism settings #
@@ -105,9 +94,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
         query_columns=QUERIES,
         privacy_mechanism=PRIVACY_MECHANISM,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
-        solver_name=SOLVER_NAME,
         solver_options=SOLVER_OPTIONS,
-        optimizer_path=OPT_PATH,
         num_workers=num_workers,
         check_correctness=check_correctness,
     )

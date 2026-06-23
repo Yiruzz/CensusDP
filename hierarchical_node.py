@@ -31,7 +31,10 @@ class HierarchicalNode:
             filter_dict (Dict[str, Any]): Dictionary mapping column names to their filter values. Used to filter the data to get this node's data subset.
             level (int): Level where the node is located.
 
-            contingency_vector (Optional[np.ndarray]): Node's contingency vector, None when not materialized or freed.
+            contingency_vector: Node's contingency vector, None when not materialized or freed.
+                Has two lifecycle states: a dense np.ndarray noisy measurement (query space)
+                right after materialization, then a sparse scipy CSC column of estimated cell
+                counts (cell space) after the node is solved. 
             constraints (Optional[List[Callable]]): List of constraints for this node.
         '''
         self.id: Optional[int] = None
@@ -72,7 +75,13 @@ class HierarchicalNode:
     
     def __str__(self) -> str:
         '''Return a detailed string representation of the node with key attributes.'''
-        has_contingency = self.contingency_vector is not None and len(self.contingency_vector) > 0
+        cv = self.contingency_vector
+        if cv is None:
+            has_contingency = False
+        elif hasattr(cv, 'nnz'):  # sparse cell-count vector (estimated state)
+            has_contingency = cv.nnz > 0
+        else:  # dense noisy measurement vector (pre-estimation state)
+            has_contingency = cv.size > 0
         has_constraints = self.constraints is not None and len(self.constraints) > 0
         filter_str = ", ".join(f"{k}={v}" for k, v in self.filter_dict.items()) if self.filter_dict else "root"
 
