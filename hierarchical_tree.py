@@ -1,6 +1,8 @@
 from collections import deque
 from hierarchical_node import HierarchicalNode
 
+from typing import Generator
+
 class HierarchicalTree:
     r'''
     Represents a hierarchical tree structure. Each node is a HierarchicalNode.
@@ -82,6 +84,22 @@ class HierarchicalTree:
             node = queue.popleft()
             node.id = node_id
             node_id += 1
+
+            if not node.is_leaf():
+                for child in node.children:
+                    queue.append(child)
+
+    def iter_nodes_with_levels(self) -> Generator[tuple[int, int], None, None]:
+        '''Traverse the tree using BFS and yield node ID and level pairs.
+
+        Yields:
+            tuple[int, int]: A tuple of (node_id, node_level) for each node.
+        '''
+        queue = deque([self.root])
+
+        while queue:
+            node = queue.popleft()
+            yield (node.id, node.level)
 
             if not node.is_leaf():
                 for child in node.children:

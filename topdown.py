@@ -9,60 +9,54 @@ from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from optimizer import OptimizationModel
 from constraints.constraint import Constraint
-from parallel_utils import init_process, estimate_and_update_children, _combine_child_constraints, _check_node_correctness, _real_and_round_estimation, _split_child_vectors
+from parallel_utils.estimation_phase import (init_process, estimate_and_update_children,
+                                             _combine_child_constraints, _check_node_correctness)
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 import time
 
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
-    
+
     The algorithm works by constructing a hierarchical tree structure, then adding noise to the data
     considering differential privacy principles. It propagates the noise to each node in the tree and
-    finally it solves optimization problems to ensure consistency across the tree and adherence to 
+    finally it solves optimization problems to ensure consistency across the tree and adherence to
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
-                 solver_name: str = 'gurobi', solver_options: dict = {}, optimizer_path: Optional[str] = None,
-                 domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
-        '''
-        Initialize the TopDown algorithm.
+                 solver_options: dict = {}, domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
+        """Initialize the TopDown algorithm.
 
         Args:
             data_path (str): Path to the input data file.
             hierarchy (List[str]): List of columns representing the hierarchy levels.
             query_columns (List[str]): List of columns to be queried and aggregated.
             privacy_mechanism (PrivacyMechanism): DP variant carrying per-level parameters.
-                Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-column levels).
-            out_path (str): Path to save the processed data. Defaults to 'noisy_data.csv'.
-            solver_name (str): The optimization solver to use ('gurobi', 'ipopt', 'glpk', etc.). Defaults to 'gurobi'.
-            solver_options (dict): Dictionary of options to pass to the solver. If None, defaults to empty dict.
-            optimizer_path (str): Path to the optimizer executable. If None, defaults to None.
+                Length of mechanism.level_params must equal len(hierarchy) + 1 (root + per-level).
+            num_workers (int): Number of parallel workers for the estimation phase.
+            out_path (str): Path to save the noisy output data. Defaults to 'noisy_data.csv'.
+            solver_options (dict): Dictionary of Gurobi parameters passed to the optimizer environment.
+                Defaults to empty dict.
             domain (Optional[Dict[str, List]]): Per-column set of all possible values for the
                 query columns, defining the contingency cell space. Should be data-independent
                 for a sound DP guarantee. When None (or a column omitted), the domain is inferred
                 from the observed data with a warning. Passed through to DataHandler.
-            num_workers (int): Number of parallel workers for the estimation phase. Defaults to 2.
-            check_correctness (bool): Whether to check correctness during execution. Defaults to False.
+            check_correctness (bool): Whether to run correctness checks during execution. Defaults to False.
 
         Attributes:
-            data_handler (DataHandler): Instance of DataHandler for managing data operations.
-
-            hierarchical_columns (List[str]): List of columns representing the hierarchy levels.
-            query_columns (List[str]): List of columns to be queried and aggregated.
-
-            privacy_mechanism (PrivacyMechanism): The DP variant + per-level parameters.
-
-            tree (HierarchicalTree): Instance of HierarchicalTree representing the hierarchical structure.
-            optimizer (OptimizationModel): Instance of OptimizationModel for solving optimization problems.
-
-            constraints (Dict[int, List[Constraint]]): Dictionary mapping tree levels to their constraints.
-
-            workers (int): Number of parallel workers for estimation phase.
-        '''
+            data_handler (DataHandler): Manages data loading, preprocessing, and output.
+            hierarchical_columns (List[str]): Columns representing the hierarchy levels.
+            query_columns (List[str]): Columns to be queried and aggregated.
+            privacy_mechanism (PrivacyMechanism): DP variant and its per-level parameters.
+            tree (HierarchicalTree): Hierarchical structure of the data.
+            optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
+                                                and solver options dict).
+            constraints (Dict[int, List[Constraint]]): Constraints registered per tree level.
+            workers (int): Number of parallel workers for the estimation phase.
+        """
         n_levels = len(hierarchy) + 1
         if len(privacy_mechanism.level_params) != n_levels:
             raise ValueError(
@@ -86,13 +80,9 @@ class TopDown():
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
-        self.optimizer: OptimizationModel = OptimizationModel(
-            solver_name=solver_name,
-            solver_options=solver_options,
-            optimizer_path=optimizer_path
-        )
-        
-        self.solver_options = solver_options
+        self.optimizer: Tuple[type, Optional[str], Dict] = (self.data_handler.dtype,
+                                                            self.data_handler.lp_problems_dir,
+                                                            solver_options)
 
         self.workers = num_workers
         self.check_correctness = check_correctness
@@ -146,18 +136,31 @@ class TopDown():
 
         # Initialize directories to temporarily save vectors and microdata
         self.data_handler.initialize_directories()
+        self.optimizer = (self.optimizer[0],
+                          self.data_handler.lp_problems_dir,
+                          self.optimizer[2])
 
         print(self.tree, "\n")
+
+        # Pre-generate noise vectors for all nodes
+        t1 = time.time()
+        print(f'Pre-generating noise vectors if needed...', end=' ')
+        if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec):
+            print("")
+            self.data_handler.generate_noise_vectors(self.workers, self.tree._node_count,
+                                                     self.tree.iter_nodes_with_levels(),
+                                                     self.privacy_mechanism.name, self.privacy_mechanism.level_params, self.query_sensitivity)
+        print(f'{time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
         '''Run the estimation phase of the TopDown algorithm.
 
-        Processes all nodes in the hierarchical tree, solving joint optimization
-        problems that enforce consistency between parent and child contingency vectors.
-        After processing, merges all partial microdata files into the final output.
+        Processes the root and its children in memory, then solves the rest of the tree
+        with a process pool, and finally merges the partial microdata files into the output.
         '''
         print(f'Running estimation phase...')
         t1 = time.time()
+
         if self._estimation_phase_root():
             self._estimation_phase_subtree()
         print(f'{time.time() - t1:.2f} seconds.\n')
@@ -171,66 +174,74 @@ class TopDown():
     def _estimation_phase_root(self) -> bool:
         '''Process the root and its direct children entirely in memory.
 
-        Materializes contingency vectors for the root and its children, adds noise
-        in parallel, solves the root individually, then solves the joint optimization
-        problem over all children to enforce parent-child consistency.
+        Materializes and noises the root, solves it individually, then solves the joint
+        problem over its children (in the main process). The root vector stays in memory
+        as the children's parent — it is never spilled.
 
         Returns:
-            bool: True if root's children are not leaves (no microdata written), False otherwise.
+            bool: True if the root's children are not leaves (the subtree still needs
+                processing), False if they are leaves (microdata already written).
         '''
         root = self.tree.root
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
-        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
+        try:
+            self.privacy_mechanism.add_noise_from_precomputed(self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], root.contingency_vector, root.id)
+        except:
+            self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
-        # Solve first problem, only root
+        # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
 
-        # Solve with children
-        return not self._estimate_and_update_children_in_memory(root)
+        # Second phase: solve jointly with the children
+        is_leaf = self._estimate_and_update_children_in_memory(root)
+        root.contingency_vector = None
+        return not is_leaf
 
     def _estimation_phase_subtree(self) -> None:
-        '''Perform the estimation phase of the TopDown algorithm.
+        '''Solve the rest of the tree (below the root's children) with a process pool.
 
         Uses breadth-first traversal with lazy materialization to minimize memory usage.
+        Nodes are scheduled through a priority queue ordered by number of children, so
+        nodes with more work are dispatched first and the executor stays busy.
         '''
-
         root = self.tree.root
-        # Process remaining nodes
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
-                                initializer=init_process, initargs=(self.solver_options, self.constraints,
-                                                                    self.data_handler.spill_dir, self.data_handler.microdata_dir,
+                                initializer=init_process, initargs=(self.optimizer, self.constraints,
+                                                                    self.data_handler.spill_dir,
+                                                                    self.data_handler.microdata_dir,
                                                                     self.data_handler.file_path,
                                                                     self.data_handler.contingency_domain.domains,
                                                                     self.hierarchical_columns, self.query_columns,
-                                                                    self.privacy_mechanism, self.Q, self.query_sensitivity,
-                                                                    self.check_correctness)) as executor:
+                                                                    self.privacy_mechanism,
+                                                                    self.Q, self.query_sensitivity,
+                                                                    self.check_correctness,
+                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)
                 children_filter_dicts = [child.filter_dict for child in node.children]
+                children_ids = [child.id for child in node.children]
                 children_level = node.children[0].level
                 is_leaf = node.children[0].is_leaf()
 
                 return executor.submit(estimate_and_update_children, node.id, node_path,
-                                     children_filter_dicts, children_level, is_leaf)
+                                     children_filter_dicts, children_ids, children_level, is_leaf)
 
-            def _fill_window():
-                while pending and len(futures) < (self.workers)*2:
-                    _, _, node = heapq.heappop(pending)
-                    futures[_submit(node)] = node
-
-            # Create a priority queue ordered by number of children: nodes with more
-            # children are prioritized so the executor stays busy with nodes that will take more time.
-            # id(node) is a tiebreaker to avoid comparing HierarchicalNode objects.
+            # Priority queue ordered by number of children: nodes with more children are
+            # dispatched first so the executor stays busy with the heavier work.
+            # id(node) breaks ties to avoid comparing HierarchicalNode objects.
             pending = []
             for node in root.children:
                 heapq.heappush(pending, (-len(node.children), id(node), node))
 
-            # future -> node
-            # Fill the executor queue
             futures = {}
-            _fill_window()
 
+            def _fill_window():
+                while pending and len(futures) < self.workers * 2:
+                    _, _, node = heapq.heappop(pending)
+                    futures[_submit(node)] = node
+
+            _fill_window()
             while futures:
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
 
@@ -242,8 +253,111 @@ class TopDown():
                         for child in node.children:
                             heapq.heappush(pending, (-len(child.children), id(child), child))
 
-                # Update executor queue
                 _fill_window()
+
+    def _mat_and_noise(self, child: HierarchicalNode) -> Tuple[np.ndarray, List, Dict]:
+        '''Materialize and noise a single child (run per-thread).
+
+        Uses a dedicated DuckDB cursor so concurrent threads don't share a connection.
+        Keeps main's per-child noise logic (pre-computed with fallback).
+
+        Args:
+            child (HierarchicalNode): The child node to materialize.
+
+        Returns:
+            Tuple: (noisy contingency vector, constraint list, child filter dict).
+        '''
+        con = self.data_handler.duckdb_con.cursor()
+        try:
+            child_vector, child_constraint = self.data_handler.materialize_node_data(
+                child.filter_dict, self.constraints[child.level], self.Q, con=con)
+        finally:
+            con.close()
+
+        try:
+            self.privacy_mechanism.add_noise_from_precomputed(
+                self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], child_vector, child.id)
+        except:
+            self.privacy_mechanism.add_noise(child_vector, child.level, self.query_sensitivity)
+
+        return child_vector, child_constraint, child.filter_dict
+
+    def _estimate_and_update_children_in_memory(self, node: HierarchicalNode) -> bool:
+        '''Solve the joint optimization for a node's children in the main process.
+
+        Mirrors the worker `estimate_and_update_children` but in memory: the children are
+        materialized and noised with a thread pool (one cursor per thread), concatenated,
+        and solved jointly under parent-child consistency. Children data is kept in local
+        variables (never stored on the node objects) to avoid retaining vectors in RAM.
+
+        Note: threads are used for now; this is expected to move to processes later.
+
+        Args:
+            node (HierarchicalNode): The parent node whose children are processed.
+
+        Returns:
+            bool: True if the children are leaves (microdata written), False otherwise.
+        '''
+        children = node.children
+        is_leaf = children[0].is_leaf()
+        n_cells = self.data_handler.n_cells
+        num_children = len(children)
+
+        # Materialize + noise each child in parallel; map preserves order so the joint
+        # vector, active set and filter dicts stay aligned.
+        with ThreadPoolExecutor(max_workers=self.workers) as executor:
+            results = list(executor.map(self._mat_and_noise, children))
+
+        children_vectors = [r[0] for r in results]
+        children_constraints = [r[1] for r in results]
+        children_filter_dicts = [r[2] for r in results]
+
+        joint_contingency_vector = np.concatenate(children_vectors)
+        children_vectors = None
+
+        # Cells where the parent is non-zero. By non-negativity + consistency, children can
+        # only be non-zero there; expand to joint-space indices {k*n_cells + j}.
+        support = node.contingency_vector.indices
+        active = [k * n_cells + int(j) for k in range(num_children) for j in support]
+        joint_constraints = _combine_child_constraints(num_children, node.contingency_vector, children_constraints, set(active), n_cells=n_cells)
+
+        optimizer = OptimizationModel(*self.optimizer)
+
+        t1 = time.time()
+        x_tilde = optimizer.non_negative_real_estimation(
+            noisy_measurements=joint_contingency_vector,
+            node_id=node.id,
+            constraints=joint_constraints,
+            query_matrix=self.Q,
+            active=active
+        )
+        real_time = time.time() - t1
+
+        t1 = time.time()
+        joint_solution = optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.id,
+            constraints=joint_constraints,
+            active=active,
+            n=num_children * n_cells
+        )
+        rounding_time = time.time() - t1
+
+        if self.check_correctness: _check_node_correctness(node.contingency_vector, joint_solution)
+
+        if not is_leaf:
+            self.data_handler.update_child_vectors(joint_solution, children_filter_dicts)
+        else:
+            child_vectors = []
+            start = 0
+            for _ in children_filter_dicts:
+                end = start + n_cells
+                child_vectors.append(joint_solution[start:end])
+                start = end
+            self.data_handler.write_microdata(node.id, child_vectors, children_filter_dicts)
+
+        print(f'  [Node {node.id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+        return is_leaf
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.
@@ -251,65 +365,26 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
+        optimizer = OptimizationModel(*self.optimizer)
 
-        node.contingency_vector = _real_and_round_estimation(
-            self.optimizer, node.contingency_vector, node.id, node.constraints, self.Q
+        t1 = time.time()
+        x_tilde = optimizer.non_negative_real_estimation(
+            noisy_measurements=node.contingency_vector,
+            node_id=node.id,
+            constraints=node.constraints,
+            query_matrix=self.Q
         )
+        real_time = time.time() - t1
 
-    def _estimate_and_update_children_in_memory(self, node: HierarchicalNode) -> float:
-        '''Solve the joint optimization for a node's children and update their vectors.
+        t1 = time.time()
+        node.contingency_vector = optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node.id,
+            constraints=node.constraints
+        )
+        rounding_time = time.time() - t1
 
-        Collects children contingency vectors and constraints, concatenates them into
-        a joint problem that also enforces consistency with the parent, solves it, then
-        either updates the spilled child vectors (non-leaf) or writes microdata (leaf).
-
-        Args:
-            node (HierarchicalNode): The parent node whose children are processed.
-
-        Returns:
-            float: Time spent writing microdata files (0.0 if children are not leaves).
-        '''
-        is_leaf = node.children[0].is_leaf()
-        children_vectors = []
-        children_constraints = []
-        children_filter_dicts = []
-
-        for child in node.children:
-            child.contingency_vector, child.constraints = self.data_handler.materialize_node_data(child.filter_dict, self.constraints[child.level], self.Q)
-            
-            children_vectors.append(child.contingency_vector)
-            children_constraints.append(child.constraints)
-            children_filter_dicts.append(child.filter_dict)
-
-        joint_contingency_vector = np.concatenate(children_vectors)
-        children_vectors = None
-
-        # Apply noise to joint vector in chunks using thread pool
-        chunks = []
-        for chunk_start in range(0, len(joint_contingency_vector), self.data_handler.noise_chunk_size):
-            chunk_end = min(chunk_start + self.data_handler.noise_chunk_size, len(joint_contingency_vector))
-            chunks.append((joint_contingency_vector[chunk_start:chunk_end], node.children[0].level, self.query_sensitivity))
-
-        with ThreadPoolExecutor(max_workers=self.workers) as executor:
-            list(executor.map(lambda args: self.privacy_mechanism.add_noise(*args), chunks))
-
-        joint_constraints = _combine_child_constraints(len(node.children), node.contingency_vector, children_constraints)
-        joint_solution = _real_and_round_estimation(self.optimizer, joint_contingency_vector, node.id, joint_constraints, self.Q)
-
-        if self.check_correctness: _check_node_correctness(node.contingency_vector, joint_solution)
-        joint_contingency_vector = None
-        joint_constraints = None
-
-        microdata_time = 0
-        if not is_leaf:
-            self.data_handler.update_child_vectors(joint_solution, self.data_handler.contingency_df_length, children_filter_dicts)
-        else:
-            t_microdata = time.time()
-            child_vectors = _split_child_vectors(joint_solution, len(node.children), self.data_handler.contingency_df_length)
-            self.data_handler.write_microdata(node.id, child_vectors, children_filter_dicts)
-            microdata_time = time.time() - t_microdata
-
-        return microdata_time
+        print(f'  [Node {node.id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
