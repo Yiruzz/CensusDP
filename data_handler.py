@@ -272,7 +272,7 @@ class DataHandler:
 
         return n_nodes
 
-    def _reduce_dataframe(self, filters: Dict[str, Any]) -> pd.DataFrame:
+    def _reduce_dataframe(self, filters: Dict[str, Any], con: Optional["duckdb.DuckDBPyConnection"] = None) -> pd.DataFrame:
         '''Query contingency table with optional filters from DuckDB.
 
         Executes a SQL query to compute the contingency table grouped by query columns
@@ -284,7 +284,10 @@ class DataHandler:
         Returns:
             pd.DataFrame: DataFrame with query columns and "count" column.
         '''
-        assert self.duckdb_con is not None, "DuckDB connection not initialized. Call create_data_view first."
+        # Allow callers (e.g. parallel in-memory materialization) to pass a per-thread
+        # cursor; DuckDB connections are not safe to share concurrently across threads.
+        con = con if con is not None else self.duckdb_con
+        assert con is not None, "DuckDB connection not initialized. Call create_data_view first."
 
         # Build and combine filter conditions.
         # Filter the data to the subset represented by the node.
@@ -300,14 +303,14 @@ class DataHandler:
             {where}
             GROUP BY {cols_sql}
         """
-        result = self.duckdb_con.execute(query).fetchall()
+        result = con.execute(query).fetchall()
 
         # Return only the columns associated with the queries and counts.
         # Hierarchical columns are not used.
         col_names = self.query_columns + ["count"]
         return pd.DataFrame(result, columns=col_names)
 
-    def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None) -> sp.csr_matrix:
+    def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None, con: Optional["duckdb.DuckDBPyConnection"] = None) -> sp.csr_matrix:
         '''Create a sparse contingency (column) vector for records matching filters.
 
         Queries the contingency table using tabla_contingencia, encodes cell indices,
@@ -322,7 +325,7 @@ class DataHandler:
         '''
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
 
-        data = self._reduce_dataframe(filters)
+        data = self._reduce_dataframe(filters, con)
         flat_indices = self.contingency_domain.encode(data)
         counts = data["count"].values.astype(self.dtype)
 
@@ -334,7 +337,7 @@ class DataHandler:
 
         return sparse_vector
 
-    def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray]) -> Tuple[np.ndarray, List]:
+    def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray], con: Optional["duckdb.DuckDBPyConnection"] = None) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
         Queries the contingency table based on filter_dict, then creates the (sparse-backed)
@@ -345,6 +348,8 @@ class DataHandler:
             filter_dict (Dict[str, Any]): The node's filter conditions (column -> value mapping).
             constraints (List[Constraint]): Constraints for the node considering its level.
             query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix for aggregating contingency vectors.
+            con (Optional[duckdb.DuckDBPyConnection]): Per-thread DuckDB cursor for concurrent
+                materialization. Defaults to the shared connection when None.
 
         Returns:
             Tuple[np.ndarray, List[Constraint]]: Contingency vector and constraint callables for this node.
@@ -352,7 +357,7 @@ class DataHandler:
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
 
         # Build the measurement vector y = Q @ x from the sparse histogram using DuckDB query
-        x = self._create_contingency_vector(filter_dict)  # sparse (n_cells, 1)
+        x = self._create_contingency_vector(filter_dict, con)  # sparse (n_cells, 1)
 
         if sp.issparse(query_matrix):
             y = np.asarray((query_matrix @ x).todense()).ravel()
@@ -438,15 +443,22 @@ class DataHandler:
             start = end
 
     def merge_microdata_files(self) -> None:
-        '''Merge Parquet microdata files into the output CSV using DuckDB.'''
+        '''Merge Parquet microdata files into the output CSV using DuckDB.
+
+        Uses a fresh connection with the default thread count (all cores) so the final
+        COPY runs in parallel. The shared self.duckdb_con stays single-threaded for tree
+        queries and is left untouched.
+        '''
         parquet_pattern = os.path.join(self.microdata_dir, '*.parquet')
 
         try:
-            self.duckdb_con.execute(f"""
+            con = duckdb.connect()
+            con.execute(f"""
                 COPY (SELECT * FROM read_parquet('{parquet_pattern}'))
                 TO '{self.output_path}'
                 (FORMAT CSV, HEADER TRUE, DELIMITER ';')
             """)
+            con.close()
         except Exception as e:
             print(f"Warning: Error merging microdata files: {e}")
 

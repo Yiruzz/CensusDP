@@ -10,7 +10,7 @@ from domain import ContingencyDomain
 from privacy import PrivacyMechanism
 from constraints.sparse_constraint import SparseConstraint
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
@@ -59,7 +59,7 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
     _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
     _check = check
 
-def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set) -> List[SparseConstraint]:
+def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set, n_cells: Optional[int] = None) -> List[SparseConstraint]:
     '''Combine child publication constraints into joint SparseConstraints.
 
     Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
@@ -80,11 +80,13 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
             to_sparse_constraint() method will be called to get SparseConstraint representations.
         active_set (set): Active joint-space global indices {k*n_cells + j} (parent support expanded
             over children). Cells outside it are pruned and dropped from constraints.
+        n_cells (Optional[int]): Number of contingency cells. Defaults to the worker-global
+            _data_handler.n_cells; callers in the main process (no worker globals) must pass it.
 
     Returns:
         List[SparseConstraint]: List of SparseConstraints for the joint optimization problem.
     '''
-    n_cells = _data_handler.n_cells
+    if n_cells is None: n_cells = _data_handler.n_cells
     joint_constraints = []
 
     # Per-child constraints: convert each constraint to SparseConstraint via to_sparse_constraint()
