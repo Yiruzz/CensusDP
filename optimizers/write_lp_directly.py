@@ -40,7 +40,7 @@ def _write_term(f: IO, term: str, count: int, terms_per_line: int = TERMS_PER_LI
     return count
 
 
-class OptimizationModel:
+class OptimizationModelLP:
     '''
     Builds the model as raw Gurobi LP-format text (no gurobipy Var/Constr objects at all
     during construction) and loads it directly with gp.read(). This bypasses the Python
@@ -94,38 +94,7 @@ class OptimizationModel:
         for key, val in self.solver_options.items():
             self.env.setParam(key, val)
         self.env.start()
-
-    def _solve_from_file(self, path: str, node_id: int, active: List[int], kind: str):
-        '''Load an already-written .lp file with gp.read, solve, and extract results.'''
-        model = gp.read(path, env=self.env)
-        model.optimize()
-
-        if model.status == GRB.OPTIMAL:
-            if kind == "real":
-                result = np.array([model.getVarByName(f"x[{i}]").X for i in active], dtype=float)
-            else:  # kind == "round"
-                result = {i: model.getVarByName(f"y[{i}]").X for i in active}
-            model.dispose()
-            return result
         
-        elif model.status == GRB.INFEASIBLE:
-            # Model is infeasible. Save both the full model (.lp) and the IIS (.ilp),
-            # which contains a minimal set of conflicting constraints for debugging.
-            debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
-            ilp_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.ilp")
-            model.computeIIS()
-            model.write(ilp_path)
-            model.write(debug_path)
-            model.dispose()
-            raise ValueError(
-                f"Model is infeasible for node {node_id}. See {ilp_path} "
-                f"(minimal infeasible subset) or {debug_path} (full model) for debugging."
-            )
-        else:
-            status = model.status
-            model.dispose()
-            raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
-
     def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector, written directly to an .lp file.
         There is no container that encapsulates all elements, like Pyomo's ConcreteModel.
@@ -328,8 +297,25 @@ class OptimizationModel:
                 # End
                 # ---------------------------------------------------------------------------
                 f.write("End\n")
+            
+            model = gp.read(tmp_path, env=self.env)
+            model.optimize()
 
-            return self._solve_from_file(tmp_path, node_id, active, kind="real")
+            if model.status == GRB.OPTIMAL:
+                result = np.array([model.getVarByName(f"x[{i}]").X for i in active], dtype=float)
+                model.dispose()
+                return result
+            
+            elif model.status == GRB.INFEASIBLE:
+                debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
+                model.write(debug_path)
+                model.dispose()
+                raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path}for debugging. ")
+            else:
+                status = model.status
+                model.dispose()
+                raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
+
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -457,23 +443,42 @@ class OptimizationModel:
 
                 f.write("End\n")
 
-            y_values = self._solve_from_file(tmp_path, node_id, active, kind="round")
+            model = gp.read(tmp_path, env=self.env)
+            model.optimize()
+            y_values = {}
+
+            if model.status == GRB.OPTIMAL:
+                y_values = {i: model.getVarByName(f"y[{i}]").X for i in active}
+                model.dispose()
+            
+            elif model.status == GRB.INFEASIBLE:
+                debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
+                model.write(debug_path)
+                model.dispose()
+                raise ValueError(
+                    f"Model is infeasible for node {node_id}. See {debug_path}for debugging. "
+                )
+            else:
+                status = model.status
+                model.dispose()
+                raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
+
+            # Reconstruct as a sparse column vector, keeping only positive cells.
+            # x_floor is positional (aligned to active); i is the global index for the CSC row.
+            rows = []
+            data = []
+            for p, i in enumerate(active):
+                val = int(x_floor[p] + round(y_values[i]))
+                if val > 0:
+                    rows.append(i)
+                    data.append(val)
+
+            return sp.csc_matrix(
+                (data, (rows, np.zeros(len(rows), dtype=self._solution_type))),
+                shape=(n, 1),
+                dtype=self._solution_type,
+            )
+        
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-
-        # Reconstruct as a sparse column vector, keeping only positive cells.
-        # x_floor is positional (aligned to active); i is the global index for the CSC row.
-        rows = []
-        data = []
-        for p, i in enumerate(active):
-            val = int(x_floor[p] + round(y_values[i]))
-            if val > 0:
-                rows.append(i)
-                data.append(val)
-
-        return sp.csc_matrix(
-            (data, (rows, np.zeros(len(rows), dtype=self._solution_type))),
-            shape=(n, 1),
-            dtype=self._solution_type,
-        )

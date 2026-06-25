@@ -7,9 +7,10 @@ from multiprocessing import get_context
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
-from optimizer import OptimizationModel
 from constraints.constraint import Constraint
 from parallel_utils.estimation_phase import init_process, estimate_and_update_children
+from optimizers.pyoptinterface import OptimizationModel
+from optimizers.write_lp_directly import OptimizationModelLP
 from queries import QueryWorkload
 from privacy import PrivacyMechanism
 
@@ -26,7 +27,8 @@ class TopDown():
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
-                 solver_options: dict = {}, domain: Optional[Dict[str, List]] = None, check_correctness: bool = False) -> None:
+                 solver_options: dict = {}, domain: Optional[Dict[str, List]] = None,
+                 check_correctness: bool = False, optimizer_backend: str = 'pyoptinterface') -> None:
         """Initialize the TopDown algorithm.
 
         Args:
@@ -85,6 +87,7 @@ class TopDown():
 
         self.workers = num_workers
         self.check_correctness = check_correctness
+        self.optimizer_backend = optimizer_backend
 
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
@@ -196,7 +199,8 @@ class TopDown():
                                                                     self.privacy_mechanism,
                                                                     self.Q, self.query_sensitivity,
                                                                     self.check_correctness,
-                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)) as executor:
+                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name,
+                                                                    self.optimizer_backend)) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)
@@ -240,7 +244,7 @@ class TopDown():
         Args:
             node (HierarchicalNode): The node to process.
         '''
-        optimizer = OptimizationModel(*self.optimizer)
+        optimizer = OptimizationModel(*self.optimizer) if self.optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*self.optimizer)
 
         t1 = time.time()
         x_tilde = optimizer.non_negative_real_estimation(

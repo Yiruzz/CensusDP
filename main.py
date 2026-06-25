@@ -16,7 +16,7 @@ from queries import QueryWorkload, col
 
 
 def main(process_until: str, queries: list[str], user_constraints: bool,
-         num_workers: int, check_correctness: bool):
+         num_workers: int, check_correctness: bool, optimizer_backend: str):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -97,6 +97,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
         solver_options=SOLVER_OPTIONS,
         num_workers=num_workers,
         check_correctness=check_correctness,
+        optimizer_backend=optimizer_backend,
     )
 
     # Set the queries to be answered at each node of the tree.
@@ -221,6 +222,13 @@ if __name__ == "__main__":
         help="Whether to check correctness during execution",
     )
 
+    parser.add_argument(
+        "--optimizer",
+        choices=["write_lp", "pyoptinterface"],
+        default="pyoptinterface",
+        help="Optimizer backend to use: 'pyoptinterface' (default) or 'write_lp'",
+    )
+
     args = parser.parse_args()
 
-    main(args.process_until, args.queries, args.user_constraints, args.num_workers, args.check_correctness)
+    main(args.process_until, args.queries, args.user_constraints, args.num_workers, args.check_correctness, args.optimizer)

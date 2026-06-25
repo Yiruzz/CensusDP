@@ -4,11 +4,13 @@ import zarr
 import scipy.sparse as sp
 from scipy.sparse import spmatrix
 
-from optimizer import OptimizationModel
 from data_handler import DataHandler
 from domain import ContingencyDomain
 from privacy import PrivacyMechanism
 from constraints.sparse_constraint import SparseConstraint
+
+from optimizers.pyoptinterface import OptimizationModel
+from optimizers.write_lp_directly import OptimizationModelLP
 
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -16,7 +18,7 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str) -> None:
+                 zarr_path: str, noisy_array_name: str, optimizer_backend: str) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
@@ -35,11 +37,12 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
         check (bool): Whether to check node correctness.
         zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
         noisy_array_name (str): Name of the noise array within the Zarr group.
+        optimizer_backend (str): Name of optimizer that modeling the problems.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
 
-    _optimizer = OptimizationModel(*optimizer)
-
+    _optimizer = OptimizationModel(*optimizer) if optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*optimizer)
+                    
     _data_handler = DataHandler()
     _data_handler.spill_dir = spill_dir
     _data_handler.microdata_dir = microdata_dir
