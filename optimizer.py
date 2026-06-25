@@ -126,20 +126,20 @@ class OptimizationModel:
             model.dispose()
             raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
-    def non_negative_real_estimation(self, noisy_measurements: np.ndarray, node_id: int, constraints: List[SparseConstraint], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector, written directly to an .lp file.
         There is no container that encapsulates all elements, like Pyomo's ConcreteModel.
 
-        Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is the concatenation
-        of per-child measurement blocks y_k (each of length n_queries = Q.shape[0]) and the
-        decision variable x is the concatenation of per-child cell-count blocks x_k
+        Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is a list of per-child
+        measurement blocks y_k (each of length n_queries = Q.shape[0]) and the decision
+        variable x is the concatenation of per-child cell-count blocks x_k
         (each of length n_cells = Q.shape[1]). For the identity workload, Q = np.eye(n_cells)
         is passed by TopDown.initialize(), so this path handles both cases uniformly.
 
         Constraints are always expressed in cell space (indices 0..n_cells-1 per child).
 
         Args:
-            noisy_measurements (np.ndarray): Concatenated noisy query answers y = Q @ x + noise.
+            noisy_measurements (List[np.ndarray]): List of per-child noisy query answers y_k = Q @ x_k + noise.
             node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[SparseConstraint]): Constraints for all children of the node.
                 They are already expressed in terms of active indices and mapped to the global index space.
@@ -157,7 +157,7 @@ class OptimizationModel:
                 each global index from the shared active list by position.
         '''
         n_queries, n_cells = query_matrix.shape
-        n_children = len(noisy_measurements) // n_queries
+        n_children = len(noisy_measurements)   # len(noisy_measurements[i]) == n_queries
         n = n_children * n_cells
 
         # Active (non-pruned) global indices, in joint cell space.
@@ -232,16 +232,16 @@ class OptimizationModel:
                         for k in range(n_children):
                             base = k * n_cells
                             if (base + j) not in active_set:
-                                continue # x pruned to 0 -> constant term, does not affect argmin
-                            y_kr = float(noisy_measurements[k * n_queries + r])
+                                continue 
+                            y_kr = float(noisy_measurements[k][r])
                             if y_kr == 0.0:
                                 continue  # -2*0*x = 0
                             term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} x[{base + j}]", term_count)
                     else:  # General case with lifted variables
                         for k in range(n_children):
-                            y_kr = float(noisy_measurements[k * n_queries + r]) # The noisy value for the k-th child and r-th query
+                            y_kr = float(noisy_measurements[k][r]) # The noisy value for the k-th child and r-th query
                             if y_kr == 0.0: # -2*0*q_x = 0
-                                continue 
+                                continue
                             term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} q_x[{k},{r}]", term_count)  # just a simple squared error with the lifted variable q_x[k, r]
 
                 # Pass 2: quadratic terms

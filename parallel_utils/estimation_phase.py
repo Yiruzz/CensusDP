@@ -166,10 +166,9 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
         children_vectors.append(child_vector)
         children_constraints.append(child_constraint)
 
-    # Concatenate children vectors, and constraints are adapted to the new vector size.
+    # Constraints are adapted to the new vector size.
     # Also create others to ensure consistency in the number of rows per category in the parent.
     # The number of rows in the parent category must match the sum of rows of that category across all children.
-    joint_contingency_vector = np.concatenate(children_vectors)
     n_cells = _data_handler.n_cells
     num_children = len(children_filter_dicts)
     n_joint = num_children * n_cells
@@ -186,7 +185,7 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(
-        noisy_measurements=joint_contingency_vector,
+        noisy_measurements=children_vectors,
         node_id=node_id,
         constraints=joint_constraints,
         query_matrix=_Q,
@@ -205,9 +204,6 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     rounding_time = time.time() - t1
 
     if _check: _check_node_correctness(contingency_vector, joint_solution)
-
-    joint_contingency_vector = None
-    joint_constraints = None
 
     microdata_time = 0.0
     if not is_leaf: _data_handler.update_child_vectors(joint_solution, children_filter_dicts)
