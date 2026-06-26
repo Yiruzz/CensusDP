@@ -301,7 +301,7 @@ class OptimizationModelLP:
             model = gp.read(tmp_path, env=self.env)
             model.optimize()
 
-            if model.status == GRB.OPTIMAL or model.status == GRB.LOCALLY_OPTIMAL:
+            if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
                 result = np.array([model.getVarByName(f"x[{i}]").X for i in active], dtype=float)
                 model.dispose()
                 return result
@@ -447,7 +447,7 @@ class OptimizationModelLP:
             model.optimize()
             y_values = {}
 
-            if model.status == GRB.OPTIMAL or model.status == GRB.LOCALLY_OPTIMAL:
+            if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
                 y_values = {i: model.getVarByName(f"y[{i}]").X for i in active}
                 model.dispose()
             
