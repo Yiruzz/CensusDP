@@ -174,17 +174,17 @@ class OptimizationModel:
         # Check solution
         status = model.get_model_attribute(poi.ModelAttribute.TerminationStatus)
 
-        if status == poi.TerminationStatusCode.OPTIMAL:
+        if status == poi.TerminationStatusCode.OPTIMAL or status == poi.TerminationStatusCode.LOCALLY_SOLVED:
             result = np.array([model.get_value(x[i]) for i in active], dtype=float)
             model.close()
             return result
         elif status == poi.TerminationStatusCode.INFEASIBLE:
             debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
             model.write(debug_path)
-            model.dispose()
+            model.close()
             raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path} for debugging.")
         else:
-            model.dispose()
+            model.close()
             raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
     def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[List[int]] = None, n: Optional[int] = None) -> sp.csc_matrix:
@@ -262,11 +262,11 @@ class OptimizationModel:
 
         # Check solution
         status = model.get_model_attribute(poi.ModelAttribute.TerminationStatus)
-        if status != poi.TerminationStatusCode.OPTIMAL:
+        if status != poi.TerminationStatusCode.OPTIMAL and status != poi.TerminationStatusCode.LOCALLY_SOLVED:
             if status == poi.TerminationStatusCode.INFEASIBLE:
                 debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
                 model.write(debug_path)
-                model.dispose()
+                model.close()
                 raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path} for debugging.")
             else:
                 model.close()
