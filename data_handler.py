@@ -7,13 +7,12 @@ import scipy.sparse as sp
 import duckdb
 import zarr
 import numcodecs
-import itertools
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from dask.distributed import Client, as_completed
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
 from domain import ContingencyDomain
-from parallel_utils.noise_generation import initialize_mechanism, generate_noise_row
+from parallel_utils.noise_generation import generate_noise_row
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 
@@ -148,7 +147,7 @@ class DataHandler:
         con.close()
         self.file_path = str(parquet_path)
 
-    def create_data_view(self) -> None:
+    def create_data_view(self, initialize: bool = False) -> None:
         '''Create a DuckDB view for querying the data.
 
         Creates a view named 'data' that reads from the Parquet file and includes
@@ -156,8 +155,12 @@ class DataHandler:
         in tree construction queries. Always uses threads=1.
         '''
 
-        # Set connection for data handler using one thread
-        self.duckdb_con = duckdb.connect(config={'threads': 1})
+        if not initialize:
+            # Set connection for data handler using one thread
+            self.duckdb_con = duckdb.connect(config={'threads': 1})
+        
+        else:
+            self.duckdb_con = duckdb.connect()
 
         # Combine all columns for SELECT clause
         all_cols = self.hierarchical_columns + self.query_columns
@@ -452,13 +455,12 @@ class DataHandler:
         parquet_pattern = os.path.join(self.microdata_dir, '*.parquet')
 
         try:
-            con = duckdb.connect()
-            con.execute(f"""
+            self.duckdb_con.execute(f"""
                 COPY (SELECT * FROM read_parquet('{parquet_pattern}'))
                 TO '{self.output_path}'
                 (FORMAT CSV, HEADER TRUE, DELIMITER ';')
             """)
-            con.close()
+            self.duckdb_con.close()
         except Exception as e:
             print(f"Warning: Error merging microdata files: {e}")
 
@@ -635,8 +637,7 @@ class DataHandler:
         self.noise_zarr_group.attrs["n_cells"] = self.n_cells
         self.noise_zarr_group.attrs["n_rows_generated"] = 0
 
-    def generate_noise_vectors(self, n_workers: int, n_nodes: int, gen: Iterable[Tuple[int, int]],
-                               privacy_mech_name: str, level_params: List[float], query_sensitivity: int) -> None:
+    def generate_noise_vectors(self, client: Client, n_nodes: int, gen: Iterable[Tuple[int, int]]) -> None:
         '''Generate pre-computed noise vectors in parallel and write to Zarr file.
 
         Uses a sliding window with ProcessPoolExecutor to maintain constant worker load.
@@ -644,57 +645,46 @@ class DataHandler:
         Zarr concurrency issues.
 
         Args:
-            n_workers (int): Number of worker processes in the pool
+            client (Client): Interface to send tasks to the local cluster.
             n_nodes (int): Total number of nodes (for progress reporting)
             gen (Iterable[Tuple[int, int]]): Iterator of (node_id, level) tuples to process
-            privacy_mech_name (str): Name of the privacy mechanism to use
-            level_params (List[float]): Parameters for the privacy mechanism per level
         '''
         WINDOW_SIZE = 5000
         REFILL_BATCH = 2000
 
-        pending = {}
+        pending = as_completed([])
         done = 0
         task_iter = iter(gen)
         arr = self.noise_zarr_group[self.noisy_array_name]
 
-        with ProcessPoolExecutor(max_workers=n_workers, initializer=initialize_mechanism,
-                                 initargs=(privacy_mech_name, level_params,
-                                           self.n_cells, self.dtype, query_sensitivity)) as executor:
+        # Send first tasks
+        for _ in range(WINDOW_SIZE):
+            try:
+                node_id, level = next(task_iter)
+                fut = client.submit(generate_noise_row, node_id, level)
+                pending.add(fut)
+            except StopIteration:
+                break
 
-            for node_id, level in itertools.islice(task_iter, WINDOW_SIZE):
-                fut = executor.submit(generate_noise_row, level)
-                pending[fut] = node_id
+        # For each finished, copy data to zarr file
+        for fut in pending:
+            fut.result()
 
-            completed_since_refill = 0
-            while pending:
-                finished, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            done += 1
 
-                for fut in finished:
-                    node_id = pending.pop(fut)
+            if done % max(1, n_nodes // 20) == 0:
+                print(f"Progress: {done}/{n_nodes}")
 
+            # Fill queue with new tasks
+            if done % REFILL_BATCH == 0:
+                for _ in range(REFILL_BATCH):
                     try:
-                        row_data = fut.result()
-                        arr[node_id, :] = row_data
-                        done += 1
-
-                        self.noise_zarr_group.attrs["n_rows_generated"] = done
-
-                        if done % max(1, n_nodes // 20) == 0:
-                            print(f"    Progress: {done}/{n_nodes}")
-                    except Exception as e:
-                        print(f"    Error on row {node_id}: {e}")
-
-                completed_since_refill += len(finished)
-                if completed_since_refill >= REFILL_BATCH:
-                    new_tasks = list(itertools.islice(task_iter, completed_since_refill))
-                    for node_id, level in new_tasks:
-                        fut = executor.submit(generate_noise_row, level)
-                        pending[fut] = node_id
-
-                    completed_since_refill = 0
-
-            if done % max(1, n_nodes // 20) != 0:
-                print(f"    Progress: {done}/{n_nodes}")
-
+                        node_id, level = next(task_iter)
+                        new_fut = client.submit(generate_noise_row, node_id, level)
+                        pending.add(new_fut)
+                    except StopIteration:
+                        pass
+        
+        if done % max(1, n_nodes // 20) != 0:
+            print(f"Progress: {done % max(1, n_nodes // 20)}/{n_nodes}")
         self.noise_zarr_group.attrs["n_rows_generated"] = done

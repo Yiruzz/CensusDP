@@ -1,14 +1,18 @@
 import heapq
 import numpy as np
 import scipy.sparse as sp
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
-from multiprocessing import get_context
+import dask
+
+from dask.distributed import Client, LocalCluster, as_completed
+dask.config.set({"distributed.worker.multiprocessing-method": "spawn"})
+
+from parallel_utils.utils import WorkerInitializer
+from parallel_utils.estimation_phase import estimate_and_update_children
 
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from constraints.constraint import Constraint
-from parallel_utils.estimation_phase import init_process, estimate_and_update_children
 from optimizers.pyoptinterface import OptimizationModel
 from optimizers.write_lp_directly import OptimizationModelLP
 from queries import QueryWorkload
@@ -84,8 +88,13 @@ class TopDown():
         self.optimizer: Tuple[type, Optional[str], Dict] = (self.data_handler.dtype,
                                                             self.data_handler.lp_problems_dir,
                                                             solver_options)
+        self.local_cluster = LocalCluster(
+                                n_workers=num_workers,           
+                                threads_per_worker=1,
+                                processes=True)
+        
+        self.client = None
 
-        self.workers = num_workers
         self.check_correctness = check_correctness
         self.optimizer_backend = optimizer_backend
 
@@ -102,7 +111,7 @@ class TopDown():
         self.data_handler.convert_csv_to_parquet()
         print(f'{time.time() - t1:.2f} seconds.')
 
-        self.data_handler.create_data_view()
+        self.data_handler.create_data_view(initialize=True)
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
@@ -141,17 +150,28 @@ class TopDown():
         self.optimizer = (self.optimizer[0],
                           self.data_handler.lp_problems_dir,
                           self.optimizer[2])
+        
+        noise = self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec)
 
-        print(self.tree, "\n")
+        plugin = WorkerInitializer(
+            constraints = self.constraints, optimizer_conf = self.optimizer, optimizer_backend = self.optimizer_backend, data_type = self.data_handler.dtype,
+            input_file = self.data_handler.file_path, spill_dir = self.data_handler.spill_dir, microdata_dir = self.data_handler.microdata_dir,
+            hierarchical_columns = self.hierarchical_columns, query_columns = self.query_columns,
+            domains = self.data_handler.contingency_domain.domains,
+            privacy_mech_name = self.privacy_mechanism.name, level_params = self.privacy_mechanism.level_params, Q = self.Q, sensitivity = self.query_sensitivity,
+            zarr_path = self.data_handler.noise_zarr_path, noisy_array_name = self.data_handler.noisy_array_name,
+            check_correctness = self.check_correctness
+        )
+        self.client = Client(self.local_cluster)
+        self.client.register_plugin(plugin)
 
         # Pre-generate noise vectors for all nodes
         t1 = time.time()
         print(f'Pre-generating noise vectors if needed...', end=' ')
-        if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec):
+        if not noise:
             print("")
-            self.data_handler.generate_noise_vectors(self.workers, self.tree._node_count,
-                                                     self.tree.iter_nodes_with_levels(),
-                                                     self.privacy_mechanism.name, self.privacy_mechanism.level_params, self.query_sensitivity)
+            self.data_handler.generate_noise_vectors(self.client, self.tree._node_count,
+                                                     self.tree.iter_nodes_with_levels())
         print(f'{time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
@@ -163,6 +183,8 @@ class TopDown():
         print(f'Running estimation phase...')
         t1 = time.time()
         self._estimation_phase_subtree()
+        self.client.close()
+        self.client.cluster.close()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         print(f'Merging microdata files...', end=' ')
@@ -189,54 +211,34 @@ class TopDown():
         path = self.data_handler.spill_path(root.filter_dict)
         self.data_handler.spill_vector(path, root.contingency_vector)
 
-        with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
-                                initializer=init_process, initargs=(self.optimizer, self.constraints,
-                                                                    self.data_handler.spill_dir,
-                                                                    self.data_handler.microdata_dir,
-                                                                    self.data_handler.file_path,
-                                                                    self.data_handler.contingency_domain.domains,
-                                                                    self.hierarchical_columns, self.query_columns,
-                                                                    self.privacy_mechanism,
-                                                                    self.Q, self.query_sensitivity,
-                                                                    self.check_correctness,
-                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name,
-                                                                    self.optimizer_backend)) as executor:
+        fut_to_node = {}
 
-            def _submit(node):
-                node_path = self.data_handler.spill_path(node.filter_dict)
-                children_filter_dicts = [child.filter_dict for child in node.children]
-                children_ids = [child.id for child in node.children]
-                children_level = node.children[0].level
-                is_leaf = node.children[0].is_leaf()
+        def _submit(node):
+            node_path = self.data_handler.spill_path(node.filter_dict)
+            children_filter_dicts = [child.filter_dict for child in node.children]
+            children_ids = [child.id for child in node.children]
+            children_level = node.children[0].level
+            is_leaf = node.children[0].is_leaf()
 
-                return executor.submit(estimate_and_update_children, node.id, node_path,
-                                     children_filter_dicts, children_ids, children_level, is_leaf)
+            fut = self.client.submit(
+                estimate_and_update_children,
+                node.id, node_path,
+                children_filter_dicts, children_ids,
+                children_level, is_leaf,
+                priority=len(node.children)
+            )
+            fut_to_node[fut] = node
+            return fut
+        
+        ac = as_completed([_submit(root)])
 
-            # Priority queue ordered by number of children: nodes with more children are
-            # dispatched first so the executor stays busy with the heavier work.
-            pending = []
-            heapq.heappush(pending, (-len(root.children), root.id, root))
+        for fut in ac:
+            fut.result()
+            node = fut_to_node.pop(fut)
 
-            futures = {}
-
-            def _fill_window():
-                while pending and len(futures) < self.workers * 2:
-                    _, _, node = heapq.heappop(pending)
-                    futures[_submit(node)] = node
-
-            _fill_window()
-            while futures:
-                done, _ = wait(futures, return_when=FIRST_COMPLETED)
-
-                for fut in done:
-                    fut.result()
-                    node = futures.pop(fut)
-
-                    if not node.children[0].is_leaf():
-                        for child in node.children:
-                            heapq.heappush(pending, (-len(child.children), child.id, child))
-
-                _fill_window()
+            for child in node.children:
+                if child.children:
+                    ac.add(_submit(child))
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.

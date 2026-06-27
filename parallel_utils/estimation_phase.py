@@ -1,66 +1,12 @@
 import numpy as np
 import time
-import zarr
 import scipy.sparse as sp
-from scipy.sparse import spmatrix
+from dask.distributed import get_worker
 
-from data_handler import DataHandler
-from domain import ContingencyDomain
-from privacy import PrivacyMechanism
 from constraints.sparse_constraint import SparseConstraint
 
-from optimizers.pyoptinterface import OptimizationModel
-from optimizers.write_lp_directly import OptimizationModelLP
+from typing import List, Dict, Any, Optional
 
-from typing import List, Dict, Any, Tuple, Optional
-
-def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, List],
-                 spill_dir: str, microdata_dir: str, parquet_path: str,
-                 domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str, optimizer_backend: str) -> None:
-    '''Initialize global variables for parallel worker processes.
-
-    Args:
-        optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
-                                            and solver options dict).
-        constraints_dict (Dict[int, List]): Constraints mapped by level.
-        spill_dir (str): Directory path for spilling vectors to disk.
-        microdata_dir (str): Directory path for temporary microdata files.
-        parquet_path (str): Path to the parquet file.
-        domain_dict (Dict[str, Any]): Domain mapping for query columns.
-        hierarchical_columns (List[str]): Hierarchical column names.
-        query_columns (List[str]): Query column names.
-        privacy_mechanism (PrivacyMechanism): Privacy mechanism instance for noise addition.
-        query_matrix (spmatrix): The sparse query matrix Q used in optimization.
-        query_sensitivity (int): Query sensitivity for noise addition.
-        check (bool): Whether to check node correctness.
-        zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
-        noisy_array_name (str): Name of the noise array within the Zarr group.
-        optimizer_backend (str): Name of optimizer that modeling the problems.
-    '''
-    global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
-
-    _optimizer = OptimizationModel(*optimizer) if optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*optimizer)
-                    
-    _data_handler = DataHandler()
-    _data_handler.spill_dir = spill_dir
-    _data_handler.microdata_dir = microdata_dir
-    _data_handler.hierarchical_columns = hierarchical_columns
-    _data_handler.query_columns = query_columns
-    _data_handler.file_path = parquet_path
-
-    _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
-    _data_handler.n_cells = _data_handler.contingency_domain.n_cells
-
-    _data_handler.create_data_view()
-
-    _constraints = constraints_dict
-    _Q = query_matrix
-    _query_sensitivity = query_sensitivity
-    _privacy_mechanism = privacy_mechanism
-    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
-    _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set, n_cells: Optional[int] = None) -> List[SparseConstraint]:
     '''Combine child publication constraints into joint SparseConstraints.
@@ -89,7 +35,6 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
     Returns:
         List[SparseConstraint]: List of SparseConstraints for the joint optimization problem.
     '''
-    if n_cells is None: n_cells = _data_handler.n_cells
     joint_constraints = []
 
     # Per-child constraints: convert each constraint to SparseConstraint via to_sparse_constraint()
@@ -137,7 +82,7 @@ def _check_node_correctness(parent_vector: sp.csc_matrix, children_vectors: sp.c
               f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
 
 def estimate_and_update_children(node_id: int, node_path: str, children_filter_dicts: List[Dict[str, Any]],
-                                 children_ids: List[int], children_level: int, is_leaf: bool = False) -> float:
+                                 children_ids: List[int], children_level: int, is_leaf: bool = False) -> None:
     '''Solve optimization for a node considering its children and update their vectors.
 
     Args:
@@ -151,28 +96,27 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     Returns:
         float: Time spent writing microdata files
     '''
-    contingency_vector = _data_handler.load_vector(node_path)
+    worker = get_worker()
+    contingency_vector = worker.data_handler.load_vector(node_path)
 
     # Materialize and combine children vectors and constraints
     children_vectors = []
     children_constraints = []
 
     for filter_dict, child_id in zip(children_filter_dicts, children_ids):
-        child_vector, child_constraint = _data_handler.materialize_node_data(filter_dict, _constraints[children_level], _Q)
-
+        child_vector, child_constraint = worker.data_handler.materialize_node_data(filter_dict, worker.constraints[children_level], worker.Q)
         # Try to use pre-computed noise, fallback to in-situ generation if not available
         try:
-            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
+            worker.privacy_mechanism.add_noise_from_precomputed(worker.noisy_arr, child_vector, child_id)
         except:
-            _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
-
+            worker.privacy_mechanism.add_noise(child_vector, children_level, worker.query_sensitivity)
         children_vectors.append(child_vector)
         children_constraints.append(child_constraint)
 
     # Constraints are adapted to the new vector size.
     # Also create others to ensure consistency in the number of rows per category in the parent.
     # The number of rows in the parent category must match the sum of rows of that category across all children.
-    n_cells = _data_handler.n_cells
+    n_cells = worker.data_handler.n_cells
     num_children = len(children_filter_dicts)
     n_joint = num_children * n_cells
 
@@ -184,20 +128,21 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     active = [k * n_cells + int(j) for k in range(num_children) for j in support]
 
     # Combine receives the active set so it can bake prune-to-0 + reindexing into the constraints.
-    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints, set(active))
+    joint_constraints = _combine_child_constraints(num_children, contingency_vector,
+                                                   children_constraints, set(active), worker.data_handler.n_cells)
 
     t1 = time.time()
-    x_tilde = _optimizer.non_negative_real_estimation(
+    x_tilde = worker.optimizer.non_negative_real_estimation(
         noisy_measurements=children_vectors,
         node_id=node_id,
         constraints=joint_constraints,
-        query_matrix=_Q,
+        query_matrix=worker.Q,
         active=active
     )
     real_time = time.time() - t1
 
     t1 = time.time()
-    joint_solution = _optimizer.rounding_estimation(
+    joint_solution = worker.optimizer.rounding_estimation(
         x_tilde=x_tilde,
         node_id=node_id,
         constraints=joint_constraints,
@@ -206,12 +151,10 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     )
     rounding_time = time.time() - t1
 
-    if _check: _check_node_correctness(contingency_vector, joint_solution)
+    if worker.check_correctness: _check_node_correctness(contingency_vector, joint_solution)
 
-    microdata_time = 0.0
-    if not is_leaf: _data_handler.update_child_vectors(joint_solution, children_filter_dicts)
+    if not is_leaf: worker.data_handler.update_child_vectors(joint_solution, children_filter_dicts)
     else:
-        t_microdata = time.time()
         child_vectors = []
         start = 0
 
@@ -221,9 +164,7 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
             child_vectors.append(updated_vector)
             start = end
 
-        _data_handler.write_microdata(node_id, child_vectors, children_filter_dicts)
-        microdata_time = time.time() - t_microdata
+        worker.data_handler.write_microdata(node_id, child_vectors, children_filter_dicts)
 
     print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
 
-    return microdata_time

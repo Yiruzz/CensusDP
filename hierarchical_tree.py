@@ -1,7 +1,7 @@
 from collections import deque
 from hierarchical_node import HierarchicalNode
 
-from typing import Generator
+from typing import Dict, Generator, Tuple
 
 class HierarchicalTree:
     r'''
@@ -52,11 +52,11 @@ class HierarchicalTree:
 
         return result.strip()
 
-    def _count_nodes_per_level(self) -> dict:
+    def _count_nodes_per_level(self) -> Dict[int, int]:
         '''Count the number of nodes at each level of the tree using BFS.
 
         Returns:
-            dict: Dictionary with level as key and node count as value.
+            Dict[int, int]: Dictionary mapping each level index to the number of nodes at that level.
         '''
         nodes_by_level = {i: 0 for i in range(self._levels)}
         queue = deque([self.root])
@@ -89,11 +89,11 @@ class HierarchicalTree:
                 for child in node.children:
                     queue.append(child)
 
-    def iter_nodes_with_levels(self) -> Generator[tuple[int, int], None, None]:
+    def iter_nodes_with_levels(self) -> Generator[Tuple[int, int], None, None]:
         '''Traverse the tree using BFS and yield node ID and level pairs.
 
         Yields:
-            tuple[int, int]: A tuple of (node_id, node_level) for each node.
+            Tuple[int, int]: A tuple of (node_id, node_level) for each node in BFS order.
         '''
         queue = deque([self.root])
 
