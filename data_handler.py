@@ -7,7 +7,6 @@ import scipy.sparse as sp
 import duckdb
 import zarr
 import numcodecs
-from dask.distributed import Client, as_completed
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
@@ -513,177 +512,177 @@ class DataHandler:
             output_path = os.path.join(self.microdata_dir, f'node_{node_id}_child_{i}_microdata.parquet')
             df.to_parquet(output_path, index=False)
 
-    def noisy_vectors_exist(self, n_nodes: int, mech_param_spec: str) -> bool:
-        '''Check if compatible pre-computed noise vectors exist and reuse them if possible.
+    # def noisy_vectors_exist(self, n_nodes: int, mech_param_spec: str) -> bool:
+    #     '''Check if compatible pre-computed noise vectors exist and reuse them if possible.
 
-        Searches for Zarr files matching the mechanism and parameters. Selects the first
-        compatible file with n_nodes >= requested and n_cells >= requested. Requires exact
-        match on mechanism and parameters; compatible files can have more nodes/cells.
+    #     Searches for Zarr files matching the mechanism and parameters. Selects the first
+    #     compatible file with n_nodes >= requested and n_cells >= requested. Requires exact
+    #     match on mechanism and parameters; compatible files can have more nodes/cells.
 
-        Args:
-            n_nodes (int): Requested number of nodes
-            mech_param_spec (str): Mechanism parameter specification string (e.g., 'Laplace_1.0')
+    #     Args:
+    #         n_nodes (int): Requested number of nodes
+    #         mech_param_spec (str): Mechanism parameter specification string (e.g., 'Laplace_1.0')
 
-        Returns:
-            bool: True if compatible vectors were found and loaded, False if new file created
-        '''
-        n_cells = self.n_cells
+    #     Returns:
+    #         bool: True if compatible vectors were found and loaded, False if new file created
+    #     '''
+    #     n_cells = self.n_cells
 
-        # Try to find a compatible existing file
-        compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec)
-        if compatible_file:
-            print(f"\n Reusing compatible noise vectors file: {os.path.basename(compatible_file)}")
-            self.noise_zarr_path = compatible_file
-            self.noise_zarr_group = zarr.open_group(self.noise_zarr_path, mode="r")
-            return True
+    #     # Try to find a compatible existing file
+    #     compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec)
+    #     if compatible_file:
+    #         print(f"\n Reusing compatible noise vectors file: {os.path.basename(compatible_file)}")
+    #         self.noise_zarr_path = compatible_file
+    #         self.noise_zarr_group = zarr.open_group(self.noise_zarr_path, mode="r")
+    #         return True
 
-        # No compatible file found; create a new one
-        zarr_filename = f"noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr"
-        self.noise_zarr_path = os.path.join(self.noisy_dir, zarr_filename)
-        self._create_noisy_file(self.noise_zarr_path, n_nodes)
-        return False
+    #     # No compatible file found; create a new one
+    #     zarr_filename = f"noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr"
+    #     self.noise_zarr_path = os.path.join(self.noisy_dir, zarr_filename)
+    #     self._create_noisy_file(self.noise_zarr_path, n_nodes)
+    #     return False
 
-    def _find_compatible_noisy_vector(self, n_nodes: int, n_cells: int, mech_param_spec: str) -> Optional[str]:
-        '''Search for a compatible pre-computed noise vector file.
+    # def _find_compatible_noisy_vector(self, n_nodes: int, n_cells: int, mech_param_spec: str) -> Optional[str]:
+    #     '''Search for a compatible pre-computed noise vector file.
 
-        Looks for files matching the pattern noisy_vectors_*_{mech_param_spec}.zarr
-        and selects one with n_nodes_file >= n_nodes and n_cells_file >= n_cells.
-        Verifies that n_rows_generated >= n_expected_nodes to ensure completeness.
-        If multiple compatible files exist, returns the one with the smallest dimensions
-        to minimize memory usage.
+    #     Looks for files matching the pattern noisy_vectors_*_{mech_param_spec}.zarr
+    #     and selects one with n_nodes_file >= n_nodes and n_cells_file >= n_cells.
+    #     Verifies that n_rows_generated >= n_expected_nodes to ensure completeness.
+    #     If multiple compatible files exist, returns the one with the smallest dimensions
+    #     to minimize memory usage.
 
-        Args:
-            n_nodes (int): Required number of nodes
-            n_cells (int): Required number of cells
-            mech_param_spec (str): Exact mechanism and parameters to match
+    #     Args:
+    #         n_nodes (int): Required number of nodes
+    #         n_cells (int): Required number of cells
+    #         mech_param_spec (str): Exact mechanism and parameters to match
 
-        Returns:
-            Optional[str]: Path to a compatible file, or None if none exist
-        '''
-        if not os.path.isdir(self.noisy_dir):
-            return None
+    #     Returns:
+    #         Optional[str]: Path to a compatible file, or None if none exist
+    #     '''
+    #     if not os.path.isdir(self.noisy_dir):
+    #         return None
 
-        candidates = []
-        pattern = f"noisy_vectors_"
+    #     candidates = []
+    #     pattern = f"noisy_vectors_"
 
-        for filename in os.listdir(self.noisy_dir):
-            if not filename.startswith(pattern) or not filename.endswith(".zarr"):
-                continue
+    #     for filename in os.listdir(self.noisy_dir):
+    #         if not filename.startswith(pattern) or not filename.endswith(".zarr"):
+    #             continue
 
-            # Parse filename: noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr
-            # Remove prefix and suffix
-            name_without_ext = filename[len(pattern):-5]  # Remove "noisy_vectors_" and ".zarr"
+    #         # Parse filename: noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr
+    #         # Remove prefix and suffix
+    #         name_without_ext = filename[len(pattern):-5]  # Remove "noisy_vectors_" and ".zarr"
 
-            # Split by '_' but the mech_param_spec can contain underscores
-            # Strategy: split from the right to extract mech_param_spec first
-            parts = name_without_ext.split('_', 2)  # Split from right, max 2 splits
-            if len(parts) != 3:
-                continue
-            try:
-                file_n_nodes = int(parts[0])
-                file_n_cells = int(parts[1])
-                file_mech_spec = parts[2]
-            except ValueError:
-                continue
+    #         # Split by '_' but the mech_param_spec can contain underscores
+    #         # Strategy: split from the right to extract mech_param_spec first
+    #         parts = name_without_ext.split('_', 2)  # Split from right, max 2 splits
+    #         if len(parts) != 3:
+    #             continue
+    #         try:
+    #             file_n_nodes = int(parts[0])
+    #             file_n_cells = int(parts[1])
+    #             file_mech_spec = parts[2]
+    #         except ValueError:
+    #             continue
 
-            # Check if mechanism matches
-            if file_mech_spec != mech_param_spec:
-                continue
+    #         # Check if mechanism matches
+    #         if file_mech_spec != mech_param_spec:
+    #             continue
 
-            # Check if file has enough capacity
-            if file_n_nodes >= n_nodes and file_n_cells >= n_cells:
+    #         # Check if file has enough capacity
+    #         if file_n_nodes >= n_nodes and file_n_cells >= n_cells:
 
-                # Validate metadata: ensure all expected nodes were actually generated
-                zarr_path = os.path.join(self.noisy_dir, filename)
-                try:
-                    zarr_group = zarr.open_group(zarr_path, mode="r")
-                    n_expected = zarr_group.attrs.get("n_expected_nodes", 0)
-                    n_generated = zarr_group.attrs.get("n_rows_generated", 0)
+    #             # Validate metadata: ensure all expected nodes were actually generated
+    #             zarr_path = os.path.join(self.noisy_dir, filename)
+    #             try:
+    #                 zarr_group = zarr.open_group(zarr_path, mode="r")
+    #                 n_expected = zarr_group.attrs.get("n_expected_nodes", 0)
+    #                 n_generated = zarr_group.attrs.get("n_rows_generated", 0)
 
-                    # Only accept if generation is complete
-                    if n_generated >= n_expected:
-                        candidates.append((filename, file_n_nodes, file_n_cells))
+    #                 # Only accept if generation is complete
+    #                 if n_generated >= n_expected:
+    #                     candidates.append((filename, file_n_nodes, file_n_cells))
 
-                except Exception as e:
-                    print(f"    Warning: Could not read metadata from {filename}: {e}")
-                    continue
+    #             except Exception as e:
+    #                 print(f"    Warning: Could not read metadata from {filename}: {e}")
+    #                 continue
 
-        if not candidates:
-            return None
+    #     if not candidates:
+    #         return None
 
-        # Return the file with smallest number of nodes
-        candidates.sort(key=lambda x: x[2])
-        chosen_file = candidates[0][0]
-        return os.path.join(self.noisy_dir, chosen_file)
+    #     # Return the file with smallest number of nodes
+    #     candidates.sort(key=lambda x: x[2])
+    #     chosen_file = candidates[0][0]
+    #     return os.path.join(self.noisy_dir, chosen_file)
 
-    def _create_noisy_file(self, zarr_path: str, n_nodes: int) -> None:
-        '''Create a new Zarr file to store pre-computed noise vectors.
+    # def _create_noisy_file(self, zarr_path: str, n_nodes: int) -> None:
+    #     '''Create a new Zarr file to store pre-computed noise vectors.
 
-        Initializes a Zarr group with zstd compression and creates the noise array
-        with appropriate metadata and chunking (1 row per chunk for efficient row-wise writes).
-        Each row stores a noise vector for one node.
+    #     Initializes a Zarr group with zstd compression and creates the noise array
+    #     with appropriate metadata and chunking (1 row per chunk for efficient row-wise writes).
+    #     Each row stores a noise vector for one node.
 
-        Args:
-            zarr_path (str): Path where the Zarr file will be created
-            n_nodes (int): Number of nodes (rows in the noise array)
-        '''
-        compressor = numcodecs.Blosc(cname="zstd", clevel=self.COMPRESSION_LEVEL, shuffle=numcodecs.Blosc.BITSHUFFLE)
+    #     Args:
+    #         zarr_path (str): Path where the Zarr file will be created
+    #         n_nodes (int): Number of nodes (rows in the noise array)
+    #     '''
+    #     compressor = numcodecs.Blosc(cname="zstd", clevel=self.COMPRESSION_LEVEL, shuffle=numcodecs.Blosc.BITSHUFFLE)
 
-        self.noise_zarr_group = zarr.open_group(zarr_path, mode="w", zarr_format=2)
-        self.noise_zarr_group.create_array(self.noisy_array_name, shape=(n_nodes, self.n_cells),
-                                      chunks=(1, self.n_cells), dtype=self.dtype, compressor=compressor)
+    #     self.noise_zarr_group = zarr.open_group(zarr_path, mode="w", zarr_format=2)
+    #     self.noise_zarr_group.create_array(self.noisy_array_name, shape=(n_nodes, self.n_cells),
+    #                                   chunks=(1, self.n_cells), dtype=self.dtype, compressor=compressor)
 
-        self.noise_zarr_group.attrs["n_expected_nodes"] = n_nodes
-        self.noise_zarr_group.attrs["n_cells"] = self.n_cells
-        self.noise_zarr_group.attrs["n_rows_generated"] = 0
+    #     self.noise_zarr_group.attrs["n_expected_nodes"] = n_nodes
+    #     self.noise_zarr_group.attrs["n_cells"] = self.n_cells
+    #     self.noise_zarr_group.attrs["n_rows_generated"] = 0
 
-    def generate_noise_vectors(self, client: Client, n_nodes: int, gen: Iterable[Tuple[int, int]]) -> None:
-        '''Generate pre-computed noise vectors in parallel and write to Zarr file.
+    # def generate_noise_vectors(self, client: Client, n_nodes: int, gen: Iterable[Tuple[int, int]]) -> None:
+    #     '''Generate pre-computed noise vectors in parallel and write to Zarr file.
 
-        Uses a sliding window with ProcessPoolExecutor to maintain constant worker load.
-        Workers generate noise independently; the main thread writes results to avoid
-        Zarr concurrency issues.
+    #     Uses a sliding window with ProcessPoolExecutor to maintain constant worker load.
+    #     Workers generate noise independently; the main thread writes results to avoid
+    #     Zarr concurrency issues.
 
-        Args:
-            client (Client): Interface to send tasks to the local cluster.
-            n_nodes (int): Total number of nodes (for progress reporting)
-            gen (Iterable[Tuple[int, int]]): Iterator of (node_id, level) tuples to process
-        '''
-        WINDOW_SIZE = 5000
-        REFILL_BATCH = 2000
+    #     Args:
+    #         client (Client): Interface to send tasks to the local cluster.
+    #         n_nodes (int): Total number of nodes (for progress reporting)
+    #         gen (Iterable[Tuple[int, int]]): Iterator of (node_id, level) tuples to process
+    #     '''
+    #     WINDOW_SIZE = 5000
+    #     REFILL_BATCH = 2000
 
-        pending = as_completed([])
-        done = 0
-        task_iter = iter(gen)
+    #     pending = as_completed([])
+    #     done = 0
+    #     task_iter = iter(gen)
 
-        # Send first tasks
-        for _ in range(WINDOW_SIZE):
-            try:
-                node_id, level = next(task_iter)
-                fut = client.submit(generate_noise_row, node_id, level)
-                pending.add(fut)
-            except StopIteration:
-                break
+    #     # Send first tasks
+    #     for _ in range(WINDOW_SIZE):
+    #         try:
+    #             node_id, level = next(task_iter)
+    #             fut = client.submit(generate_noise_row, node_id, level)
+    #             pending.add(fut)
+    #         except StopIteration:
+    #             break
 
-        # For each finished, copy data to zarr file
-        for fut in pending:
-            fut.result()
+    #     # For each finished, copy data to zarr file
+    #     for fut in pending:
+    #         fut.result()
 
-            done += 1
+    #         done += 1
 
-            if done % max(1, n_nodes // 20) == 0:
-                print(f"Progress: {done}/{n_nodes}")
+    #         if done % max(1, n_nodes // 20) == 0:
+    #             print(f"Progress: {done}/{n_nodes}")
 
-            # Fill queue with new tasks
-            if done % REFILL_BATCH == 0:
-                for _ in range(REFILL_BATCH):
-                    try:
-                        node_id, level = next(task_iter)
-                        new_fut = client.submit(generate_noise_row, node_id, level)
-                        pending.add(new_fut)
-                    except StopIteration:
-                        pass
+    #         # Fill queue with new tasks
+    #         if done % REFILL_BATCH == 0:
+    #             for _ in range(REFILL_BATCH):
+    #                 try:
+    #                     node_id, level = next(task_iter)
+    #                     new_fut = client.submit(generate_noise_row, node_id, level)
+    #                     pending.add(new_fut)
+    #                 except StopIteration:
+    #                     pass
         
-        if done % max(1, n_nodes // 20) != 0:
-            print(f"Progress: {done % max(1, n_nodes // 20)}/{n_nodes}")
-        self.noise_zarr_group.attrs["n_rows_generated"] = done
+    #     if done % max(1, n_nodes // 20) != 0:
+    #         print(f"Progress: {done % max(1, n_nodes // 20)}/{n_nodes}")
+    #     self.noise_zarr_group.attrs["n_rows_generated"] = done

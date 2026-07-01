@@ -100,7 +100,7 @@ class TopDown():
         self.data_handler.convert_csv_to_parquet()
         print(f'{time.time() - t1:.2f} seconds.')
 
-        self.data_handler.create_data_view(initialize=True)
+        self.data_handler.create_data_view()
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
@@ -375,9 +375,9 @@ class TopDown():
         # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j}
         # so the optimizers instantiate variables only there. `active` stays an ordered list: the
         # optimizer aligns its solution positionally to it across the real -> rounding solves.
-        #support = contingency_vector.indices
-        #active = [k * n_cells + int(j) for k in range(num_children) for j in support]
-        active = None
+        support = contingency_vector.indices
+        active = [k * n_cells + int(j) for k in range(num_children) for j in support]
+        #active = None
 
         # Combine receives the active set so it can bake prune-to-0 + reindexing into the constraints.
         joint_constraints = self._combine_child_constraints(num_children, contingency_vector,
