@@ -51,12 +51,10 @@ class LogicalExpression(Constraint, ABC):
         # Coefficients are all 1.
         # TODO: Check whether the dtypes are appropriate; they default to float64, which consumes a lot of memory.
         indices = np.flatnonzero(negated_mask)
-        coefs = np.ones(len(indices))
 
         # Return a constraint that enforces the sum of the variables at the selected domain indices to be zero.
         return SparseConstraint(
             indices=indices,
-            coefs=coefs,
             sense="=",
             rhs=0.0
         )

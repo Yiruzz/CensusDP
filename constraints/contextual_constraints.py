@@ -68,11 +68,9 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
         # Reduce to a boolean mask over the cells, then take the selected indices.
         reduced_mask = self.expression.reduce(domain)
         indices = np.flatnonzero(reduced_mask)
-        coefs = np.ones(len(indices))
 
         return SparseConstraint(
             indices=indices,
-            coefs=coefs,
             sense="=",
             rhs=float(self.value)
         )

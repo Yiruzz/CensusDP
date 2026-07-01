@@ -213,19 +213,19 @@ class TopDown():
 
         fut_to_node = {}
 
-        def _submit(node):
+        def _submit(node, active=1):
             node_path = self.data_handler.spill_path(node.filter_dict)
             children_filter_dicts = [child.filter_dict for child in node.children]
             children_ids = [child.id for child in node.children]
             children_level = node.children[0].level
             is_leaf = node.children[0].is_leaf()
-
+            
             fut = self.client.submit(
                 estimate_and_update_children,
                 node.id, node_path,
                 children_filter_dicts, children_ids,
                 children_level, is_leaf,
-                priority=len(node.children)
+                priority=active*len(node.children)
             )
             fut_to_node[fut] = node
             return fut
@@ -233,12 +233,12 @@ class TopDown():
         ac = as_completed([_submit(root)])
 
         for fut in ac:
-            fut.result()
+            active = fut.result()
             node = fut_to_node.pop(fut)
 
             for child in node.children:
                 if child.children:
-                    ac.add(_submit(child))
+                    ac.add(_submit(child, active))
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.

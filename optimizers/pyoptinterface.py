@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from constraints.sparse_constraint import SparseConstraint
 
-_SENSE_MAP = {"=": poi.Eq, "<=": poi.Leq, ">=": poi.Geq}
+_SENSE_MAP = {"=": poi.Eq, "<=": poi.Leq, ">=": poi.Geq}  # Only supports these senses
 
 class OptimizationModel:
     '''
@@ -18,8 +18,8 @@ class OptimizationModel:
     resulting in less Python-level overhead when adding variables and linear constraints.
 
     As a result, the solve times are practically identical to those obtained with the gurobipy API,
-    while model construction times are significantly lower.Compared to writing LP files directly,
-    this approach avoids CPU-bound file generation and eliminates kernel calls for disk I/O.
+    while model construction times are significantly lower. Compared to writing LP files directly,
+    this approach avoids file generation so eliminates kernel calls for disk I/O.
     It also reduces synchronization overhead with other processes that may be waiting for file
     operations to complete. 
 
@@ -166,7 +166,7 @@ class OptimizationModel:
 
         # coef x[i] + coef x[j]... = / <= 7 >= value
         for i, sc in enumerate(constraints):
-            lhs_expr = quicksum(float(c) * x[int(idx)] for idx, c in zip(sc.indices, sc.coefs))
+            lhs_expr = quicksum(x[int(idx)] for idx in sc.indices)
             model.add_linear_constraint(lhs_expr, _SENSE_MAP[sc.sense], float(sc.rhs), name=f"Constraint_{i}")
 
         model.optimize()
@@ -249,12 +249,12 @@ class OptimizationModel:
 
             # The rounding decision variable is only the binary correction y[i]. 
             # The actual cell value is floor[i] + y[i]. 
-            # <=> sum(coef_i * (floor_i + y_i)) sense rhs
-            # <=> sum(coef_i * y_i) sense (rhs - sum(coef_i * floor_i))
-            for idx, coef in zip(sc.indices, sc.coefs):
+            # <=> sum(floor_i + y_i) sense rhs
+            # <=> sum(y_i) sense (rhs - sum(floor_i)
+            for idx in sc.indices:
                 idx = int(idx)
-                floor_contrib += float(coef) * x_floor[pos_of[idx]]  # coef_i * floor_i
-                terms.append(float(coef) * y[idx])                   # coef_i * y_i
+                floor_contrib +=  x_floor[pos_of[idx]]  
+                terms.append(y[idx])                   
             
             model.add_linear_constraint(quicksum(terms), _SENSE_MAP[sc.sense], float(sc.rhs) - floor_contrib, name=f"Constraint_{i}")
 

@@ -655,7 +655,6 @@ class DataHandler:
         pending = as_completed([])
         done = 0
         task_iter = iter(gen)
-        arr = self.noise_zarr_group[self.noisy_array_name]
 
         # Send first tasks
         for _ in range(WINDOW_SIZE):

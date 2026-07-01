@@ -53,12 +53,10 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
     for index, value in zip(contingency_vector.indices, contingency_vector.data):
         index = int(index)
         indices_to_sum = np.array([index + i * n_cells for i in range(num_children)])
-        coefs = np.ones(len(indices_to_sum))
 
         joint_constraints.append(
             SparseConstraint(
                 indices=indices_to_sum,
-                coefs=coefs,
                 sense="=",
                 rhs=float(value)
             )
@@ -166,5 +164,6 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
         worker.data_handler.write_microdata(node_id, child_vectors, children_filter_dicts)
 
-    print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+    print(f' [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+    return len(active)
 

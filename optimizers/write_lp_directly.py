@@ -273,10 +273,12 @@ class OptimizationModelLP:
 
                     # + coef x[i] + coef x[j]...
                     tcount = 0
-                    for idx, c in zip(sc.indices, sc.coefs):
-                        tcount = _write_term(f, f" {_fmt(float(c))} x[{int(idx)}]", tcount)
+                    tcount = _write_term(f, f"x[{int(sc.indices[0])}]", tcount) # First term
+
+                    for idx in sc.indices[1:]:
+                        tcount = _write_term(f, f" + x[{int(idx)}]", tcount)
                     
-                    # = / <= / >= rhs # (unsigned, positive by default: cell counts are non-negative)
+                    # =, <=, >=, < or > rhs # (unsigned, positive by default: cell counts are non-negative)
                     f.write(f" {sc.sense} {sc.rhs:.17g}\n")
 
                 # ---------------------------------------------------------------------------
@@ -297,7 +299,8 @@ class OptimizationModelLP:
                 # End
                 # ---------------------------------------------------------------------------
                 f.write("End\n")
-            
+                f.flush()
+                
             model = gp.read(tmp_path, env=self.env)
             model.optimize()
 
@@ -411,17 +414,21 @@ class OptimizationModelLP:
 
                     # The rounding decision variable is only the binary correction y[i]. 
                     # The actual cell value is floor[i] + y[i]. 
-                    # <=> sum(coef_i * (floor_i + y_i)) sense rhs
-                    # <=> sum(coef_i * y_i) sense (rhs - sum(coef_i * floor_i))
+                    # <=> sum(floor_i + y_i) sense rhs
+                    # <=> sum(y_i) sense (rhs - sum(floor_i))
                     
                     f.write(f" Constraint_{i}:")
 
                     tcount = 0
                     floor_contrib = 0.0
-                    for idx, coef in zip(sc.indices, sc.coefs):
+                    idx = int(sc.indices[0])
+                    floor_contrib += x_floor[pos_of[idx]]
+                    tcount = _write_term(f, f" y[{idx}]", tcount) 
+                    
+                    for idx in sc.indices[1:]:
                         idx = int(idx)
-                        floor_contrib += float(coef) * x_floor[pos_of[idx]] # coef_i * floor_i
-                        tcount = _write_term(f, f" {_fmt(float(coef))} y[{idx}]", tcount) # coef_i * y_i
+                        floor_contrib += x_floor[pos_of[idx]] 
+                        tcount = _write_term(f, f" + y[{idx}]", tcount)
                     
                     # sense (rhs - sum(coef_i * floor_i))
                     adjusted_rhs = float(sc.rhs) - floor_contrib
@@ -442,6 +449,7 @@ class OptimizationModelLP:
                 # ---------------------------------------------------------------------------
 
                 f.write("End\n")
+                f.flush()
 
             model = gp.read(tmp_path, env=self.env)
             model.optimize()

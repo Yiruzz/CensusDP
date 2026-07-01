@@ -34,12 +34,10 @@ class SumEqual(AggregateConstraint):
         # Reduce to a boolean mask over the cells, then take the selected indices.
         reduced_mask = self.expression.reduce(domain)
         indices = np.flatnonzero(reduced_mask)
-        coefs = np.ones(len(indices))
 
         # Return a constraint that encapsulates that several values of the contingency variable must sum to the given value.
         return SparseConstraint(
             indices=indices,
-            coefs=coefs,
             sense="=",
             rhs=float(self.value)
         )
