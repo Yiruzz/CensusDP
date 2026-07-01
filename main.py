@@ -16,7 +16,7 @@ from queries import QueryWorkload, col
 
 
 def main(process_until: str, queries: list[str], user_constraints: bool,
-         num_workers: int, check_correctness: bool, optimizer_backend: str):
+          check_correctness: bool, optimizer_backend: str):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -95,7 +95,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
         privacy_mechanism=PRIVACY_MECHANISM,
         out_path=OUTPUT_PATH+OUTPUT_FILE,
         solver_options=SOLVER_OPTIONS,
-        num_workers=num_workers,
         check_correctness=check_correctness,
         optimizer_backend=optimizer_backend,
     )
@@ -210,13 +209,6 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=2,
-        help="Number of workers for parallel execution (default: 2)",
-    )
-
-    parser.add_argument(
         "--check_correctness",
         action="store_true",
         help="Whether to check correctness during execution",
@@ -231,4 +223,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    main(args.process_until, args.queries, args.user_constraints, args.num_workers, args.check_correctness, args.optimizer)
+    main(args.process_until, args.queries, args.user_constraints, args.check_correctness, args.optimizer)

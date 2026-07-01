@@ -39,6 +39,13 @@ class SparseConstraint:
             Optional[SparseConstraint]: A new SparseConstraint containing only active global indices. Returns None if all indices are pruned.
         """
 
+        if active_indices_set is None:
+            return SparseConstraint(
+                indices=self.indices+offset,
+                sense=self.sense,
+                rhs=self.rhs
+            )
+
         global_indices = self.indices + offset
         mask = np.array([i in active_indices_set for i in global_indices])
 

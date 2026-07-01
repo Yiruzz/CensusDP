@@ -1,14 +1,7 @@
-import heapq
 import numpy as np
 import scipy.sparse as sp
-import dask
 
-from dask.distributed import Client, LocalCluster, as_completed
-dask.config.set({"distributed.worker.multiprocessing-method": "spawn"})
-
-from parallel_utils.utils import WorkerInitializer
-from parallel_utils.estimation_phase import estimate_and_update_children
-
+from collections import deque
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
@@ -21,6 +14,9 @@ from privacy import PrivacyMechanism
 from typing import Dict, List, Optional, Union, Tuple
 import time
 
+from constraints.sparse_constraint import SparseConstraint
+
+
 class TopDown():
     '''Represents the TopDown algorithm for generating differentially private microdata.
 
@@ -30,7 +26,7 @@ class TopDown():
     specified constraints by the user.
     '''
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
+                 privacy_mechanism: PrivacyMechanism, out_path: str = 'noisy_data.csv',
                  solver_options: dict = {}, domain: Optional[Dict[str, List]] = None,
                  check_correctness: bool = False, optimizer_backend: str = 'pyoptinterface') -> None:
         """Initialize the TopDown algorithm.
@@ -88,13 +84,6 @@ class TopDown():
         self.optimizer: Tuple[type, Optional[str], Dict] = (self.data_handler.dtype,
                                                             self.data_handler.lp_problems_dir,
                                                             solver_options)
-        self.local_cluster = LocalCluster(
-                                n_workers=num_workers,           
-                                threads_per_worker=1,
-                                processes=True)
-        
-        self.client = None
-
         self.check_correctness = check_correctness
         self.optimizer_backend = optimizer_backend
 
@@ -150,29 +139,6 @@ class TopDown():
         self.optimizer = (self.optimizer[0],
                           self.data_handler.lp_problems_dir,
                           self.optimizer[2])
-        
-        noise = self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec)
-
-        plugin = WorkerInitializer(
-            constraints = self.constraints, optimizer_conf = self.optimizer, optimizer_backend = self.optimizer_backend, data_type = self.data_handler.dtype,
-            input_file = self.data_handler.file_path, spill_dir = self.data_handler.spill_dir, microdata_dir = self.data_handler.microdata_dir,
-            hierarchical_columns = self.hierarchical_columns, query_columns = self.query_columns,
-            domains = self.data_handler.contingency_domain.domains,
-            privacy_mech_name = self.privacy_mechanism.name, level_params = self.privacy_mechanism.level_params, Q = self.Q, sensitivity = self.query_sensitivity,
-            zarr_path = self.data_handler.noise_zarr_path, noisy_array_name = self.data_handler.noisy_array_name,
-            check_correctness = self.check_correctness
-        )
-        self.client = Client(self.local_cluster)
-        self.client.register_plugin(plugin)
-
-        # Pre-generate noise vectors for all nodes
-        t1 = time.time()
-        print(f'Pre-generating noise vectors if needed...', end=' ')
-        if not noise:
-            print("")
-            self.data_handler.generate_noise_vectors(self.client, self.tree._node_count,
-                                                     self.tree.iter_nodes_with_levels())
-        print(f'{time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
         '''Run the estimation phase of the TopDown algorithm.
@@ -183,8 +149,6 @@ class TopDown():
         print(f'Running estimation phase...')
         t1 = time.time()
         self._estimation_phase_subtree()
-        self.client.close()
-        self.client.cluster.close()
         print(f'{time.time() - t1:.2f} seconds.\n')
 
         print(f'Merging microdata files...', end=' ')
@@ -201,44 +165,31 @@ class TopDown():
         '''
         root = self.tree.root
         root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
-        try:
-            self.privacy_mechanism.add_noise_from_precomputed(self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], root.contingency_vector, root.id)
-        except:
-            self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
+        self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
         # First phase: resolve root's own contingency vector
         self._estimate_node_individually(root)
         path = self.data_handler.spill_path(root.filter_dict)
         self.data_handler.spill_vector(path, root.contingency_vector)
 
-        fut_to_node = {}
-
-        def _submit(node, active=1):
+        def _submit(node):
             node_path = self.data_handler.spill_path(node.filter_dict)
             children_filter_dicts = [child.filter_dict for child in node.children]
             children_ids = [child.id for child in node.children]
             children_level = node.children[0].level
             is_leaf = node.children[0].is_leaf()
             
-            fut = self.client.submit(
-                estimate_and_update_children,
-                node.id, node_path,
-                children_filter_dicts, children_ids,
-                children_level, is_leaf,
-                priority=active*len(node.children)
-            )
-            fut_to_node[fut] = node
-            return fut
-        
-        ac = as_completed([_submit(root)])
+            self.estimate_and_update_children(node.id, node_path, children_filter_dicts, children_ids, children_level, is_leaf)
 
-        for fut in ac:
-            active = fut.result()
-            node = fut_to_node.pop(fut)
+        queue = deque([root])
 
-            for child in node.children:
-                if child.children:
-                    ac.add(_submit(child, active))
+        while queue:
+            node = queue.popleft()
+            _submit(node)
+
+            if not node.children[0].is_leaf():
+                for child in node.children:
+                    queue.append(child)
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.
@@ -313,3 +264,162 @@ class TopDown():
             self.estimation_phase()
         finally:
             self.data_handler.cleanup_directories()
+
+    def _combine_child_constraints(self, num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set, n_cells: Optional[int] = None) -> List[SparseConstraint]:
+        '''Combine child publication constraints into joint SparseConstraints.
+
+        Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
+
+        The parent vector is a sparse CSC column vector, so consistency constraints are emitted only
+        for its non-zero cells (its support). Cells where the parent is 0 need no constraint: the
+        optimizer does not create child variables there, so they are structurally 0 and the
+        consistency sum(children) == 0 holds automatically.
+
+        This function translates child-local SparseConstraints (indexed 0..n_cells-1) to joint-space
+        SparseConstraints (indexed over the global indices), filtering to only active cells
+        (pruned cells are dropped from the coefficients).
+
+        Args:
+            num_children (int): Number of child nodes.
+            contingency_vector (sp.csc_matrix): The parent's sparse cell-count vector, shape (n_cells, 1).
+            constraints (List): List of Constraint objects (one list per child). Each constraint's
+                to_sparse_constraint() method will be called to get SparseConstraint representations.
+            active_set (set): Active joint-space global indices {k*n_cells + j} (parent support expanded
+                over children). Cells outside it are pruned and dropped from constraints.
+            n_cells (Optional[int]): Number of contingency cells. Defaults to the worker-global
+                _data_handler.n_cells; callers in the main process (no worker globals) must pass it.
+
+        Returns:
+            List[SparseConstraint]: List of SparseConstraints for the joint optimization problem.
+        '''
+        joint_constraints = []
+        
+        # Per-child constraints: convert each constraint to SparseConstraint via to_sparse_constraint()
+        # Offset them to joint space (base + j) and filter to only active cells.
+        start = 0
+        for child_constraints in constraints:
+            base = start
+
+            for sparse_constraint in child_constraints:
+                new_sparse_constraint = sparse_constraint.prune_to_active_space(base, active_set)
+                if new_sparse_constraint is not None: joint_constraints.append(new_sparse_constraint)
+            start += n_cells
+
+        # Consistency constraints: parent value at each non-zero cell = sum of child values at that cell.
+        # Authored directly in joint space with all indices active (parent support ensures this).
+        for index, value in zip(contingency_vector.indices, contingency_vector.data):
+            index = int(index)
+            indices_to_sum = np.array([index + i * n_cells for i in range(num_children)])
+
+            joint_constraints.append(
+                SparseConstraint(
+                    indices=indices_to_sum,
+                    sense="=",
+                    rhs=float(value)
+                )
+            )
+
+        return joint_constraints
+
+    def _check_node_correctness(self, parent_vector: sp.csc_matrix, children_vectors: sp.csc_matrix) -> None:
+        '''Checks that the sum of the values in the parent node vector
+        is equal to the sum of the values in its children vectors.
+
+        Args:
+            parent_vector (sp.csc_matrix): Contingency vector of the parent node.
+            children_vectors (sp.csc_matrix): Concatenated contingency vectors of the child nodes.
+        '''
+        parent_sum = parent_vector.data.sum()
+        children_sum = children_vectors.data.sum()
+
+        if parent_sum != children_sum:
+            print(f"\nError: The sum of the children nodes' contingency vectors "
+                f"({children_sum}) does not equal the parent node's contingency vector ({parent_sum}).")
+
+    def estimate_and_update_children(self, node_id: int, node_path: str, children_filter_dicts: List[Dict],
+                                    children_ids: List[int], children_level: int, is_leaf: bool = False) -> None:
+        '''Solve optimization for a node considering its children and update their vectors.
+
+        Args:
+            node_id (int): The unique ID of the parent node.
+            node_path (str): Path to contigency vector file.
+            children_filter_dicts (List[Dict[str, Any]]): List of filter dictionaries for each child.
+            children_ids (List[int]): List of node IDs for each child (for pre-computed noise lookup).
+            children_level (int): Level of all children (they all share the same level).
+            is_leaf (bool): Whether children are leaf nodes. Defaults to False.
+
+        Returns:
+            float: Time spent writing microdata files
+        '''
+        contingency_vector = self.data_handler.load_vector(node_path)
+
+        # Materialize and combine children vectors and constraints
+        children_vectors = []
+        children_constraints = []
+
+        for filter_dict, child_id in zip(children_filter_dicts, children_ids):
+            child_vector, child_constraint = self.data_handler.materialize_node_data(filter_dict, self.constraints[children_level], self.Q)
+            
+            self.privacy_mechanism.add_noise(child_vector, children_level, self.query_sensitivity)
+            children_vectors.append(child_vector)
+            children_constraints.append(child_constraint)
+
+        # Constraints are adapted to the new vector size.
+        # Also create others to ensure consistency in the number of rows per category in the parent.
+        # The number of rows in the parent category must match the sum of rows of that category across all children.
+        n_cells = self.data_handler.n_cells
+        num_children = len(children_filter_dicts)
+        n_joint = num_children * n_cells
+
+        # Cells where the parent is non-zero. By non-negativity + consistency, children can only
+        # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j}
+        # so the optimizers instantiate variables only there. `active` stays an ordered list: the
+        # optimizer aligns its solution positionally to it across the real -> rounding solves.
+        #support = contingency_vector.indices
+        #active = [k * n_cells + int(j) for k in range(num_children) for j in support]
+        active = None
+
+        # Combine receives the active set so it can bake prune-to-0 + reindexing into the constraints.
+        joint_constraints = self._combine_child_constraints(num_children, contingency_vector,
+                                                    children_constraints, active, self.data_handler.n_cells)
+
+        optimizer = OptimizationModel(*self.optimizer) if self.optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*self.optimizer)
+
+        t1 = time.time()
+        x_tilde = optimizer.non_negative_real_estimation(
+            noisy_measurements=children_vectors,
+            node_id=node_id,
+            constraints=joint_constraints,
+            query_matrix=self.Q,
+            active=active
+        )
+        real_time = time.time() - t1
+
+        t1 = time.time()
+        joint_solution = optimizer.rounding_estimation(
+            x_tilde=x_tilde,
+            node_id=node_id,
+            constraints=joint_constraints,
+            active=active,
+            n=n_joint
+        )
+        rounding_time = time.time() - t1
+
+        if self.check_correctness: self._check_node_correctness(contingency_vector, joint_solution)
+
+        if not is_leaf: self.data_handler.update_child_vectors(joint_solution, children_filter_dicts)
+        else:
+            child_vectors = []
+            start = 0
+
+            for _ in children_filter_dicts:
+                end = start + n_cells
+                updated_vector = joint_solution[start:end]
+                child_vectors.append(updated_vector)
+                start = end
+
+            self.data_handler.write_microdata(node_id, child_vectors, children_filter_dicts)
+
+        print(f' [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+
+
