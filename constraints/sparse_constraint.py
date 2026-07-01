@@ -47,7 +47,8 @@ class SparseConstraint:
             )
 
         global_indices = self.indices + offset
-        mask = np.array([i in active_indices_set for i in global_indices])
+        active_indices_arr = np.fromiter(active_indices_set, dtype=global_indices.dtype)
+        mask = np.isin(global_indices, active_indices_arr)
 
         pruned_indices = global_indices[mask]
 
