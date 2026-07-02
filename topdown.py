@@ -32,7 +32,8 @@ class TopDown():
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
                  solver_options: dict = {}, domain: Optional[Dict[str, List]] = None,
-                 check_correctness: bool = False, optimizer_backend: str = 'pyoptinterface') -> None:
+                 check_correctness: bool = False, optimizer_backend: str = 'pyoptinterface',
+                 lite_mode: bool = False) -> None:
         """Initialize the TopDown algorithm.
 
         Args:
@@ -50,6 +51,8 @@ class TopDown():
                 for a sound DP guarantee. When None (or a column omitted), the domain is inferred
                 from the observed data with a warning. Passed through to DataHandler.
             check_correctness (bool): Whether to run correctness checks during execution. Defaults to False.
+            lite_mode (bool): When True, the privacy mechanism samples noise from the fast
+                numpy-based approximations instead of the OpenDP-backed ones.
 
         Attributes:
             data_handler (DataHandler): Manages data loading, preprocessing, and output.
@@ -76,6 +79,7 @@ class TopDown():
         self.data_handler.hierarchical_columns = hierarchy
         self.data_handler.query_columns = query_columns
 
+        privacy_mechanism.lite_mode = lite_mode
         self.privacy_mechanism: PrivacyMechanism = privacy_mechanism
 
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
@@ -158,7 +162,8 @@ class TopDown():
             input_file = self.data_handler.file_path, spill_dir = self.data_handler.spill_dir, microdata_dir = self.data_handler.microdata_dir,
             hierarchical_columns = self.hierarchical_columns, query_columns = self.query_columns,
             domains = self.data_handler.contingency_domain.domains,
-            privacy_mech_name = self.privacy_mechanism.name, level_params = self.privacy_mechanism.level_params, Q = self.Q, sensitivity = self.query_sensitivity,
+            privacy_mech_name = self.privacy_mechanism.name, level_params = self.privacy_mechanism.level_params,
+            lite_mode = self.privacy_mechanism.lite_mode, Q = self.Q, sensitivity = self.query_sensitivity,
             zarr_path = self.data_handler.noise_zarr_path, noisy_array_name = self.data_handler.noisy_array_name,
             check_correctness = self.check_correctness
         )

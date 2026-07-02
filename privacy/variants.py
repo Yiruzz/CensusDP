@@ -26,11 +26,17 @@ Noise sampling is delegated to the vectorized OpenDP-backed mechanisms in noisy.
 """
 
 import math
+import warnings
 import zarr
 import numpy as np
 from abc import ABC, abstractmethod
 
-from .noisy import sample_dgauss_optimized, sample_dlaplace_optimized
+from .noisy import (
+    sample_dgauss_optimized,
+    sample_dlaplace_optimized,
+    sample_dgauss_fast,
+    sample_dlaplace_fast,
+)
 
 from typing import Dict, List, Optional, Tuple
 
@@ -39,22 +45,50 @@ class PrivacyMechanism(ABC):
 
     add_noise(contingency_vector, level, sensitivity) draws calibrated integer noise from the
     appropriate OpenDP mechanism and adds it to the supplied vector in place.
+
+    lite_mode (bool): When True, add_noise draws from the fast numpy-based approximations
+        (sample_dgauss_fast / sample_dlaplace_fast) instead of the OpenDP-backed mechanisms.
+        The sampler function is resolved once, when lite_mode is set, rather than on every
+        add_noise call.
     """
+
+    # Subclasses bind these to the (optimized, fast) sampler pair they use.
+    _OPTIMIZED_SAMPLER = None
+    _FAST_SAMPLER = None
 
     def __init__(self, level_params: List[float]) -> None:
         if any(p <= 0 for p in level_params):
             raise ValueError("All per-level privacy parameters must be > 0.")
         self.level_params: List[float] = list(level_params)
+        self._lite_mode: bool = False
+        self._sampler = self._OPTIMIZED_SAMPLER
+
+    @property
+    def lite_mode(self) -> bool:
+        return self._lite_mode
+
+    @lite_mode.setter
+    def lite_mode(self, value: bool) -> None:
+        if value:
+            warnings.warn(
+                f"{self.name} running in lite_mode: sampling noise from the fast numpy "
+                f"approximation instead of the OpenDP-backed mechanism. This is NOT pure DP "
+                f"and should only be used for benchmarking / tests.",
+                stacklevel=2,
+            )
+        self._lite_mode = value
+        self._sampler = self._FAST_SAMPLER if value else self._OPTIMIZED_SAMPLER
 
     @property
     def name(self) -> str:
         return type(self).__name__
-    
+
     @property
     def param_spec(self) -> str:
         class_name = self.name
         levels_str = "_".join(f"{p:.3f}" for p in self.level_params)
-        return f"{class_name}_{levels_str}"
+        suffix = "_lite" if self.lite_mode else ""
+        return f"{class_name}_{levels_str}{suffix}"
 
     @abstractmethod
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
@@ -81,9 +115,12 @@ class PrivacyMechanism(ABC):
 class PureDP(PrivacyMechanism):
     """ε-DP via discrete Laplace. b = sensitivity / ε."""
 
+    _OPTIMIZED_SAMPLER = staticmethod(sample_dlaplace_optimized)
+    _FAST_SAMPLER = staticmethod(sample_dlaplace_fast)
+
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         scale = sensitivity / self.level_params[level]
-        contingency_vector += sample_dlaplace_optimized(scale, contingency_vector.size)
+        contingency_vector += self._sampler(scale, contingency_vector.size)
 
     def report_guarantee(self) -> str:
         return f"pure epsilon-DP: total epsilon = {sum(self.level_params):.6g} (sum per-level epsilon)"
@@ -92,9 +129,12 @@ class PureDP(PrivacyMechanism):
 class ZCDP(PrivacyMechanism):
     """ρ-zCDP via discrete Gaussian. σ = sqrt(sensitivity / (2ρ))."""
 
+    _OPTIMIZED_SAMPLER = staticmethod(sample_dgauss_optimized)
+    _FAST_SAMPLER = staticmethod(sample_dgauss_fast)
+
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         scale = math.sqrt(sensitivity / (2.0 * self.level_params[level]))
-        contingency_vector += sample_dgauss_optimized(scale, contingency_vector.size)
+        contingency_vector += self._sampler(scale, contingency_vector.size)
 
     def report_guarantee(self) -> str:
         return f"rho-zCDP: total rho = {sum(self.level_params):.6g} (sum per-level rho)"
@@ -172,6 +212,9 @@ class RenyiDP(PrivacyMechanism):
     _THETA_NEGLIGIBLE_SIGMA_SQ: float = 30.0
     _BISECTION_STEPS: int = 60
 
+    _OPTIMIZED_SAMPLER = staticmethod(sample_dgauss_optimized)
+    _FAST_SAMPLER = staticmethod(sample_dgauss_fast)
+
     def __init__(self, level_params: List[float], delta: float,
                  alphas: Optional[List[float]] = None) -> None:
         super().__init__(level_params)
@@ -186,7 +229,7 @@ class RenyiDP(PrivacyMechanism):
 
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         sigmas, _alpha = self._calibrate(sensitivity)
-        contingency_vector += sample_dgauss_optimized(sigmas[level], contingency_vector.size)
+        contingency_vector += self._sampler(sigmas[level], contingency_vector.size)
 
     def report_guarantee(self) -> str:
         # If the mechanism has been used at least once, report the calibrated α* and σ_i.

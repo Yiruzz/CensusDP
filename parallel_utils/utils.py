@@ -28,6 +28,7 @@ class WorkerInitializer(WorkerPlugin):
         domains: Dict[str, np.ndarray],
         privacy_mech_name: str,
         level_params: List[float],
+        lite_mode: bool,
         Q: Any,
         sensitivity: int,
         zarr_path: str,
@@ -50,6 +51,8 @@ class WorkerInitializer(WorkerPlugin):
             domains (Dict[str, np.ndarray]): Per-column sorted value arrays that define the contingency domain.
             privacy_mech_name (str): Key into ``MECHANISMS`` registry (e.g. ``'ZCDP'``).
             level_params (List[float]): Per-level privacy parameters passed to the mechanism constructor.
+            lite_mode (bool): When True, the worker's privacy mechanism samples noise from the
+                fast numpy-based approximations instead of the OpenDP-backed ones.
             Q (Any): Query matrix (sparse CSR or dense ndarray) applied to each node's histogram.
             sensitivity (int): L1/L2 sensitivity of Q (max column sum for binary Q).
             zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
@@ -73,6 +76,7 @@ class WorkerInitializer(WorkerPlugin):
         # Privacy mechanism
         self.privacy_mech_name: str = privacy_mech_name
         self.level_params: List[float] = level_params
+        self.lite_mode: bool = lite_mode
         self.Q: Any = Q
         self.sensitivity: int = sensitivity
 
@@ -109,6 +113,7 @@ class WorkerInitializer(WorkerPlugin):
         worker.data_handler.create_data_view()
 
         worker.privacy_mechanism = MECHANISMS[self.privacy_mech_name](self.level_params)
+        worker.privacy_mechanism.lite_mode = self.lite_mode
         worker.Q = self.Q
         worker.q_sensitivity = self.sensitivity
 
