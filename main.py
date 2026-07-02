@@ -16,7 +16,8 @@ from queries import QueryWorkload, col
 
 
 def main(process_until: str, queries: list[str], user_constraints: bool,
-         num_workers: int, check_correctness: bool, optimizer_backend: str, lite_mode: bool):
+         num_workers: int, check_correctness: bool, optimizer_backend: str, lite_mode: bool,
+         task_granularity: int):
     '''Main function to set variables and run the TopDown algorithm.'''
 
     ###################################
@@ -99,6 +100,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
         check_correctness=check_correctness,
         optimizer_backend=optimizer_backend,
         lite_mode=lite_mode,
+        task_granularity=task_granularity,
     )
 
     # Set the queries to be answered at each node of the tree.
@@ -236,6 +238,13 @@ if __name__ == "__main__":
         help="Use fast numpy-based noise approximations instead of the OpenDP",
     )
 
+    parser.add_argument(
+        "--task_granularity",
+        type=int,
+        default=1,
+        help="Number of per-node child-estimation jobs bundled into a single task during ",
+    )
+
     args = parser.parse_args()
 
-    main(args.process_until, args.queries, args.user_constraints, args.num_workers, args.check_correctness, args.optimizer, args.lite_mode)
+    main(args.process_until, args.queries, args.user_constraints, args.num_workers, args.check_correctness, args.optimizer, args.lite_mode, args.task_granularity)

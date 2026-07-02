@@ -7,7 +7,7 @@ from dask.distributed import Client, LocalCluster, as_completed
 dask.config.set({"distributed.worker.multiprocessing-method": "spawn"})
 
 from parallel_utils.utils import WorkerInitializer
-from parallel_utils.estimation_phase import estimate_and_update_children
+from parallel_utils.estimation_phase import estimate_and_update_children_batch
 
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
@@ -33,7 +33,7 @@ class TopDown():
                  privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
                  solver_options: dict = {}, domain: Optional[Dict[str, List]] = None,
                  check_correctness: bool = False, optimizer_backend: str = 'pyoptinterface',
-                 lite_mode: bool = False) -> None:
+                 lite_mode: bool = False, task_granularity: int = 1) -> None:
         """Initialize the TopDown algorithm.
 
         Args:
@@ -53,6 +53,9 @@ class TopDown():
             check_correctness (bool): Whether to run correctness checks during execution. Defaults to False.
             lite_mode (bool): When True, the privacy mechanism samples noise from the fast
                 numpy-based approximations instead of the OpenDP-backed ones.
+            task_granularity (int): Number of per-node child-estimation into a single
+                task submitted to the dask scheduler during the estimation phase. Defaults to 1
+                (one task per node, the finest granularity).
 
         Attributes:
             data_handler (DataHandler): Manages data loading, preprocessing, and output.
@@ -64,7 +67,11 @@ class TopDown():
                                                 and solver options dict).
             constraints (Dict[int, List[Constraint]]): Constraints registered per tree level.
             workers (int): Number of parallel workers for the estimation phase.
+            task_granularity (int): Batch size for grouping child-estimation jobs into dask tasks.
         """
+        if task_granularity < 1:
+            raise ValueError(f"task_granularity must be >= 1, got {task_granularity}.")
+
         n_levels = len(hierarchy) + 1
         if len(privacy_mechanism.level_params) != n_levels:
             raise ValueError(
@@ -101,6 +108,7 @@ class TopDown():
 
         self.check_correctness = check_correctness
         self.optimizer_backend = optimizer_backend
+        self.task_granularity = task_granularity
 
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
@@ -216,34 +224,43 @@ class TopDown():
         path = self.data_handler.spill_path(root.filter_dict)
         self.data_handler.spill_vector(path, root.contingency_vector)
 
-        fut_to_node = {}
+        fut_to_nodes = {}
 
-        def _submit(node, active=1):
-            node_path = self.data_handler.spill_path(node.filter_dict)
-            children_filter_dicts = [child.filter_dict for child in node.children]
-            children_ids = [child.id for child in node.children]
-            children_level = node.children[0].level
-            is_leaf = node.children[0].is_leaf()
-            
+        def _submit(nodes, active=1):
+
+            jobs = []
+            total_children = 0
+
+            for node in nodes:
+                node_path = self.data_handler.spill_path(node.filter_dict)
+                children_filter_dicts = [child.filter_dict for child in node.children]
+                children_ids = [child.id for child in node.children]
+                children_level = node.children[0].level
+                is_leaf = node.children[0].is_leaf()
+                
+                jobs.append((node.id, node_path, children_filter_dicts, children_ids, children_level, is_leaf))
+                total_children += len(node.children)
+
             fut = self.client.submit(
-                estimate_and_update_children,
-                node.id, node_path,
-                children_filter_dicts, children_ids,
-                children_level, is_leaf,
-                priority=active*len(node.children)
+                estimate_and_update_children_batch,
+                jobs,
+                priority=active*total_children
             )
-            fut_to_node[fut] = node
+            fut_to_nodes[fut] = nodes
             return fut
-        
-        ac = as_completed([_submit(root)])
+
+        ac = as_completed([_submit([root])])
 
         for fut in ac:
-            active = fut.result()
-            node = fut_to_node.pop(fut)
+            results = fut.result()
+            nodes = fut_to_nodes.pop(fut)
 
-            for child in node.children:
-                if child.children:
-                    ac.add(_submit(child, active))
+            pending = [(child, active) for node, active in zip(nodes, results)
+                       for child in node.children if child.children]
+
+            for i in range(0, len(pending), self.task_granularity):
+                batch = pending[i:i + self.task_granularity]
+                ac.add(_submit([child for child, _ in batch], max(active for _, active in batch)))
 
     def _estimate_node_individually(self, node: HierarchicalNode) -> None:
         '''Solve optimization for a node's own contingency vector.

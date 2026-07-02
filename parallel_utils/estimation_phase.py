@@ -5,7 +5,7 @@ from dask.distributed import get_worker
 
 from constraints.sparse_constraint import SparseConstraint
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 
 def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set, n_cells: Optional[int] = None) -> List[SparseConstraint]:
@@ -166,4 +166,16 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
     print(f' [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
     return len(active)
+
+def estimate_and_update_children_batch(jobs: List[Tuple]) -> List[int]:
+    '''Run estimate_and_update_children for several nodes within a single task.
+    Args:
+        jobs (List[Tuple]): Each tuple is the positional argument list for one
+            estimate_and_update_children call, i.e.
+            (node_id, node_path, children_filter_dicts, children_ids, children_level, is_leaf).
+
+    Returns:
+        List[int]: Result of estimate_and_update_children for each job, in the same order.
+    '''
+    return [estimate_and_update_children(*job) for job in jobs]
 
