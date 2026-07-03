@@ -225,7 +225,7 @@ class OptimizationModel:
 
         # If everything is pruned, no binary decisions needed: all zeros.
         if not active:
-            return sp.csc_matrix((n, 1), dtype=np.int64)
+            return sp.csc_matrix((n, 1), dtype=self._solution_type)
 
         # Maps each global index to its position in the `active` list (and therefore in
         # `x_floor`, which is aligned to `active`). x_floor runs from 0 to len(active)-1,

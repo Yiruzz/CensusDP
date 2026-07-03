@@ -685,5 +685,5 @@ class DataHandler:
                         pass
         
         if done % max(1, n_nodes // 20) != 0:
-            print(f"Progress: {done % max(1, n_nodes // 20)}/{n_nodes}")
+            print(f"Progress: {n_nodes}/{n_nodes}")
         self.noise_zarr_group.attrs["n_rows_generated"] = done
