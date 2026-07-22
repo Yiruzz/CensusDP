@@ -209,3 +209,56 @@ class ContingencyDomain:
     def select(self, mask: np.ndarray) -> np.ndarray:
         """Return the flat indices where a length-n_cells boolean mask is True."""
         return np.flatnonzero(mask)
+
+    # ------------------------------------------------------------------
+    # Marginals / sub-domains
+    # ------------------------------------------------------------------
+
+    def subdomain(self, columns: Sequence[str]) -> "ContingencyDomain":
+        """Build the ContingencyDomain of a marginal over a subset of columns.
+
+        The sub-domain reuses this domain's declared per-column value arrays, so
+        cell ranks stay consistent. ``columns`` fixes the significance order of
+        the sub-domain (first = most significant), and must be a subset of
+        self.columns. This is how a junction-tree bag (or separator) gets its own
+        small cell space without ever touching the global n_cells.
+
+        Args:
+            columns: Ordered subset of self.columns.
+
+        Returns:
+            ContingencyDomain over ``columns``.
+        """
+        missing = [c for c in columns if c not in self.domains]
+        if missing:
+            raise ValueError(f"Columns not in domain: {missing}")
+        return ContingencyDomain(list(columns), {c: self.domains[c] for c in columns})
+
+    def project_to(self, columns: Sequence[str]) -> np.ndarray:
+        """Map every cell of this domain to its cell index in subdomain(columns).
+
+        Uses the same mixed-radix group id as a marginal query: for each cell,
+        the returned value is the flat index that cell projects to when the
+        non-``columns`` attributes are summed out. Cells sharing a projected id
+        form one marginal group. Length n_cells.
+
+        Args:
+            columns: Ordered subset of self.columns (same order used to build the
+                target sub-domain via subdomain()).
+
+        Returns:
+            np.ndarray: Length-n_cells int array of target sub-cell indices.
+        """
+        missing = [c for c in columns if c not in self.domains]
+        if missing:
+            raise ValueError(f"Columns not in domain: {missing}")
+        gid = np.zeros(self.n_cells, dtype=np.int64)
+        stride = 1
+        # For each column in the target subdomain, compute its contribution to the mixed-radix index.
+        # The contribution is the rank of the column's value in its domain, multiplied by the
+        # stride (place value) of that column in the subdomain. The stride is the product of the sizes
+        # of all columns to the right in the subdomain. We accumulate this contribution for each column.
+        for c in reversed(list(columns)):
+            gid += self.axis_ranks(c) * stride
+            stride *= len(self.domains[c])
+        return gid
