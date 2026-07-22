@@ -1,4 +1,5 @@
 import numpy as np
+from typing import FrozenSet
 
 from .logical_expressions import LogicalExpression
 from constraints.sparse_constraint import SparseConstraint
@@ -18,6 +19,9 @@ class AggregateConstraint(Constraint, ABC):
         """
         self.expression = expression
         self.value = value
+
+    def scope(self) -> FrozenSet[str]:
+        return self.expression.scope()
 
 class SumEqual(AggregateConstraint):
     """Represents a sum equality constraint: Sum(expression) == value"""

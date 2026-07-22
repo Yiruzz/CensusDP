@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Any
+from typing import Any, FrozenSet
 from abc import ABC
 
 from .base import LogicalExpression
@@ -14,6 +14,9 @@ class AtomicExpression(LogicalExpression, ABC):
         self.variable_id = variable_id
         self.value = value
 
+    def scope(self) -> FrozenSet[str]:
+        return frozenset({self.variable_id})
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}('{self.variable_id}', {self.value})"
 
@@ -23,10 +26,16 @@ class TrueExpression(LogicalExpression):
     def reduce(self, domain) -> np.ndarray:
         return np.ones(domain.n_cells, dtype=bool)
 
+    def scope(self) -> FrozenSet[str]:
+        return frozenset()
+
 class FalseExpression(LogicalExpression):
     '''Represents a logical expression that is always False.'''
     def reduce(self, domain) -> np.ndarray:
         return np.zeros(domain.n_cells, dtype=bool)
+
+    def scope(self) -> FrozenSet[str]:
+        return frozenset()
 
 
 class Equal(AtomicExpression):

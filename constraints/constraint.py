@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import FrozenSet
 from constraints.sparse_constraint import SparseConstraint
 
 class Constraint(ABC):
@@ -17,5 +18,18 @@ class Constraint(ABC):
             domain: ContingencyDomain used as the cell space for evaluation.
         Returns:
             SparseConstraint: Sparse linear representation consumed by the optimizer.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def scope(self) -> FrozenSet[str]:
+        """Return the set of attribute columns this constraint references.
+
+        Used to seed the junction tree: a constraint can only be enforced within
+        a bag (marginal) whose columns contain its whole scope, so each scope
+        becomes a mandatory clique of the interaction graph.
+
+        Returns:
+            frozenset[str]: The referenced query columns (possibly empty).
         """
         raise NotImplementedError()

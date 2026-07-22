@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import List
+from typing import FrozenSet, List
 import numpy as np
 
 from .base import LogicalExpression
@@ -15,6 +15,9 @@ class CompoundExpression(LogicalExpression, ABC):
                     f"All sub-expressions must be LogicalExpression objects. Got: {type(arg)} in {self.__class__.__name__}."
                 )
         self.expressions = expressions
+
+    def scope(self) -> FrozenSet[str]:
+        return frozenset().union(*(expr.scope() for expr in self.expressions))
 
     def __repr__(self) -> str:
         exprs_str = ", ".join(repr(e) for e in self.expressions)
