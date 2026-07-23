@@ -12,7 +12,9 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
+from constraints.sparse_constraint import SparseConstraint
 from domain import ContingencyDomain
+from graph import JunctionTree
 from parallel_utils.noise_generation import initialize_mechanism, generate_noise_row
 from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
@@ -41,6 +43,12 @@ class DataHandler:
             contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces dense Cartesian-product table.
             n_cells (Optional[int]): Total number of contingency cells.
             dtype (str): NumPy data type for all arrays (default: 'int64').
+
+            junction_tree (Optional[JunctionTree]): Factored representation of the cell space.
+                When set, the pipeline measures one marginal per bag instead of the full joint.
+            bag_domains (List[ContingencyDomain]): Sub-domain of each bag, aligned to junction_tree.bags.
+            bag_offsets (List[int]): Start index of each bag inside the node's concatenated marginal vector.
+            marginal_width (Optional[int]): Length of that concatenated vector (= sum of bag n_cells).
 
             hierarchical_columns (List[str]): Columns defining the tree hierarchy levels.
             query_columns (List[str]): Columns for generating the contingency table.
@@ -74,6 +82,14 @@ class DataHandler:
         self.contingency_domain: Optional[ContingencyDomain] = None
         self.n_cells: Optional[int] = None
         self.dtype: str = 'int64'
+
+        # Factored (junction-tree) cell space. Built by build_marginal_domains();
+        # left empty when running the legacy full-joint pipeline.
+        self.junction_tree: Optional[JunctionTree] = None
+        self.bag_domains: List[ContingencyDomain] = []
+        self.bag_offsets: List[int] = []
+        self.marginal_width: Optional[int] = None
+        self._separator_projections: Dict[Tuple[int, Tuple[str, ...]], np.ndarray] = {}
 
         # Columns to use
         self.hierarchical_columns: List[str] = []
@@ -204,6 +220,64 @@ class DataHandler:
 
         print("\n Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
 
+    # ------------------------------------------------------------------
+    # Factored (junction-tree) cell space
+    # ------------------------------------------------------------------
+
+    def build_marginal_domains(self, junction_tree: JunctionTree) -> None:
+        '''Bind a junction tree and derive the per-bag cell spaces.
+
+        Each bag gets its own small ContingencyDomain (a subdomain of the global one, so
+        per-column value ranks stay consistent). The bags are laid out back-to-back in a
+        single per-node vector of length marginal_width; bag_offsets gives each block's
+        start. That layout is what gets measured, noised and spilled — the global joint
+        (n_cells) is never materialized.
+
+        Args:
+            junction_tree (JunctionTree): Tree whose bags are the marginals to measure.
+        '''
+        assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
+
+        self.junction_tree = junction_tree
+        self.bag_domains = [self.contingency_domain.subdomain(bag) for bag in junction_tree.bags]
+
+        offsets: List[int] = []
+        total = 0
+        for domain in self.bag_domains:
+            offsets.append(total)
+            total += domain.n_cells
+        self.bag_offsets = offsets
+        self.marginal_width = total
+        self._separator_projections = {}
+
+        print(f"\n Junction tree bound: {junction_tree.n_bags} bags, marginal width {total}", end=' ')
+
+    def separator_projection(self, bag_index: int, columns: Sequence[str]) -> np.ndarray:
+        '''Map each cell of a bag to its cell index in the separator sub-domain.
+
+        Cached per (bag, separator) since the same maps are reused at every node for the
+        separator-consistency constraints and the microdata reconstruction.
+
+        Args:
+            bag_index (int): Index of the bag in junction_tree.bags.
+            columns (Sequence[str]): Separator columns (a subset of the bag's columns).
+
+        Returns:
+            np.ndarray: Length-(bag n_cells) array of separator cell indices.
+        '''
+        key = (bag_index, tuple(columns))
+        projection = self._separator_projections.get(key)
+        if projection is None:
+            projection = self.bag_domains[bag_index].project_to(columns)
+            self._separator_projections[key] = projection
+        return projection
+
+    @property
+    def noise_width(self) -> int:
+        '''Length of a node's measurement vector: the concatenated marginals when the
+        factored pipeline is active, the full joint otherwise.'''
+        return self.marginal_width if self.marginal_width is not None else self.n_cells
+
     def build_hierarchical_tree(self) -> HierarchicalTree:
         '''Build a hierarchical tree structure based on hierarchical columns.
 
@@ -272,17 +346,22 @@ class DataHandler:
 
         return n_nodes
 
-    def _reduce_dataframe(self, filters: Dict[str, Any], con: Optional["duckdb.DuckDBPyConnection"] = None) -> pd.DataFrame:
+    def _reduce_dataframe(self, filters: Dict[str, Any], con: Optional["duckdb.DuckDBPyConnection"] = None,
+                          columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
         '''Query contingency table with optional filters from DuckDB.
 
-        Executes a SQL query to compute the contingency table grouped by query columns
-        with counts. Applies optional filters from filter_dict.
+        Executes a SQL query to compute the contingency table grouped by the requested
+        columns with counts. Applies optional filters from filter_dict.
 
         Args:
             filters (Dict[str, Any]): Dictionary mapping column names to values for filtering.
+            con (Optional[duckdb.DuckDBPyConnection]): Per-thread cursor; defaults to the shared connection.
+            columns (Optional[Sequence[str]]): Columns to group by. Defaults to all query
+                columns (full joint); a junction-tree bag passes its own column subset so
+                the aggregation stays small.
 
         Returns:
-            pd.DataFrame: DataFrame with query columns and "count" column.
+            pd.DataFrame: DataFrame with the grouped columns and a "count" column.
         '''
         # Allow callers (e.g. parallel in-memory materialization) to pass a per-thread
         # cursor; DuckDB connections are not safe to share concurrently across threads.
@@ -291,9 +370,10 @@ class DataHandler:
 
         # Build and combine filter conditions.
         # Filter the data to the subset represented by the node.
+        columns = list(columns) if columns is not None else self.query_columns
         conditions = [f'"{col}" = {repr(val)}' for col, val in filters.items()]
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        cols_sql = ", ".join(f'"{c}"' for c in self.query_columns)
+        cols_sql = ", ".join(f'"{c}"' for c in columns)
 
         # Filter the data and compute counts for each combination of values.
         # This creates a compact, aggregated dataset.
@@ -307,8 +387,7 @@ class DataHandler:
 
         # Return only the columns associated with the queries and counts.
         # Hierarchical columns are not used.
-        col_names = self.query_columns + ["count"]
-        return pd.DataFrame(result, columns=col_names)
+        return pd.DataFrame(result, columns=columns + ["count"])
 
     def _create_contingency_vector(self, filters: Optional[Dict[str, Any]] = None, con: Optional["duckdb.DuckDBPyConnection"] = None) -> sp.csr_matrix:
         '''Create a sparse contingency (column) vector for records matching filters.
@@ -378,6 +457,85 @@ class DataHandler:
 
         return contingency_vector, level_constraints
 
+    def _create_marginal_vector(self, bag_index: int, filters: Dict[str, Any],
+                                con: Optional["duckdb.DuckDBPyConnection"] = None) -> np.ndarray:
+        '''Measure one bag's marginal for the records matching filters.
+
+        A GROUP BY over the bag's columns only, encoded into the bag's sub-domain. The
+        result is dense but small (the bag's n_cells), so no sparse container is needed.
+
+        Args:
+            bag_index (int): Index of the bag in junction_tree.bags.
+            filters (Dict[str, Any]): The node's filter conditions (column -> value mapping).
+            con (Optional[duckdb.DuckDBPyConnection]): Per-thread cursor for concurrent measurement.
+
+        Returns:
+            np.ndarray: Length-(bag n_cells) vector of counts.
+        '''
+        domain = self.bag_domains[bag_index]
+        data = self._reduce_dataframe(filters, con, columns=domain.columns)
+
+        counts = np.zeros(domain.n_cells, dtype=self.dtype)
+        if len(data):
+            np.add.at(counts, domain.encode(data), data["count"].values.astype(self.dtype))
+        return counts
+
+    def materialize_node_marginals(self, filter_dict: Dict[str, Any], constraints: List[Constraint],
+                                   con: Optional["duckdb.DuckDBPyConnection"] = None) -> Tuple[List[np.ndarray], List[SparseConstraint]]:
+        '''Measure every bag marginal for a node and prepare its constraints.
+
+        The factored counterpart of materialize_node_data: instead of one Q @ x over the
+        full joint, each bag is measured independently. Constraints are assigned to a bag
+        whose columns contain their whole scope (guaranteed by the junction-tree build,
+        which embeds each scope as a mandatory clique) and their indices are shifted into
+        that bag's block of the node's concatenated marginal vector.
+
+        Args:
+            filter_dict (Dict[str, Any]): The node's filter conditions (column -> value mapping).
+            constraints (List[Constraint]): Constraints for the node considering its level.
+            con (Optional[duckdb.DuckDBPyConnection]): Per-thread cursor for concurrent measurement.
+
+        Returns:
+            Tuple[List[np.ndarray], List[SparseConstraint]]: One marginal per bag (aligned to
+                junction_tree.bags) and the constraints in concatenated-marginal index space.
+
+        Raises:
+            ValueError: If a constraint's scope is not contained in any bag.
+        '''
+        assert self.junction_tree is not None, "No junction tree bound. Call build_marginal_domains first."
+
+        marginals = [self._create_marginal_vector(i, filter_dict, con) for i in range(len(self.bag_domains))]
+
+        node_constraints: List[SparseConstraint] = []
+        for constraint in constraints:
+            scope = constraint.scope()
+            # We only need to find one bag that contains the constraint's scope, since in the optimizer, 
+            # we need to apply the constraint just once. This is because we also have a constraint to
+            # ensure that the marginals of the bags are consistent with each other, so if one bag satisfies
+            # the constraint, all other bags that contain the scope will also satisfy it by transitivity.
+            bag_index = self.junction_tree.bag_of_scope(scope)
+            if bag_index is None:
+                raise ValueError(
+                    f"Constraint scope {set(scope)} is not contained in any bag; it must be "
+                    f"passed as a mandatory clique when building the junction tree."
+                )
+
+            match constraint:
+                case ContextualAggregateConstraint():
+                    # The bag's marginal sums to the node total, so contextual values
+                    # (e.g. the real total) are computed from it directly.
+                    constraint.apply_aggregation_function(marginals[bag_index])
+
+            sparse = constraint.to_sparse_constraint(self.bag_domains[bag_index])
+            node_constraints.append(SparseConstraint(
+                indices=sparse.indices + self.bag_offsets[bag_index],
+                coefs=sparse.coefs,
+                sense=sparse.sense,
+                rhs=sparse.rhs,
+            ))
+
+        return marginals, node_constraints
+
     def spill_path(self, filter_dict: Dict[str, Any]) -> str:
         '''Get the spill file path from a filter dictionary.
 
@@ -426,6 +584,37 @@ class DataHandler:
         contingency_vector = sp.load_npz(path)
         os.remove(path)
         return contingency_vector
+
+    def spill_marginals(self, path: str, marginals: List[np.ndarray]) -> None:
+        '''Write a node's per-bag marginals to disk and free them from RAM.
+
+        Stored as a multi-array .npz (one entry per bag) rather than scipy's sparse
+        format: bag vectors are small and dense, so compression alone is enough.
+
+        Args:
+            path (str): The file path where the marginals will be spilled.
+            marginals (List[np.ndarray]): One vector per bag, aligned to junction_tree.bags.
+        '''
+        os.makedirs(self.spill_dir, exist_ok=True)
+        np.savez_compressed(path, *marginals)
+
+    def load_marginals(self, path: str) -> List[np.ndarray]:
+        '''Reload a node's per-bag marginals from disk and delete the file.
+
+        Args:
+            path (str): The file path to load the marginals from.
+
+        Returns:
+            List[np.ndarray]: One vector per bag, in bag order.
+        '''
+        with np.load(path) as stored:
+            # np.savez names positional arrays arr_0, arr_1, ... Index by position rather
+            # than iterating stored.files: the key order there follows the zip entry order,
+            # which is an implementation detail, and a silent reorder would misalign the
+            # marginals from junction_tree.bags.
+            marginals = [stored[f"arr_{i}"] for i in range(len(stored.files))]
+        os.remove(path)
+        return marginals
 
     def update_child_vectors(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
@@ -515,8 +704,10 @@ class DataHandler:
         '''Check if compatible pre-computed noise vectors exist and reuse them if possible.
 
         Searches for Zarr files matching the mechanism and parameters. Selects the first
-        compatible file with n_nodes >= requested and n_cells >= requested. Requires exact
+        compatible file with n_nodes >= requested and width >= requested. Requires exact
         match on mechanism and parameters; compatible files can have more nodes/cells.
+        The width is the node measurement length: the concatenated marginals under the
+        factored pipeline, the full joint otherwise.
 
         Args:
             n_nodes (int): Requested number of nodes
@@ -525,7 +716,7 @@ class DataHandler:
         Returns:
             bool: True if compatible vectors were found and loaded, False if new file created
         '''
-        n_cells = self.n_cells
+        n_cells = self.noise_width
 
         # Try to find a compatible existing file
         compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec)
@@ -627,12 +818,14 @@ class DataHandler:
         '''
         compressor = numcodecs.Blosc(cname="zstd", clevel=self.COMPRESSION_LEVEL, shuffle=numcodecs.Blosc.BITSHUFFLE)
 
+        width = self.noise_width
+
         self.noise_zarr_group = zarr.open_group(zarr_path, mode="w", zarr_format=2)
-        self.noise_zarr_group.create_array(self.noisy_array_name, shape=(n_nodes, self.n_cells),
-                                      chunks=(1, self.n_cells), dtype=self.dtype, compressor=compressor)
+        self.noise_zarr_group.create_array(self.noisy_array_name, shape=(n_nodes, width),
+                                      chunks=(1, width), dtype=self.dtype, compressor=compressor)
 
         self.noise_zarr_group.attrs["n_expected_nodes"] = n_nodes
-        self.noise_zarr_group.attrs["n_cells"] = self.n_cells
+        self.noise_zarr_group.attrs["n_cells"] = width
         self.noise_zarr_group.attrs["n_rows_generated"] = 0
 
     def generate_noise_vectors(self, n_workers: int, n_nodes: int, gen: Iterable[Tuple[int, int]],
@@ -660,7 +853,7 @@ class DataHandler:
 
         with ProcessPoolExecutor(max_workers=n_workers, initializer=initialize_mechanism,
                                  initargs=(privacy_mech_name, level_params,
-                                           self.n_cells, self.dtype, query_sensitivity)) as executor:
+                                           self.noise_width, self.dtype, query_sensitivity)) as executor:
 
             for node_id, level in itertools.islice(task_iter, WINDOW_SIZE):
                 fut = executor.submit(generate_noise_row, level)
