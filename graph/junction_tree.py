@@ -16,12 +16,57 @@ and microdata phases.
 from __future__ import annotations
 
 from collections import deque
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from math import prod
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import networkx as nx
 
 # A bag / clique is a tuple of column names in canonical (global) order.
 Bag = Tuple[str, ...]
+
+
+def _min_weight_chordal(graph: nx.Graph, weights: Mapping[str, int]) -> nx.Graph:
+    """Triangulate a graph with a cardinality aware elimination order.
+
+    A junction tree needs a chordal graph.
+    It functions as follows: pick an order and, for each vertex, connect its still-present 
+    neighbours into a clique before removing it. Any order yields a chordal graph the order
+    only decides how big the resulting cliques are.
+
+    networkx's default order (``complete_to_chordal_graph``) is blind to domain sizes, so
+    it can eliminate a high-cardinality column early and fuse it into a huge clique. The
+    *min-weight* heuristic here instead removes, at each step, the vertex whose clique
+    (itself + its neighbours) has the smallest product of cardinalities - the smallest
+    marginal to build. It minimises the bags cell count, not the edge count, and can cut
+    the width by orders of magnitude with no change to which constraints are enforceable.
+
+    Args:
+        graph: The interaction graph (a copy is triangulated; the original is untouched).
+        weights: Column -> domain cardinality.
+
+    Returns:
+        A chordal supergraph of ``graph`` (its edges plus the fill edges added).
+    """
+    # remaining is the shrinking elimination graph 
+    # chordal keeps every vertex and accumulates the needed fill edges.
+    remaining = graph.copy()
+    chordal = graph.copy()
+    while remaining.number_of_nodes():
+        # Cheapest clique right now = vertex with the smallest (itself + neighbours) product.
+        victim = min(
+            remaining.nodes(),
+            key=lambda v: prod([weights[v]] + [weights[u] for u in remaining.neighbors(v)]),
+        )
+        # Make the victim's neighbours a clique: each missing pair is a fill edge (a chord)
+        neighbours = list(remaining.neighbors(victim))
+        for a in range(len(neighbours)):
+            for b in range(a + 1, len(neighbours)):
+                if not remaining.has_edge(neighbours[a], neighbours[b]):
+                    remaining.add_edge(neighbours[a], neighbours[b])
+                    chordal.add_edge(neighbours[a], neighbours[b])
+        # Its neighbours are now connected, so the rest stays a valid graph.
+        remaining.remove_node(victim)
+    return chordal
 
 
 def _max_weight_spanning_tree(bag_sets: List[frozenset]) -> Dict[int, List[int]]:
@@ -85,17 +130,22 @@ class JunctionTree:
     # Construction
     # ------------------------------------------------------------------
     @classmethod
-    def build(cls, columns: Sequence[str], cliques: Iterable[Iterable[str]]) -> "JunctionTree":
+    def build(cls, columns: Sequence[str], cliques: Iterable[Iterable[str]],
+              weights: Optional[Mapping[str, int]] = None) -> "JunctionTree":
         """Build a junction tree from a set of cliques over columns.
 
         Each clique (a mandatory constraint scope or a heuristic-selected
-        marginal) is embedded as a fully-connected subgraph of the interaction
-        graph; the graph is then triangulated and its maximal cliques become the
+        marginal) is embedded as a connected subgraph of the interaction
+        graph. The graph is then triangulated and its maximal cliques become the
         bags.
 
         Args:
             columns: All attribute columns.
             cliques: Iterable of column subsets to embed as cliques.
+            weights: Optional column -> domain cardinality. When given, the graph is
+                triangulated with a cardinality-aware (min-weight) elimination order so
+                the bags stay small in CELLS, not just in column count. Without it the
+                default fill-minimising triangulation is used.
 
         Returns:
             The constructed JunctionTree.
@@ -112,8 +162,12 @@ class JunctionTree:
                 for b in range(a + 1, len(nodes)):
                     graph.add_edge(nodes[a], nodes[b])
 
-        # Triangulate the graph and extract the maximal cliques as bags.
-        chordal, _ = nx.complete_to_chordal_graph(graph)
+        # Triangulate the graph and extract the maximal cliques as bags. 
+        if weights is not None:
+            # The min-weight order keeps the bags small in cells when cardinalities are known.
+            chordal = _min_weight_chordal(graph, weights)
+        else:
+            chordal, _ = nx.complete_to_chordal_graph(graph)
         bags: List[Iterable[str]] = [tuple(cl) for cl in nx.chordal_graph_cliques(chordal)]
 
         # Every column must appear in at least one bag; isolated columns (no
