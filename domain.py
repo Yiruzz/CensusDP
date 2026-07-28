@@ -20,9 +20,11 @@ The same applies to our mixed-radix encoding, but instead of base 10, we have di
 according to the number of values in their domains.
 """
 
+import math
+
 import numpy as np
 
-from typing import Dict, List, Mapping, Sequence, Any
+from typing import Dict, List, Mapping, Optional, Sequence, Any
 
 
 class ContingencyDomain:
@@ -35,8 +37,9 @@ class ContingencyDomain:
             column. The cell index space is the Cartesian product of these.
         sizes (np.ndarray): Number of values per column (the radix of each digit).
         strides (np.ndarray): Place value of each column = product of sizes to its
-            right (last stride == 1).
-        n_cells (int): Total number of cells = product of sizes.
+            right (last stride == 1). Lazily computed on first access.
+        n_cells (int): Total number of cells = product of sizes. Lazily computed on
+            first access.
     """
 
     def __init__(self, columns: Sequence[str], domains: Mapping[str, np.ndarray]) -> None:
@@ -47,14 +50,38 @@ class ContingencyDomain:
 
         self.sizes: np.ndarray = np.array([len(self.domains[c]) for c in self.columns], dtype=np.int64)
 
-        # strides[i] = product of sizes[i+1:], computed right-to-left; last == 1.
-        self.strides: np.ndarray = np.ones(len(self.columns), dtype=np.int64)
-        for i in range(len(self.columns) - 2, -1, -1):
-            self.strides[i] = self.strides[i + 1] * self.sizes[i + 1]
- 
-        # Length of the contingency table (product of sizes).)
-        self.n_cells: int = int(np.prod(self.sizes))
+        # The joint-space quantities (strides, n_cells) are derived lazily, not here. The
+        # marginal pipeline works entirely on small per-bag subdomains and never asks the
+        # global domain for its joint size or strides, so building a domain over the whole
+        # census does NO joint-size arithmetic - which for that many columns would overflow
+        # int64. Only the full-joint path touches them, and it computes them on demand.
+        self._strides: Optional[np.ndarray] = None
+        self._n_cells: Optional[int] = None
 
+    @property
+    def n_cells(self) -> int:
+        """Total number of cells = product of sizes.
+
+        Python-int product (arbitrary precision, never overflows), computed once on first
+        access. np.prod would silently wrap to a negative number past 2**63.
+        """
+        if self._n_cells is None:
+            self._n_cells = math.prod(int(s) for s in self.sizes)
+        return self._n_cells
+
+    @property
+    def strides(self) -> np.ndarray:
+        """Mixed-radix place values: strides[i] = product of sizes[i+1:], last == 1.
+
+        int64 array (indexed per-column in the hot encode/decode paths), computed once on
+        first access.
+        """
+        if self._strides is None:
+            strides = np.ones(len(self.columns), dtype=np.int64)
+            for i in range(len(self.columns) - 2, -1, -1):
+                strides[i] = strides[i + 1] * self.sizes[i + 1]
+            self._strides = strides
+        return self._strides
 
     # ------------------------------------------------------------------
     # Per-axis views
