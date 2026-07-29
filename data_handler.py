@@ -250,8 +250,6 @@ class DataHandler:
         self.marginal_width = total
         self._separator_projections = {}
 
-        print(f"\n Junction tree bound: {junction_tree.n_bags} bags, marginal width {total}", end=' ')
-
     def separator_projection(self, bag_index: int, columns: Sequence[str]) -> np.ndarray:
         '''Map each cell of a bag to its cell index in the separator sub-domain.
 
@@ -475,10 +473,53 @@ class DataHandler:
         domain = self.bag_domains[bag_index]
         data = self._reduce_dataframe(filters, con, columns=domain.columns)
 
+        # Encode the marginal counts into a dense vector of length bag.n_cells.
         counts = np.zeros(domain.n_cells, dtype=self.dtype)
-        if len(data):
+        if len(data): 
             np.add.at(counts, domain.encode(data), data["count"].values.astype(self.dtype))
         return counts
+
+    def measure_pairwise_counts(self, columns: Sequence[str],
+                                con: Optional["duckdb.DuckDBPyConnection"] = None) -> Tuple[np.ndarray, List[Tuple[str, str]], List[int]]:
+        '''Measure every 2-way marginal over the whole dataset, concatenated into one vector.
+
+        Used by the private marginal-selection step: the association between columns has to
+        be estimated from the data, and doing so costs privacy budget like any other query.
+        Returning ONE vector matters - the caller noises it in a single shot, so the
+        sensitivity argument is the number of pairs (a record falls in exactly one cell of
+        each pair table), exactly as the number of bags is for the per-node measurement.
+
+        Args:
+            columns (Sequence[str]): Columns to pair up.
+            con (Optional[duckdb.DuckDBPyConnection]): Cursor; defaults to the shared connection.
+
+        Returns:
+            Tuple[np.ndarray, List[Tuple[str, str]], List[int]]:
+                the concatenated counts, the pairs in layout order (i < j), and the start
+                offset of each pair's table inside the vector.
+        '''
+        assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
+
+        columns = list(columns)
+        pairs = [(columns[i], columns[j])
+                 for i in range(len(columns)) for j in range(i + 1, len(columns))]
+
+        blocks: List[np.ndarray] = []
+        offsets: List[int] = []
+        total = 0
+        for pair in pairs:
+            pair_domain = self.contingency_domain.subdomain(pair)
+            data = self._reduce_dataframe({}, con, columns=list(pair))
+
+            counts = np.zeros(pair_domain.n_cells, dtype=self.dtype)
+            if len(data): # Add the counts to the correct indices in the pair's contingency vector. Use np.add.at to handle duplicate indices correctly.
+                np.add.at(counts, pair_domain.encode(data), data["count"].values.astype(self.dtype))
+
+            blocks.append(counts)
+            offsets.append(total)
+            total += pair_domain.n_cells
+
+        return np.concatenate(blocks) if blocks else np.zeros(0, dtype=self.dtype), pairs, offsets
 
     def materialize_node_marginals(self, filter_dict: Dict[str, Any], constraints: List[Constraint],
                                    con: Optional["duckdb.DuckDBPyConnection"] = None) -> Tuple[List[np.ndarray], List[SparseConstraint]]:
@@ -616,6 +657,44 @@ class DataHandler:
         os.remove(path)
         return marginals
 
+    def split_marginals(self, vector: Union[np.ndarray, sp.spmatrix]) -> List[np.ndarray]:
+        '''Cut a node's concatenated marginal vector back into one array per bag.
+
+        Inverse of np.concatenate(marginals): uses bag_offsets to slice the length-
+        marginal_width vector at the bag boundaries. Accepts the sparse column the
+        optimizer returns as well as a dense array.
+
+        Args:
+            vector (Union[np.ndarray, sp.spmatrix]): Length-marginal_width vector (or an
+                (marginal_width, 1) sparse column).
+
+        Returns:
+            List[np.ndarray]: One dense array per bag, aligned to junction_tree.bags.
+        '''
+        dense = np.asarray(vector.todense()).ravel() if sp.issparse(vector) else np.asarray(vector).ravel()
+        if len(dense) != self.marginal_width:
+            raise ValueError(
+                f"Expected a vector of length {self.marginal_width}, got {len(dense)}."
+            )
+        return [dense[offset:offset + domain.n_cells]
+                for offset, domain in zip(self.bag_offsets, self.bag_domains)]
+
+    def update_child_marginals(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
+        '''Split a joint solution into per-child marginals and spill them to disk.
+
+        Marginal counterpart of update_child_vectors: the joint vector holds one
+        marginal_width block per child, and each block is cut into its per-bag arrays.
+
+        Args:
+            joint_solution (sp.csc_matrix): Combined solution, shape (n_children * marginal_width, 1).
+            filter_dicts (List[Dict[str, Any]]): Filter dictionary for each child, in block order.
+        '''
+        width = self.marginal_width
+        for child_index, child_filter_dict in enumerate(filter_dicts):
+            block = joint_solution[child_index * width:(child_index + 1) * width]
+            path = self.spill_path(child_filter_dict)
+            self.spill_marginals(path, self.split_marginals(block))
+
     def update_child_vectors(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
 
@@ -685,6 +764,141 @@ class DataHandler:
         # Reorder columns to match output file order: hierarchical + query
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
+
+    def _construct_microdata_from_marginals(self, marginals: List[np.ndarray], filter_dict: Dict[str, Any]) -> pd.DataFrame:
+        '''Reconstruct a leaf's microdata from its per-bag marginals.
+
+        Walks the junction tree from the root bag outwards, in the order that guarantees
+        every bag is visited after its parent. The root bag's counts expand into partial
+        records holding its columns; each subsequent bag then joins on the separator with
+        its parent, filling in the columns it adds.
+
+        The join is an EXACT integer allocation, with no sampling and no distribution: the
+        estimation phase already forced overlapping bags to agree on their separator, so
+        within every separator group the number of partial records equals the number the
+        child bag accounts for. Consequently the reconstructed records reproduce every
+        estimated marginal exactly.
+
+        Assigning records within a separator group is arbitrary in the sense that any
+        assignment reproduces the same marginals - the bags constrain the joint only
+        through what they share. This one is deterministic (both sides sorted by group id),
+        so a rerun on the same estimates yields identical microdata.
+
+        Args:
+            marginals (List[np.ndarray]): Estimated integer counts per bag, aligned to
+                junction_tree.bags.
+            filter_dict (Dict[str, Any]): Hierarchical values for this leaf.
+
+        Returns:
+            pd.DataFrame: One row per record, hierarchical columns followed by query columns.
+
+        Raises:
+            ValueError: If a bag's totals do not match the records to place, which means the
+                separator consistency the estimation phase should have enforced is broken.
+        '''
+        assert self.junction_tree is not None, "No junction tree bound. Call build_marginal_domains first."
+        junction_tree = self.junction_tree
+        column_index = {column: i for i, column in enumerate(self.query_columns)}
+
+        # Seed: expand the root bag's counts into one partial record per person. Each
+        # occupied cell is repeated as many times as its count, so cells[r] is the root-bag
+        # cell that record r sits in.
+        root_bag = junction_tree.root
+        root_domain = self.bag_domains[root_bag]
+        root_counts = np.asarray(marginals[root_bag])
+        occupied = np.flatnonzero(root_counts)
+        cells = np.repeat(occupied, root_counts[occupied])
+
+        n_records = len(cells)
+        if n_records == 0:
+            return pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)
+
+        # Per-record rank on every query column; -1 marks "not assigned yet".
+        records = np.full((n_records, len(self.query_columns)), -1, dtype=np.int64)
+
+        # Fill in the root bag's columns first, then each bag in order after its parent.
+        # In occupied we have the indices in the domain of the root bag that are not zero
+        # We use cells to repeat the occupied cells according to their counts, so we can
+        # here fill the records with the indices of the subdomain of just the column we
+        # are interested in.
+        for column in root_domain.columns:
+            records[:, column_index[column]] = root_domain.axis_ranks(column)[cells]
+
+        # order[1:] = every bag after the root, each visited once its parent (hence its
+        # separator columns) is already filled in.
+        for bag_index in junction_tree.order[1:]:
+            separator = junction_tree.parent_separator[bag_index]
+            domain = self.bag_domains[bag_index]
+            counts = np.asarray(marginals[bag_index])
+
+            if counts.sum() != n_records:
+                raise ValueError(
+                    f"Bag {junction_tree.bags[bag_index]} totals {counts.sum()} but the node "
+                    f"holds {n_records} records; the bags are not separator-consistent."
+                )
+
+            # Which separator group each partial record already belongs to. The separator's
+            # columns were filled in by an earlier bag (running-intersection property), so
+            # the mixed-radix id can be rebuilt from the ranks already assigned.
+            record_group = np.zeros(n_records, dtype=np.int64)
+            if separator:
+                separator_domain = self.contingency_domain.subdomain(separator)
+                for position, column in enumerate(separator):
+                    record_group += (records[:, column_index[column]]
+                                     * int(separator_domain.strides[position]))
+
+            # Both sides encode `separator` with the same mixed-radix id (subdomain here vs
+            # project_to inside separator_projection), so the group ids are comparable. 
+            # Sorted by group id they line up positionally: within each group the two totals 
+            # are equal, so the p-th cell belongs to the p-th record.
+            # expanded = this bag's cells to place, group-ordered and repeated by count.
+            cells_by_group = np.argsort(self.separator_projection(bag_index, separator), kind="stable")
+            expanded = np.repeat(cells_by_group, counts[cells_by_group])
+            records_by_group = np.argsort(record_group, kind="stable")
+
+            # Pair them positionally within each group: record r now knows its cell in this bag.
+            assigned = np.empty(n_records, dtype=np.int64)
+            assigned[records_by_group] = expanded
+
+            # Now we have in assigned[r] the index in the bag's domain that record r belongs to.
+            # To fill it we need to just get the rank of the columns not in the separator and write
+            # those ranks into the resulting records.
+            for column in domain.columns:
+                if column not in separator:  # separator columns are already filled in
+                    records[:, column_index[column]] = domain.axis_ranks(column)[assigned]
+
+        # Check that every column has been assigned a value for every record. 
+        # If any column has a -1, it means that some records were not assigned a value for that column
+        # and an error occurred during the reconstruction process. This should not happend.
+        unassigned = np.flatnonzero((records < 0).any(axis=0))
+        if len(unassigned):
+            missing = [self.query_columns[i] for i in unassigned]
+            raise ValueError(f"Columns {missing} are in no bag, so no value was reconstructed.")
+
+        # Ranks -> declared values, column by column.
+        leaf_df = pd.DataFrame({
+            column: self.contingency_domain.domains[column][records[:, i]]
+            for i, column in enumerate(self.query_columns)
+        })
+        # Stamp this leaf's hierarchical values (region, comuna, ...) onto every row.
+        for column_name, value in filter_dict.items():
+            leaf_df[column_name] = value
+
+        return leaf_df[self.hierarchical_columns + self.query_columns]
+
+    def write_microdata_from_marginals(self, node_id: int, children_marginals: List[List[np.ndarray]],
+                                       filter_dicts: List[Dict[str, Any]]) -> None:
+        '''Reconstruct and write each leaf child's microdata (factored pipeline).
+
+        Args:
+            node_id (int): Parent node ID, used to name the output files.
+            children_marginals (List[List[np.ndarray]]): Per-child list of per-bag estimates.
+            filter_dicts (List[Dict[str, Any]]): Filter dictionary per child.
+        '''
+        for child_index, (marginals, filter_dict) in enumerate(zip(children_marginals, filter_dicts)):
+            frame = self._construct_microdata_from_marginals(marginals, filter_dict)
+            output_path = os.path.join(self.microdata_dir, f'node_{node_id}_child_{child_index}_microdata.parquet')
+            frame.to_parquet(output_path, index=False)
 
     def write_microdata(self, node_id: int, contingency_vectors: List[sp.csc_matrix], filter_dicts: List[Dict[str, Any]]) -> None:
         '''Construct microdata for each child and write to separate Parquet files using DuckDB.
