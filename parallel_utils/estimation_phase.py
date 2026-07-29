@@ -9,8 +9,7 @@ from domain import ContingencyDomain
 from privacy import PrivacyMechanism
 from constraints.sparse_constraint import SparseConstraint
 
-from optimizers.pyoptinterface import OptimizationModel
-from optimizers.write_lp_directly import OptimizationModelLP
+from optimizers import build_optimizer
 
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -41,8 +40,9 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
 
-    _optimizer = OptimizationModel(*optimizer) if optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*optimizer)
-                    
+    _optimizer = build_optimizer(optimizer_backend, optimizer)
+
+
     _data_handler = DataHandler()
     _data_handler.spill_dir = spill_dir
     _data_handler.microdata_dir = microdata_dir
