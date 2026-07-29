@@ -308,10 +308,7 @@ def estimate_and_update_children(node_id: int, node_path: str,
             filter_dict, _constraints[children_level])
         measurement = np.concatenate(marginals)
 
-        # Fall back to sampling in situ only for the ways a pre-computed noise file can
-        # legitimately come up short (row missing, array too narrow, unreadable). A broad
-        # `except` here would also swallow programming errors and silently draw noise
-        # calibrated by a different path.
+        # Add noise to the measurement, either from a pre-computed file or by sampling.
         try:
             _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, measurement, child_id)
         except (IndexError, ValueError, KeyError, OSError):
