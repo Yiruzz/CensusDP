@@ -40,7 +40,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
     GEO_COLUMNS_TO_USE = GEO_COLUMNS[:PROCESS_UNTIL_idx + 1]
 
     # Define the columns to use that will be queried in each node of the tree.
-    # QUERIES = ['P08', 'P09'] # Sex and Age
     QUERIES = queries
 
     ##############################
@@ -52,7 +51,6 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
     # In this case we are using chilean 2017 Census data that can be found at:
     # https://www.ine.gob.cl/estadisticas/sociales/censos-de-poblacion-y-vivienda/censo-de-poblacion-y-vivienda
 
-    # DATA_PATH_PERSONAS = 'data/csv-personas-censo-2017/microdato_censo2017-personas/Microdato_Censo2017-Personas.csv'
     DATA_PATH_VIVIENDAS= 'data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/Microdato_Censo2017-Viviendas.csv'
 
     OUTPUT_PATH = 'data/out/'
@@ -100,8 +98,29 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
         optimizer_backend=optimizer_backend,
     )
 
-    # Set the queries to be answered at each node of the tree.
+    ###########################################
+    # Cell space: full-joint vs. factored     #
+    ###########################################
+
+    # This example runs the FULL-JOINT pipeline: each node stores ONE contingency vector over
+    # the joint of QUERIES, whose length is the product of the column cardinalities. It is
+    # exact but only feasible for a handful of columns. Leaving the query workload as the
+    # identity (None) is what selects it.
     topdown.set_query_workload(None)
+
+    # To run the FACTORED (junction-tree) pipeline instead - the one that scales to many
+    # columns - call ONE of the following BEFORE topdown.run() and do NOT call
+    # set_query_workload. Each node then stores one small marginal per junction-tree bag, and
+    # consistency between overlapping bags replaces the joint. Every constraint scope (below)
+    # is added as a mandatory bag automatically, so the edit constraints stay enforceable.
+    # A full factored example lives in examples/personas_factored.py.
+    #
+    #   # (a) Declare the marginals to keep jointly (deterministic):
+    #   topdown.set_marginals([['P01', 'P02'], ['P03A', 'P03B']])
+    #
+    #   # (b) Or let the algorithm pick them from the data privately. The selection share is
+    #   #     taken OUT OF the total budget (not added on top), so the guarantee is unchanged:
+    #   topdown.set_marginal_selection(budget_fraction=0.2)
 
     ####################
     # Edit Constraints #
@@ -153,19 +172,29 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
     #       See queries workload definition for inspiration and use overloading of boolean and comparison operators
     #       in the expressions to make it more intuitive to build the constraints.
 
-    if user_constraints: 
+    if user_constraints:
         # The Census data specifies that if a household was empty when the census was taken,
-        # then the question can't be answeredd. The value 98 is used to indicate that the question
-        # does not apply to that household. Therefore, we need to set the following constraint.
-        # if 'P02' != 1 -> ('P03A' = 98) & ('P03B' = 98) & ('P03C' = 98) & 
-        #                  ('P04' = 98) & ('P05' = 98) & ('CANT_HOG' = 0) & ('CANT_PER' = 0)
-        left_side = NotEqual('P02', 1)
-        #right_side = And(Equal('P03A', 98), Equal('P03B', 98), Equal('P03C', 98), Equal('P04', 98), Equal('P05', 98), Equal('CANT_HOG', 0), Equal('CANT_PER', 0))
-        right_side = And(Equal('P03A', 98), Equal('P03B', 98))
-        VIVIENDAS_CONSTRAINT = Implies(left_side, right_side)
+        # then the occupant questions can't be answered. A "no aplica" sentinel is used
+        # instead (98 for most fields, 0 for the household/person counts). So:
+        #   'P02' != 1 -> ('P03A'=98) & ('P03B'=98) & ('P03C'=98) &
+        #                 ('P04'=98) & ('P05'=98) & ('CANT_HOG'=0) & ('CANT_PER'=0)
+        #
+        # Build the LARGEST form the current QUERIES allow: include only the consequent
+        # columns that are actually being queried, so the same code works for any --queries
+        # (referencing a column that is not queried would have no cell to constrain). The
+        # antecedent P02 must be queried too, otherwise the rule cannot be expressed.
+        SENTINELS = {'P03A': 98, 'P03B': 98, 'P03C': 98, 'P04': 98,
+                     'P05': 98, 'CANT_HOG': 0, 'CANT_PER': 0}
+        consequents = [Equal(column, value) for column, value in SENTINELS.items()
+                       if column in QUERIES]
 
-        # We will apply this constraint to all levels of the tree.
-        topdown.set_constraint_to_tree(VIVIENDAS_CONSTRAINT)
+        if 'P02' in QUERIES and consequents:
+            # Apply to all levels of the tree.
+            topdown.set_constraint_to_tree(Implies(NotEqual('P02', 1), And(*consequents)))
+            print(f"\nViviendas edit constraint on: {[c.variable_id for c in consequents]}")
+        else:
+            print("\nViviendas edit constraint skipped: needs 'P02' and at least one of "
+                  f"{sorted(SENTINELS)} in --queries.")
 
     #######################
     # Additional settings #
@@ -225,8 +254,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--optimizer",
         choices=["write_lp", "pyoptinterface"],
-        default="pyoptinterface",
-        help="Optimizer backend to use: 'pyoptinterface' (default) or 'write_lp'",
+        default="write_lp",
+        help="Optimizer backend to use: 'write_lp' (default) or 'pyoptinterface' "
+             "(requires the optional pyoptinterface package)",
     )
 
     args = parser.parse_args()
