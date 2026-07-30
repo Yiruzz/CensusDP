@@ -113,7 +113,7 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
     # set_query_workload. Each node then stores one small marginal per junction-tree bag, and
     # consistency between overlapping bags replaces the joint. Every constraint scope (below)
     # is added as a mandatory bag automatically, so the edit constraints stay enforceable.
-    # A full factored example lives in examples/personas_factored.py.
+    # A full factored example lives in census_examples/personas_marginals.py.
     #
     #   # (a) Declare the marginals to keep jointly (deterministic):
     #   topdown.set_marginals([['P01', 'P02'], ['P03A', 'P03B']])
