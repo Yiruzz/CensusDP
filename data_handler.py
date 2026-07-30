@@ -42,6 +42,7 @@ class DataHandler:
             domain (Optional[Dict[str, Sequence]]): User-provided domain for query columns.
             contingency_domain (Optional[ContingencyDomain]): Mixed-radix cell space that replaces dense Cartesian-product table.
             n_cells (Optional[int]): Total number of contingency cells.
+            query_width (Optional[int]): Length of a full-joint node measurement Q @ x. It drives noise_width in the joint pipeline. Set by TopDown.
             dtype (str): NumPy data type for all arrays (default: 'int64').
 
             junction_tree (Optional[JunctionTree]): Factored representation of the cell space.
@@ -81,10 +82,12 @@ class DataHandler:
         self.domain: Optional[Dict[str, Sequence]] = domain
         self.contingency_domain: Optional[ContingencyDomain] = None
         self.n_cells: Optional[int] = None
+        # Length of a full-joint node measurement y = Q @ x. Set by TopDown.
+        self.query_width: Optional[int] = None
         self.dtype: str = 'int64'
 
-        # Factored (junction-tree) cell space. Built by build_marginal_domains();
-        # left empty when running the legacy full-joint pipeline.
+        # Factored (junction-tree) cell space. Built by build_marginal_domains(),
+        # left empty when running the full-joint pipeline.
         self.junction_tree: Optional[JunctionTree] = None
         self.bag_domains: List[ContingencyDomain] = []
         self.bag_offsets: List[int] = []
@@ -272,9 +275,16 @@ class DataHandler:
 
     @property
     def noise_width(self) -> int:
-        '''Length of a node's measurement vector: the concatenated marginals when the
-        factored pipeline is active, the full joint otherwise.'''
-        return self.marginal_width if self.marginal_width is not None else self.n_cells
+        '''Length of a node's measurement vector, which the pre-computed noise must match.
+
+        Factored pipeline: the concatenated marginals (marginal_width). Full-joint pipeline:
+        the query-space measurement y = Q @ x. n_cells when using identity Q.
+        '''
+        if self.marginal_width is not None:
+            return self.marginal_width
+        if self.query_width is not None:
+            return self.query_width
+        return self.n_cells
 
     def build_hierarchical_tree(self) -> HierarchicalTree:
         '''Build a hierarchical tree structure based on hierarchical columns.

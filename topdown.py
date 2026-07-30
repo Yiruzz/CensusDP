@@ -291,6 +291,9 @@ class TopDown():
             assert np.all((self.Q == 0) | (self.Q == 1)), \
                 "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
             self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        # The node measurement is y = Q @ x, so the pre-computed noise must be this wide -
+        # equal to n_cells only for the identity workload.
+        self.data_handler.query_width = int(self.Q.shape[0])
         print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
         print(f'{time.time() - t1:.2f} seconds.\n')
@@ -522,7 +525,7 @@ class TopDown():
             ValueError: If a declared column is not among the query columns.
         '''
         cliques = [list(clique) for clique in cliques]
-        
+
         # Validate that the cliques only contain columns that are in the query_columns list
         unknown = {column for clique in cliques for column in clique} - set(self.query_columns)
         if unknown:
