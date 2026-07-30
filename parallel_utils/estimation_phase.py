@@ -13,16 +13,19 @@ from optimizers import build_optimizer
 
 from typing import List, Dict, Any, Tuple, Optional
 
-def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, List],
+def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: str,
+                 constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str, optimizer_backend: str) -> None:
+                 query_matrix: spmatrix, privacy_mechanism: PrivacyMechanism,
+                 query_sensitivity: int, check: bool,
+                 zarr_path: str, noisy_array_name: str) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
-        optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
+        optimizer_params (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                             and solver options dict).
+        optimizer_backend (str): Backend name, see optimizers.build_optimizer.
         constraints_dict (Dict[int, List]): Constraints mapped by level.
         spill_dir (str): Directory path for spilling vectors to disk.
         microdata_dir (str): Directory path for temporary microdata files.
@@ -30,17 +33,16 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
         domain_dict (Dict[str, Any]): Domain mapping for query columns.
         hierarchical_columns (List[str]): Hierarchical column names.
         query_columns (List[str]): Query column names.
-        privacy_mechanism (PrivacyMechanism): Privacy mechanism instance for noise addition.
         query_matrix (spmatrix): The sparse query matrix Q used in optimization.
+        privacy_mechanism (PrivacyMechanism): Privacy mechanism instance for noise addition.
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.
         zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
         noisy_array_name (str): Name of the noise array within the Zarr group.
-        optimizer_backend (str): Name of optimizer that modeling the problems.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
 
-    _optimizer = build_optimizer(optimizer_backend, optimizer)
+    _optimizer = build_optimizer(optimizer_backend, optimizer_params)
 
 
     _data_handler = DataHandler()
