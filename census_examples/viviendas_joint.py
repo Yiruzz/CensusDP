@@ -15,6 +15,7 @@ from privacy import ZCDP
 from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import TrueExpression
 from .census_constraints import viviendas_constraints
+from .census_domains import viviendas_domain
 
 
 DATA_PATH = ('data/csv-viviendas-censo-2017/microdato_censo2017-viviendas/'
@@ -48,6 +49,10 @@ def main():
         solver_options=SOLVER_OPTIONS,
         num_workers=NUM_WORKERS,
         check_correctness=True,
+        # Declared from the questionnaire, not inferred from the data: inferring makes the
+        # shape of the cell space data-dependent (not DP-safe) and drops valid-but-absent
+        # values - including the "no aplica" sentinels the edit constraints below assert on.
+        domain=viviendas_domain(QUERIES),
     )
 
     # Full-joint pipeline: no set_marginals() / set_marginal_selection() call.

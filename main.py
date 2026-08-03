@@ -13,6 +13,9 @@ from constraints.logical_expressions.compound import And, Implies
 # Import query building classes
 from queries import QueryWorkload, col
 
+# Declared per-column domains, read off the 2017 questionnaire (see census_examples).
+from census_examples.census_domains import viviendas_domain
+
 
 
 def main(process_until: str, queries: list[str], user_constraints: bool,
@@ -96,6 +99,9 @@ def main(process_until: str, queries: list[str], user_constraints: bool,
         num_workers=num_workers,
         check_correctness=check_correctness,
         optimizer_backend=optimizer_backend,
+        # Declared rather than inferred: inference is data-dependent (not DP-safe). Filtered
+        # to whatever --queries asked for, so any column subset works.
+        domain=viviendas_domain(QUERIES),
     )
 
     ###########################################

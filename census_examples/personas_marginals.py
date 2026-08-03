@@ -24,7 +24,8 @@ from topdown import TopDown
 from privacy import ZCDP
 from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import TrueExpression
-from .census_constraints import personas_constraints
+from .census_constraints import personas_constraints, personas_reverse_constraints
+from .census_domains import personas_domain
 
 
 # --------------------------------------------------------------------------------------------
@@ -113,6 +114,11 @@ def main():
         num_workers=NUM_WORKERS,
         check_correctness=True,
         optimizer_backend='write_lp',
+        # Declared from the questionnaire, not inferred from the data. This is also what
+        # makes the bag sizes honest: inference only ever sees the values present in the
+        # file, so the marginal width it produces understates the real problem.
+        # P10COMUNA / P11COMUNA / P12COMUNA are still inferred - see census_domains.
+        domain=personas_domain(QUERIES),
     )
 
     # Factored pipeline with DECLARED marginals. The edit-constraint scopes are added as
@@ -130,6 +136,12 @@ def main():
     # Edit constraints (questionnaire skip logic): structural zeros that keep the released
     # microdata internally coherent. Only the rules whose columns are all queried are kept.
     edit_constraints = personas_constraints(QUERIES)
+    # The converse: the sentinel appears ONLY where a rule forces it. Without it those cells
+    # stay feasible with a true count of zero, and the DP noise plus the rounding MIP fill
+    # them with structurally impossible records. Free - every converse fits inside a bag the
+    # forward rules already created, and it is declared, so it costs no privacy budget.
+    edit_constraints += personas_reverse_constraints(QUERIES)
+
     for constraint in edit_constraints:
         algorithm.set_constraint_to_tree(constraint)
 
