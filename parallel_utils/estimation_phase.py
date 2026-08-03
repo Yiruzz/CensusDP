@@ -64,7 +64,7 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
     _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
     _check = check
 
-def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set, n_cells: Optional[int] = None) -> List[SparseConstraint]:
+def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_mask: np.ndarray, n_cells: Optional[int] = None) -> List[SparseConstraint]:
     '''Combine child publication constraints into joint SparseConstraints.
 
     Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
@@ -83,8 +83,9 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
         contingency_vector (sp.csc_matrix): The parent's sparse cell-count vector, shape (n_cells, 1).
         constraints (List): List of Constraint objects (one list per child). Each constraint's
             to_sparse_constraint() method will be called to get SparseConstraint representations.
-        active_set (set): Active joint-space global indices {k*n_cells + j} (parent support expanded
-            over children). Cells outside it are pruned and dropped from constraints.
+        active_mask (np.ndarray): Boolean array of length n_cells marking the parent's support.
+            Cells where it is False are pruned and dropped from constraints. Indexed by the
+            local cell, so one mask serves every child block - see SparseConstraint.prune_to_active_space.
         n_cells (Optional[int]): Number of contingency cells. Defaults to the worker-global
             _data_handler.n_cells; callers in the main process (no worker globals) must pass it.
 
@@ -101,7 +102,7 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
         base = start
 
         for sparse_constraint in child_constraints:
-            new_sparse_constraint = sparse_constraint.prune_to_active_space(base, active_set)
+            new_sparse_constraint = sparse_constraint.prune_to_active_space(base, active_mask)
             if new_sparse_constraint is not None: joint_constraints.append(new_sparse_constraint)
         start += n_cells
 
@@ -185,8 +186,14 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     support = contingency_vector.indices
     active = [k * n_cells + int(j) for k in range(num_children) for j in support]
 
-    # Combine receives the active set so it can bake prune-to-0 + reindexing into the constraints.
-    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints, set(active))
+    # One boolean row over cell space answers "is this cell active?" for every child, because
+    # the active set is the same support shifted by k * n_cells. Pruning then tests the LOCAL
+    # cell index with a fancy-index instead of a Python membership loop per nonzero.
+    active_mask = np.zeros(n_cells, dtype=bool)
+    active_mask[support] = True
+
+    # Combine receives the mask so it can bake prune-to-0 + reindexing into the constraints.
+    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints, active_mask)
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(

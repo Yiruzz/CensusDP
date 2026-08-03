@@ -74,14 +74,11 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
 
     The pattern is identical for every node of the geographic tree - only the block offset
     changes - so callers compute it once and shift it per child with
-    ``SparseConstraint.prune_to_active_space(k * W, active_set)``.
+    ``SparseConstraint.prune_to_active_space(k * W, active_mask)``.
 
     Args:
         data_handler (DataHandler): Handler with a junction tree already bound via
             build_marginal_domains().
-
-    An edge whose separator is empty (the interaction graph is disconnected) still yields a
-    row - the degenerate one that ties the two bags' grand totals. See the loop body.
 
     Returns:
         List[SparseConstraint]: One row per (tree edge, separator value); empty only when
@@ -128,7 +125,7 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
 
 
 def shift_to_children(rows: Sequence[SparseConstraint], n_children: int, width: int,
-                      active_set: set) -> List[SparseConstraint]:
+                      active_mask: np.ndarray) -> List[SparseConstraint]:
     """Replicate single-node rows into the joint child space, pruning inactive cells.
 
     Dropping a pruned index from a separator row is sound: pruned cells are structurally
@@ -138,7 +135,8 @@ def shift_to_children(rows: Sequence[SparseConstraint], n_children: int, width: 
         rows (Sequence[SparseConstraint]): Rows indexed in one node's space [0, width).
         n_children (int): Number of children solved jointly.
         width (int): Length of a node's concatenated marginal vector.
-        active_set (set): Active joint-space indices {k * width + p}.
+        active_mask (np.ndarray): Boolean array of length width. Entry p is True when
+            position p is active.
 
     Returns:
         List[SparseConstraint]: The rows shifted into joint space, fully-pruned rows dropped.
@@ -146,7 +144,7 @@ def shift_to_children(rows: Sequence[SparseConstraint], n_children: int, width: 
     shifted: List[SparseConstraint] = []
     for k in range(n_children):
         for row in rows:
-            pruned = row.prune_to_active_space(k * width, active_set)
+            pruned = row.prune_to_active_space(k * width, active_mask)
             if pruned is not None:
                 shifted.append(pruned)
     return shifted
@@ -215,7 +213,7 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
 
 def combine_child_constraints(n_children: int, parent_column: sp.csc_matrix,
                               children_constraints: List[List[SparseConstraint]],
-                              active_set: set, width: int,
+                              active_mask: np.ndarray, width: int,
                               separator_rows: Sequence[SparseConstraint]) -> List[SparseConstraint]:
     '''Assemble the three constraint families for one node group, in joint space.
 
@@ -227,7 +225,7 @@ def combine_child_constraints(n_children: int, parent_column: sp.csc_matrix,
             space, shape (width, 1), canonical.
         children_constraints (List[List[SparseConstraint]]): Per-child user constraints,
             already indexed in [0, width) by materialize_node_marginals.
-        active_set (set): Active joint-space indices {k * width + p}.
+        active_mask (np.ndarray): Boolean array of length width marking the parent's support.
         width (int): Length of one node's concatenated marginal vector.
         separator_rows (Sequence[SparseConstraint]): Single-node separator pattern.
 
@@ -239,12 +237,12 @@ def combine_child_constraints(n_children: int, parent_column: sp.csc_matrix,
     # (2) Within-bag user constraints: shift each child's rows into its block.
     for child_index, child_constraints in enumerate(children_constraints):
         for constraint in child_constraints:
-            pruned = constraint.prune_to_active_space(child_index * width, active_set)
+            pruned = constraint.prune_to_active_space(child_index * width, active_mask)
             if pruned is not None:
                 joint.append(pruned)
 
     # (1) Separator consistency, replicated per child.
-    joint.extend(shift_to_children(separator_rows, n_children, width, active_set))
+    joint.extend(shift_to_children(separator_rows, n_children, width, active_mask))
 
     # (3) Geographic consistency: the children sum to the parent, position by position.
     # Only over the parent's support - where the parent is 0 no child variable exists, so
@@ -338,9 +336,15 @@ def estimate_and_update_children(node_id: int, node_path: str,
     support = parent_column.indices
     active = [k * width + int(p) for k in range(n_children) for p in support]
 
+    # One boolean row over the per-node space answers "is this position active?" for every
+    # child, because the active set is the same support shifted by k * width. A length-width
+    # bool costs width bytes, against a Python set of n_children * len(support) ints.
+    active_mask = np.zeros(width, dtype=bool)
+    active_mask[support] = True
+
     joint_constraints = combine_child_constraints(
         n_children, parent_column, children_constraints,
-        set(active), width, _separator_constraints)
+        active_mask, width, _separator_constraints)
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(
