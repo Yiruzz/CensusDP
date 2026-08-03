@@ -79,3 +79,18 @@ class Implies(BinaryExpression):
         antecedent = self.expressions[0].reduce(domain)
         consequent = self.expressions[1].reduce(domain)
         return (~antecedent) | consequent
+
+
+class Equivalent(BinaryExpression):
+    '''Class for logical EQUIVALENCE (biconditional) expression.
+
+    Holds where both sides agree, so it forbids the cells where one is true and the other
+    is not - strictly stronger than Implies, which only forbids one of those two halves.
+
+    Only correct when the left side is the ONLY reason the right side holds. See
+    constraints/README.md ("Implies vs Equivalent") for what goes wrong otherwise.
+    '''
+    def reduce(self, domain) -> np.ndarray:
+        left = self.expressions[0].reduce(domain)
+        right = self.expressions[1].reduce(domain)
+        return left == right

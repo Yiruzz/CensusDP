@@ -53,6 +53,46 @@ Here the resulting data will satisfy that the population at the level of region 
 - If the solver reports infeasible models, check `infeasible_model.lp`. These files are written by the optimizer when a model has no feasible solution. Check for debugging.
 - `TrueExpression` can be used as a no-op expression that always evaluates to true. This is useful when you want to create aggregate constraints that apply to all records without filtering.
 
+## Implies vs Equivalent
+
+`Implies(A, B)` forbids the cells where `A` holds and `B` does not. `Equivalent(A, B)`
+forbids those **and** the cells where `B` holds and `A` does not — strictly stronger.
+
+Use `Equivalent` only when `A` is the *only* reason `B` can hold. Getting that wrong does
+not raise: the extra cells are forced to zero, `SumEqualRealTotal` quietly redistributes
+their mass, and the run finishes looking healthy. Two ways it goes wrong, both real:
+
+**1. The consequent has several antecedents.** In the 2017 census, `P20 = 98` ("no aplica")
+is forced by three separate rules — men, under-15s, and women with no children. Declaring
+`Equivalent(Equal('P08', 1), Equal('P20', 98))` asserts *"P20=98 iff man"*, which forbids
+**3,397,549 legitimate records** (19.3% of the file). The correct converse is one
+implication per *column*, against the disjunction of every antecedent that forces it:
+
+```python
+Implies(Equal('P20', 98), Or(LessThan('P09', 15), Equal('P08', 1), Equal('P19', 0)))
+```
+
+`census_examples/census_constraints.py::_reverse_rules` derives exactly that from the
+forward rules, so the two cannot drift apart.
+
+**2. A single antecedent still does not make it a biconditional.** The viviendas rule
+`P02 != 1 -> P03A = 98` has one antecedent, so `Equivalent` *looks* safe. It is not:
+13,041 occupied dwellings carry `P03A = 98` anyway. The forward direction holds exactly;
+the converse is simply false, and no converse is declared for viviendas.
+
+The rule of thumb: a converse is a claim about the **questionnaire**, not about the file.
+Validate it before declaring it —
+
+```
+python -m tools.check_skip_logic personas
+python -m tools.check_skip_logic viviendas
+```
+
+reports, per rule, how many records violate the forward direction and how many carry the
+sentinel with no rule requiring it. Note the asymmetry in what that buys you: it can only
+*refute* a converse, never establish one. Deriving constraints from the data would be
+data-dependent, which is exactly what the declared domains exist to avoid.
+
 ## Extending the DSL
 - Add a new atomic or compound constraint class under `constraints/logical_expressions/` by subclassing `LogicalExpression` and implementing `reduce(contingency_df)`.
 - Add new aggregates by extending `AggregateConstraint` and implementing `to_constraint(contingency_df)`.
