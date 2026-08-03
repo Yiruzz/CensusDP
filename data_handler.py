@@ -607,21 +607,59 @@ class DataHandler:
         # Build file path
         return os.path.join(self.spill_dir, name + '.npz')
 
+    @staticmethod
+    def canonical_column(vector: Union[np.ndarray, sp.spmatrix]) -> sp.csc_matrix:
+        '''Put any vector into the canonical form the pipeline assumes downstream.
+
+        Canonical means all four of: CSC format, shape (n, 1), no stored zeros, ascending
+        indices. scipy can represent ~24 combinations of those and exactly one is valid here,
+        and this is the single place that establishes that contract.
+
+        Why each property matters, since none of the failures are loud:
+          - CSC + (n, 1): in a CSR column `.indices` holds COLUMN indices (all zeros), so a
+            CSR would read back as an empty support with nothing raised. A 1-D dense array
+            handed straight to csc_matrix becomes a 1 x n ROW, whose row-slices are empty.
+          - no stored zeros: nnz counts stored entries, so a COO built with a 0 in its data
+            keeps it and `.indices` would no longer be the support.
+          - sorted: the microdata reconstruction pairs records to cells positionally within
+            a separator group, and its stable argsort only reproduces the dense pairing when
+            the support arrives in cell order.
+
+        Callers only need this at the two border points where a vector enters the pipeline
+        (spill_vector on the way to disk, split_marginals on the way to reconstruction).
+
+        Args:
+            vector (Union[np.ndarray, sp.spmatrix]): Dense array or sparse matrix holding a
+                single logical vector, in any orientation or format.
+
+        Returns:
+            sp.csc_matrix: The same values in canonical form.
+        '''
+        if not sp.issparse(vector):
+            column = sp.csc_matrix(np.asarray(vector).reshape(-1, 1))
+        else:
+            # reshape BEFORE tocsc: scipy's sparse reshape returns COO when the shape changes.
+            column = vector.reshape((-1, 1)).tocsc()
+        column.eliminate_zeros()
+        column.sort_indices()
+        return column
+
     def spill_vector(self, path: str, contingency_vector: Union[np.ndarray, sp.spmatrix]) -> None:
         '''Write contingency vector to disk and free it from RAM.
 
-        The vector is serialized with scipy's sparse .npz format. Dense vectors (the root's
-        noisy measurement) are converted to a sparse CSC column first. One file per node,
-        named by its filter values, ensuring sibling nodes don't conflict.
+        The vector is serialized with scipy's sparse .npz format. One file per node, named
+        by its filter values, ensuring sibling nodes don't conflict.
+
+        This is one of the two canonical-form borders: save_npz stores the format verbatim
+        and load_npz restores it, so normalising on the way in is what makes load_vector's
+        documented CSC contract true for its callers.
 
         Args:
             path (str): The file path where the vector will be spilled.
             contingency_vector (Union[np.ndarray, sp.spmatrix]): The contingency vector to write to disk.
         '''
         os.makedirs(self.spill_dir, exist_ok=True)
-        if not sp.issparse(contingency_vector):
-            contingency_vector = sp.csc_matrix(contingency_vector.reshape(-1, 1))
-        sp.save_npz(path, contingency_vector)
+        sp.save_npz(path, self.canonical_column(contingency_vector))
 
     def load_vector(self, path: str) -> sp.csc_matrix:
         '''Reload contingency vector from disk and delete the file.
@@ -636,64 +674,42 @@ class DataHandler:
         os.remove(path)
         return contingency_vector
 
-    def spill_marginals(self, path: str, marginals: List[np.ndarray]) -> None:
-        '''Write a node's per-bag marginals to disk and free them from RAM.
-
-        Stored as a multi-array .npz (one entry per bag) rather than scipy's sparse
-        format: bag vectors are small and dense, so compression alone is enough.
-
-        Args:
-            path (str): The file path where the marginals will be spilled.
-            marginals (List[np.ndarray]): One vector per bag, aligned to junction_tree.bags.
-        '''
-        os.makedirs(self.spill_dir, exist_ok=True)
-        np.savez_compressed(path, *marginals)
-
-    def load_marginals(self, path: str) -> List[np.ndarray]:
-        '''Reload a node's per-bag marginals from disk and delete the file.
-
-        Args:
-            path (str): The file path to load the marginals from.
-
-        Returns:
-            List[np.ndarray]: One vector per bag, in bag order.
-        '''
-        with np.load(path) as stored:
-            # np.savez names positional arrays arr_0, arr_1, ... Index by position rather
-            # than iterating stored.files: the key order there follows the zip entry order,
-            # which is an implementation detail, and a silent reorder would misalign the
-            # marginals from junction_tree.bags.
-            marginals = [stored[f"arr_{i}"] for i in range(len(stored.files))]
-        os.remove(path)
-        return marginals
-
-    def split_marginals(self, vector: Union[np.ndarray, sp.spmatrix]) -> List[np.ndarray]:
-        '''Cut a node's concatenated marginal vector back into one array per bag.
+    def split_marginals(self, vector: Union[np.ndarray, sp.spmatrix]) -> List[sp.csc_matrix]:
+        '''Cut a node's concatenated marginal vector into one SPARSE column per bag.
 
         Inverse of np.concatenate(marginals): uses bag_offsets to slice the length-
         marginal_width vector at the bag boundaries. Accepts the sparse column the
         optimizer returns as well as a dense array.
+
+        This is the second canonical-form border. The whole vector is canonicalised once
+        and the pieces inherit it. See canonical_column for details.
 
         Args:
             vector (Union[np.ndarray, sp.spmatrix]): Length-marginal_width vector (or an
                 (marginal_width, 1) sparse column).
 
         Returns:
-            List[np.ndarray]: One dense array per bag, aligned to junction_tree.bags.
+            List[sp.csc_matrix]: One (bag n_cells, 1) column per bag, aligned to
+                junction_tree.bags.
         '''
-        dense = np.asarray(vector.todense()).ravel() if sp.issparse(vector) else np.asarray(vector).ravel()
-        if len(dense) != self.marginal_width:
+        vector = self.canonical_column(vector)
+
+        if vector.shape[0] != self.marginal_width:
             raise ValueError(
-                f"Expected a vector of length {self.marginal_width}, got {len(dense)}."
+                f"Expected a vector of length {self.marginal_width}, got {vector.shape[0]}."
             )
-        return [dense[offset:offset + domain.n_cells]
+
+        return [vector[offset:offset + domain.n_cells]
                 for offset, domain in zip(self.bag_offsets, self.bag_domains)]
 
+
     def update_child_marginals(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
-        '''Split a joint solution into per-child marginals and spill them to disk.
+        '''Split a joint solution into per-child blocks and spill them to disk.
 
         Marginal counterpart of update_child_vectors: the joint vector holds one
-        marginal_width block per child, and each block is cut into its per-bag arrays.
+        marginal_width block per child. The block is spilled whole, as the same sparse
+        column the full-joint pipeline uses - it is only cut into per-bag pieces at the
+        leaves, where the microdata is actually reconstructed.
 
         Args:
             joint_solution (sp.csc_matrix): Combined solution, shape (n_children * marginal_width, 1).
@@ -702,8 +718,7 @@ class DataHandler:
         width = self.marginal_width
         for child_index, child_filter_dict in enumerate(filter_dicts):
             block = joint_solution[child_index * width:(child_index + 1) * width]
-            path = self.spill_path(child_filter_dict)
-            self.spill_marginals(path, self.split_marginals(block))
+            self.spill_vector(self.spill_path(child_filter_dict), block)
 
     def update_child_vectors(self, joint_solution: sp.csc_matrix, filter_dicts: List[Dict[str, Any]]) -> None:
         '''Split joint solution into individual child vectors and spill to disk.
@@ -775,7 +790,7 @@ class DataHandler:
         output_columns = self.hierarchical_columns + self.query_columns
         return leaf_df[output_columns]
 
-    def _construct_microdata_from_marginals(self, marginals: List[np.ndarray], filter_dict: Dict[str, Any]) -> pd.DataFrame:
+    def _construct_microdata_from_marginals(self, marginals: List[sp.csc_matrix], filter_dict: Dict[str, Any]) -> pd.DataFrame:
         '''Reconstruct a leaf's microdata from its per-bag marginals.
 
         Walks the junction tree from the root bag outwards, in the order that guarantees
@@ -783,19 +798,21 @@ class DataHandler:
         records holding its columns; each subsequent bag then joins on the separator with
         its parent, filling in the columns it adds.
 
-        The join is an EXACT integer allocation, with no sampling and no distribution: the
-        estimation phase already forced overlapping bags to agree on their separator, so
-        within every separator group the number of partial records equals the number the
-        child bag accounts for. Consequently the reconstructed records reproduce every
-        estimated marginal exactly.
+        The join is an exact integer allocation. The estimation phase already forced overlapping
+        bags to agree on their separator, so within every separator group the number of partial
+        records equals the number the child bag accounts for. Consequently the reconstructed
+        records reproduce every estimated marginal exactly.
 
         Assigning records within a separator group is arbitrary in the sense that any
         assignment reproduces the same marginals - the bags constrain the joint only
-        through what they share. This one is deterministic (both sides sorted by group id),
-        so a rerun on the same estimates yields identical microdata.
+        through what they share.
+
+        Every per-bag quantity is computed on the bag's support only (``m.indices`` /
+        ``m.data``), never over its whole cell space.
 
         Args:
-            marginals (List[np.ndarray]): Estimated integer counts per bag, aligned to
+            marginals (List[sp.csc_matrix]): Estimated integer counts per bag as
+                (bag n_cells, 1) sparse columns with sorted indices, aligned to
                 junction_tree.bags.
             filter_dict (Dict[str, Any]): Hierarchical values for this leaf.
 
@@ -810,36 +827,36 @@ class DataHandler:
         junction_tree = self.junction_tree
         column_index = {column: i for i, column in enumerate(self.query_columns)}
 
-        # Seed: expand the root bag's counts into one partial record per person. Each
+        # Expand the root bag's counts into one partial record per person. Each
         # occupied cell is repeated as many times as its count, so cells[r] is the root-bag
         # cell that record r sits in.
         root_bag = junction_tree.root
         root_domain = self.bag_domains[root_bag]
-        root_counts = np.asarray(marginals[root_bag])
-        occupied = np.flatnonzero(root_counts)
-        cells = np.repeat(occupied, root_counts[occupied])
+        occupied, counts = marginals[root_bag].indices, marginals[root_bag].data
+        cells = np.repeat(occupied, counts)
 
         n_records = len(cells)
         if n_records == 0:
             return pd.DataFrame(columns=self.hierarchical_columns + self.query_columns)
 
-        # Per-record rank on every query column; -1 marks "not assigned yet".
-        records = np.full((n_records, len(self.query_columns)), -1, dtype=np.int64)
+        # Per-record rank on every query column; -1 marks "not assigned yet". int32 rather
+        # than int64: these are per-column ranks, bounded by the largest declared domain,
+        # and this matrix is the memory ceiling of the whole factored pipeline
+        # (n_records x n_columns for a whole leaf).
+        records = np.full((n_records, len(self.query_columns)), -1, dtype=np.int32)
 
         # Fill in the root bag's columns first, then each bag in order after its parent.
-        # In occupied we have the indices in the domain of the root bag that are not zero
-        # We use cells to repeat the occupied cells according to their counts, so we can
-        # here fill the records with the indices of the subdomain of just the column we
-        # are interested in.
+        # cell_ranks is evaluated on `cells` (length n_records) instead of building the
+        # bag-wide axis_ranks table and indexing into it.
         for column in root_domain.columns:
-            records[:, column_index[column]] = root_domain.axis_ranks(column)[cells]
+            records[:, column_index[column]] = root_domain.cell_ranks(cells, column)
 
         # order[1:] = every bag after the root, each visited once its parent (hence its
         # separator columns) is already filled in.
         for bag_index in junction_tree.order[1:]:
             separator = junction_tree.parent_separator[bag_index]
             domain = self.bag_domains[bag_index]
-            counts = np.asarray(marginals[bag_index])
+            occupied, counts = marginals[bag_index].indices, marginals[bag_index].data
 
             if counts.sum() != n_records:
                 raise ValueError(
@@ -854,16 +871,20 @@ class DataHandler:
             if separator:
                 separator_domain = self.contingency_domain.subdomain(separator)
                 for position, column in enumerate(separator):
-                    record_group += (records[:, column_index[column]]
+                    record_group += (records[:, column_index[column]].astype(np.int64)
                                      * int(separator_domain.strides[position]))
 
             # Both sides encode `separator` with the same mixed-radix id (subdomain here vs
-            # project_to inside separator_projection), so the group ids are comparable. 
-            # Sorted by group id they line up positionally: within each group the two totals 
+            # project_cells_to below), so the group ids are comparable.
+            # Sorted by group id they line up positionally: within each group the two totals
             # are equal, so the p-th cell belongs to the p-th record.
-            # expanded = this bag's cells to place, group-ordered and repeated by count.
-            cells_by_group = np.argsort(self.separator_projection(bag_index, separator), kind="stable")
-            expanded = np.repeat(cells_by_group, counts[cells_by_group])
+            # expanded = this bag's occupied cells to place, group-ordered and repeated by
+            # count. `counts` must be permuted by the same `order` as `occupied` before the
+            # repeat - otherwise each cell would be repeated by another cell's count and the
+            # reconstruction would be wrong.
+            sep_ids = domain.project_cells_to(occupied, separator)
+            order = np.argsort(sep_ids, kind="stable")
+            expanded = np.repeat(occupied[order], counts[order])
             records_by_group = np.argsort(record_group, kind="stable")
 
             # Pair them positionally within each group: record r now knows its cell in this bag.
@@ -875,7 +896,7 @@ class DataHandler:
             # those ranks into the resulting records.
             for column in domain.columns:
                 if column not in separator:  # separator columns are already filled in
-                    records[:, column_index[column]] = domain.axis_ranks(column)[assigned]
+                    records[:, column_index[column]] = domain.cell_ranks(assigned, column)
 
         # Check that every column has been assigned a value for every record. 
         # If any column has a -1, it means that some records were not assigned a value for that column
@@ -896,13 +917,14 @@ class DataHandler:
 
         return leaf_df[self.hierarchical_columns + self.query_columns]
 
-    def write_microdata_from_marginals(self, node_id: int, children_marginals: List[List[np.ndarray]],
+    def write_microdata_from_marginals(self, node_id: int, children_marginals: List[List[sp.csc_matrix]],
                                        filter_dicts: List[Dict[str, Any]]) -> None:
         '''Reconstruct and write each leaf child's microdata (factored pipeline).
 
         Args:
             node_id (int): Parent node ID, used to name the output files.
-            children_marginals (List[List[np.ndarray]]): Per-child list of per-bag estimates.
+            children_marginals (List[List[sp.csc_matrix]]): Per-child list of per-bag
+                estimates, as the sparse columns split_marginals returns.
             filter_dicts (List[Dict[str, Any]]): Filter dictionary per child.
         '''
         for child_index, (marginals, filter_dict) in enumerate(zip(children_marginals, filter_dicts)):

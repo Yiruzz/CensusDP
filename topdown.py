@@ -400,10 +400,7 @@ class TopDown():
 
         solution = self._estimate_node_individually(root.id, measurement, constraints)
 
-        if self.junction_tree is not None:
-            self.data_handler.spill_marginals(path, self.data_handler.split_marginals(solution))
-        else:
-            self.data_handler.spill_vector(path, solution)
+        self.data_handler.spill_vector(path, solution)
 
     def _pool_setup(self) -> Tuple[callable, Tuple]:
         '''Return the worker-pool initializer and its arguments for the active pipeline.

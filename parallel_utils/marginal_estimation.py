@@ -185,7 +185,6 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
     _data_handler.file_path = parquet_path
 
     _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
-    _data_handler.n_cells = _data_handler.contingency_domain.n_cells
     _data_handler.build_marginal_domains(junction_tree)
     _data_handler.create_data_view()
 
@@ -204,21 +203,23 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
     _check = check
 
 
-def combine_child_constraints(n_children: int, parent_vector: np.ndarray, support: np.ndarray,
+def combine_child_constraints(n_children: int, parent_column: sp.csc_matrix,
                               children_constraints: List[List[SparseConstraint]],
                               active_set: set, width: int,
-                              _separator_constraints: Sequence[SparseConstraint]) -> List[SparseConstraint]:
+                              separator_rows: Sequence[SparseConstraint]) -> List[SparseConstraint]:
     '''Assemble the three constraint families for one node group, in joint space.
+
+    The parent arrives as its sparse column so we know which positions to sum over.
 
     Args:
         n_children (int): Number of children solved jointly.
-        parent_vector (np.ndarray): The parent's concatenated marginals (length width).
-        support (np.ndarray): Positions where the parent is non-zero.
+        parent_column (sp.csc_matrix): The parent's estimate over the concatenated marginal
+            space, shape (width, 1), canonical.
         children_constraints (List[List[SparseConstraint]]): Per-child user constraints,
             already indexed in [0, width) by materialize_node_marginals.
         active_set (set): Active joint-space indices {k * width + p}.
         width (int): Length of one node's concatenated marginal vector.
-        _separator_constraints (Sequence[SparseConstraint]): Single-node separator pattern.
+        separator_rows (Sequence[SparseConstraint]): Single-node separator pattern.
 
     Returns:
         List[SparseConstraint]: All rows of the joint problem.
@@ -233,47 +234,52 @@ def combine_child_constraints(n_children: int, parent_vector: np.ndarray, suppor
                 joint.append(pruned)
 
     # (1) Separator consistency, replicated per child.
-    joint.extend(shift_to_children(_separator_constraints, n_children, width, active_set))
+    joint.extend(shift_to_children(separator_rows, n_children, width, active_set))
 
     # (3) Geographic consistency: the children sum to the parent, position by position.
     # Only over the parent's support - where the parent is 0 no child variable exists, so
     # the sum is structurally 0 and the row would be redundant.
     coefs = np.ones(n_children)
-    for position in support:
+    for position, value in zip(parent_column.indices, parent_column.data):
         position = int(position)
         joint.append(SparseConstraint(
             indices=np.array([k * width + position for k in range(n_children)]),
             coefs=coefs,
             sense="=",
-            rhs=float(parent_vector[position]),
+            rhs=float(value),
         ))
 
     return joint
 
 
-def _check_node_correctness(parent_vector: np.ndarray, joint_solution: sp.csc_matrix,
-                            n_children: int, width: int) -> None:
+def _check_node_correctness(parent_column: sp.csc_matrix, joint_solution: sp.csc_matrix,
+                            width: int) -> None:
     '''Report when a bag's child marginals do not sum to the parent's.
 
     Checked per bag rather than on the grand total: a single total could match while the
     individual bags disagree.
 
     Args:
-        parent_vector (np.ndarray): The parent's concatenated marginals.
+        parent_column (sp.csc_matrix): The parent's estimate, shape (width, 1), canonical.
         joint_solution (sp.csc_matrix): Solved children, shape (n_children * width, 1).
-        n_children (int): Number of children.
         width (int): Length of one node's concatenated marginal vector.
     '''
+    # Position p of child k lives at row k * width + p, so folding the row indices modulo
+    # width sums the children in one pass.
+    column = joint_solution.tocsc()
     children_total = np.zeros(width, dtype=np.int64)
-    dense = np.asarray(joint_solution.todense()).ravel()
-    for k in range(n_children):
-        children_total += dense[k * width:(k + 1) * width].astype(np.int64)
+    np.add.at(children_total,
+              np.asarray(column.indices, dtype=np.int64) % width,
+              np.asarray(column.data).ravel().astype(np.int64))
 
-    mismatched = np.flatnonzero(children_total != parent_vector.astype(np.int64))
+    parent_total = np.zeros(width, dtype=np.int64)
+    parent_total[parent_column.indices] = parent_column.data
+
+    mismatched = np.flatnonzero(children_total != parent_total)
     if len(mismatched):
         position = int(mismatched[0])
         print(f"\nError: children sum to {children_total[position]} at position {position} "
-              f"but the parent holds {parent_vector[position]} "
+              f"but the parent holds {parent_total[position]} "
               f"({len(mismatched)} positions differ).")
 
 
@@ -294,8 +300,7 @@ def estimate_and_update_children(node_id: int, node_path: str,
     Returns:
         float: Seconds spent writing microdata (0.0 when the children are not leaves).
     '''
-    parent_marginals = _data_handler.load_marginals(node_path)
-    parent_vector = np.concatenate(parent_marginals)
+    parent_column = _data_handler.load_vector(node_path)
 
     width = _data_handler.marginal_width
     n_children = len(children_filter_dicts)
@@ -318,12 +323,13 @@ def estimate_and_update_children(node_id: int, node_path: str,
         children_constraints.append(constraints)
 
     # Positions where the parent is non-zero. Non-negativity plus the geographic family
-    # force every child to 0 elsewhere, so variables are only created there.
-    support = np.flatnonzero(parent_vector)
+    # force every child to 0 elsewhere, so variables are only created there. In a canonical
+    # column the support is .indices in the csc sparse representation.
+    support = parent_column.indices
     active = [k * width + int(p) for k in range(n_children) for p in support]
 
     joint_constraints = combine_child_constraints(
-        n_children, parent_vector, support, children_constraints,
+        n_children, parent_column, children_constraints,
         set(active), width, _separator_constraints)
 
     t1 = time.time()
@@ -347,7 +353,7 @@ def estimate_and_update_children(node_id: int, node_path: str,
     rounding_time = time.time() - t1
 
     if _check:
-        _check_node_correctness(parent_vector, joint_solution, n_children, width)
+        _check_node_correctness(parent_column, joint_solution, width)
 
     microdata_time = 0.0
     if is_leaf:

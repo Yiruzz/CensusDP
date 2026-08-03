@@ -87,11 +87,34 @@ class ContingencyDomain:
     # Per-axis views
     # ------------------------------------------------------------------
 
+    def cell_ranks(self, cells: np.ndarray, column: str) -> np.ndarray:
+        """Return the rank (mixed-radix digit) of ``column`` for the given cells only.
+
+        Same arithmetic as axis_ranks, but evaluated on an arbitrary subset instead of
+        the whole space, so the cost is O(len(cells)) rather than O(n_cells). Useful 
+        when using sparse representation of data.
+
+        Args:
+            cells: Flat cell indices of this domain (any order, duplicates allowed).
+            column: One of self.columns.
+
+        Returns:
+            np.ndarray: Length-len(cells) integer array of digits, aligned to ``cells``.
+        """
+        i = self.columns.index(column)
+        stride = int(self.strides[i])
+        size = int(self.sizes[i])
+        # // stride for the incremental repeating value pattern (0 0 1 1 2 2 3 3 ...)
+        # % size to wrap around the domain size (0 0 1 1 0 0 1 1 ...)
+        return (np.asarray(cells, dtype=np.int64) // stride) % size
+
     def axis_ranks(self, column: str) -> np.ndarray:
         """Return the per-cell rank (mixed-domain digit) on the given column.
 
         Length n_cells; values in 0..sizes[i]-1. Useful for grouping cells
         into marginals without materializing values.
+
+        The whole-space case of cell_ranks: axis_ranks(c) == cell_ranks(arange(n), c).
 
         Args:
             column: One of self.columns.
@@ -99,12 +122,7 @@ class ContingencyDomain:
         Returns:
             np.ndarray: Length-n_cells integer array of digits.
         """
-        i = self.columns.index(column)
-        stride = int(self.strides[i])
-        size = int(self.sizes[i])
-        # // stride for the incremental reapeating value pattern (0 0 1 1 2 2 3 3 ...)
-        # % size to wrap around the domain size (0 0 1 1 0 0 1 1 ...) 
-        return (np.arange(self.n_cells, dtype=np.int64) // stride) % size
+        return self.cell_ranks(np.arange(self.n_cells, dtype=np.int64), column)
 
     def mask_compare(self, column: str, op: str, value: Any) -> np.ndarray:
         """Boolean mask (length n_cells) where column op value holds.
@@ -261,6 +279,37 @@ class ContingencyDomain:
             raise ValueError(f"Columns not in domain: {missing}")
         return ContingencyDomain(list(columns), {c: self.domains[c] for c in columns})
 
+    def project_cells_to(self, cells: np.ndarray, columns: Sequence[str]) -> np.ndarray:
+        """Map the given cells to their cell index in subdomain(columns).
+
+        Subset counterpart of project_to: same mixed-radix group id, computed only where
+        asked. The marginal microdata reconstruction needs the separator group of a bag's
+        occupied cells.
+
+        Args:
+            cells: Flat cell indices of this domain (any order, duplicates allowed).
+            columns: Ordered subset of self.columns (same order used to build the target
+                sub-domain via subdomain()).
+
+        Returns:
+            np.ndarray: Length-len(cells) int array of target sub-cell indices, aligned
+                to ``cells``.
+        """
+        missing = [c for c in columns if c not in self.domains]
+        if missing:
+            raise ValueError(f"Columns not in domain: {missing}")
+        cells = np.asarray(cells, dtype=np.int64)
+        gid = np.zeros(len(cells), dtype=np.int64)
+        stride = 1
+        # For each column in the target subdomain, compute its contribution to the mixed-radix index.
+        # The contribution is the rank of the column's value in its domain, multiplied by the
+        # stride (place value) of that column in the subdomain. The stride is the product of the sizes
+        # of all columns to the right in the subdomain. We accumulate this contribution for each column.
+        for c in reversed(list(columns)):
+            gid += self.cell_ranks(cells, c) * stride
+            stride *= len(self.domains[c])
+        return gid
+
     def project_to(self, columns: Sequence[str]) -> np.ndarray:
         """Map every cell of this domain to its cell index in subdomain(columns).
 
@@ -269,6 +318,8 @@ class ContingencyDomain:
         non-``columns`` attributes are summed out. Cells sharing a projected id
         form one marginal group. Length n_cells.
 
+        The whole-space case of project_cells_to.
+
         Args:
             columns: Ordered subset of self.columns (same order used to build the
                 target sub-domain via subdomain()).
@@ -276,16 +327,4 @@ class ContingencyDomain:
         Returns:
             np.ndarray: Length-n_cells int array of target sub-cell indices.
         """
-        missing = [c for c in columns if c not in self.domains]
-        if missing:
-            raise ValueError(f"Columns not in domain: {missing}")
-        gid = np.zeros(self.n_cells, dtype=np.int64)
-        stride = 1
-        # For each column in the target subdomain, compute its contribution to the mixed-radix index.
-        # The contribution is the rank of the column's value in its domain, multiplied by the
-        # stride (place value) of that column in the subdomain. The stride is the product of the sizes
-        # of all columns to the right in the subdomain. We accumulate this contribution for each column.
-        for c in reversed(list(columns)):
-            gid += self.axis_ranks(c) * stride
-            stride *= len(self.domains[c])
-        return gid
+        return self.project_cells_to(np.arange(self.n_cells, dtype=np.int64), columns)
