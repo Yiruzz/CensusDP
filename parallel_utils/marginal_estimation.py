@@ -80,9 +80,12 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
         data_handler (DataHandler): Handler with a junction tree already bound via
             build_marginal_domains().
 
+    An edge whose separator is empty (the interaction graph is disconnected) still yields a
+    row - the degenerate one that ties the two bags' grand totals. See the loop body.
+
     Returns:
-        List[SparseConstraint]: One row per (tree edge, separator value); empty when the
-            tree has a single bag or all separators are empty.
+        List[SparseConstraint]: One row per (tree edge, separator value); empty only when
+            the tree has a single bag.
     """
     junction_tree = data_handler.junction_tree
     assert junction_tree is not None, "No junction tree bound. Call build_marginal_domains first."
@@ -90,10 +93,17 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
     rows: List[SparseConstraint] = []
     for i, j in junction_tree.edges():
         separator = junction_tree.separator(i, j)
-        if not separator:
-            # Disconnected interaction graph: the bags share no column, so there is
-            # nothing to agree on. (The node total is tied by the geographic family.)
-            continue
+
+        # An empty separator (the bags share no column - the interaction graph is
+        # disconnected) is not skipped. The empty sub-domain has exactly one cell
+        # (the empty product), and every cell of either bag projects to it, so the
+        # general code below emits:
+        #     sum(all cells of bag i) - sum(all cells of bag j) = 0
+        # i.e. "both bags total the same node population". That is a structural truth
+        # independent of any correlation - every record contributes 1 to every bag - and it
+        # is what makes the microdata reconstruction possible across components, since the
+        # reconstruction requires every bag to total the node's record count. It costs no
+        # privacy: the row is declared, data-independent, with rhs 0.
 
         # Number of constraints = number of separator values = number of values in the subdomain.
         n_groups = data_handler.contingency_domain.subdomain(separator).n_cells

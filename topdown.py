@@ -266,7 +266,37 @@ class TopDown():
         print(f'\n  Bags: {self.junction_tree.bags}')
         print(f'  Marginal width: {width} (full joint would be {self.data_handler.n_cells}), '
               f'sensitivity={self.query_sensitivity}')
+        self._report_disconnected_components()
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+
+    def _report_disconnected_components(self) -> None:
+        '''Announce when the declared marginals leave the interaction graph disconnected.
+
+        A tree edge with an empty separator means its two bags share no column, i.e. the
+        marginals say those attribute groups are independent. That is a legitimate modelling
+        choice and it is not patched by inventing a correlation - measuring an extra marginal
+        would cost privacy budget (sensitivity is the number of bags) to assert a dependence
+        that was never claimed.
+
+        What is imposed is the shared-total row on each such edge, because every record
+        contributes 1 to every bag regardless of correlation. Without it the components'
+        totals drift apart under noise and the microdata cannot be reconstructed at all - the
+        join needs every bag to total the node's record count.
+        '''
+        unlinked = [(i, j) for i, j in self.junction_tree.edges()
+                    if not self.junction_tree.separator(i, j)]
+        if not unlinked:
+            return
+
+        print(f'  NOTE: the interaction graph is disconnected - {len(unlinked)} junction-tree '
+              f'edge(s) join bags that share no column:')
+        for i, j in unlinked:
+            print(f'    {self.junction_tree.bags[i]}  <->  {self.junction_tree.bags[j]}')
+        print('    Those attribute groups are treated as INDEPENDENT: no correlation between '
+              'them\n    survives into the microdata. A shared-total constraint is imposed on '
+              'each edge so the\n    bags agree on the node population and the microdata can '
+              'be generated; it costs no\n    privacy budget. Declare a marginal spanning the '
+              'groups if you want them correlated.')
 
     def _build_query_workload(self, t1: float) -> None:
         '''Resolve the workload matrix Q and its sensitivity (full-joint pipeline).
