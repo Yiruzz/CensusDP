@@ -94,6 +94,11 @@ class DataHandler:
         self.marginal_width: Optional[int] = None
         self._separator_projections: Dict[Tuple[int, Tuple[str, ...]], np.ndarray] = {}
 
+        # Non-contextual constraints depend only on the bag's ub-domain, never on the node, 
+        # so they are compiled once per run. 
+        # (id(constraint), bag) -> (constraint, indices, coefs, sense, rhs).
+        self._compiled_constraints: Dict[Tuple[int, int], Tuple] = {}
+
         # Columns to use
         self.hierarchical_columns: List[str] = []
         self.query_columns: List[str] = []
@@ -252,6 +257,7 @@ class DataHandler:
         self.bag_offsets = offsets
         self.marginal_width = total
         self._separator_projections = {}
+        self._compiled_constraints = {}
 
     def separator_projection(self, bag_index: int, columns: Sequence[str]) -> np.ndarray:
         '''Map each cell of a bag to its cell index in the separator sub-domain.
@@ -577,15 +583,38 @@ class DataHandler:
                     # (e.g. the real total) are computed from it directly.
                     constraint.apply_aggregation_function(marginals[bag_index])
 
-            sparse = constraint.to_sparse_constraint(self.bag_domains[bag_index])
-            node_constraints.append(SparseConstraint(
-                indices=sparse.indices + self.bag_offsets[bag_index],
-                coefs=sparse.coefs,
-                sense=sparse.sense,
-                rhs=sparse.rhs,
-            ))
+            indices, coefs, sense, cached_rhs = self._compiled_constraint(constraint, bag_index)
+            # Only a contextual constraint's right-hand side varies per node; its cells do not.
+            rhs = (float(constraint.value)
+                   if isinstance(constraint, ContextualAggregateConstraint) else cached_rhs)
+            node_constraints.append(SparseConstraint(indices, coefs, sense, rhs))
 
         return marginals, node_constraints
+
+    def _compiled_constraint(self, constraint: Constraint, bag_index: int):
+        '''Cells a constraint selects inside a bag, compiled once and reused.
+
+        The cache key pins the constraint object as part of the value, so a garbage-collected
+        constraint cannot have its id() reused by a different one while the entry lives.
+
+        Args:
+            constraint (Constraint): The constraint to compile.
+            bag_index (int): Index of the bag whose sub-domain it is compiled against.
+
+        Returns:
+            Tuple: (indices shifted into the node's space, coefs, sense, rhs as compiled).
+        '''
+        key = (id(constraint), bag_index)
+        hit = self._compiled_constraints.get(key)
+        if hit is not None:
+            _pin, indices, coefs, sense, rhs = hit
+            return indices, coefs, sense, rhs
+
+        sparse = constraint.to_sparse_constraint(self.bag_domains[bag_index])
+        indices = sparse.indices + self.bag_offsets[bag_index]
+        self._compiled_constraints[key] = (constraint, indices, sparse.coefs,
+                                           sparse.sense, sparse.rhs)
+        return indices, sparse.coefs, sparse.sense, sparse.rhs
 
     def spill_path(self, filter_dict: Dict[str, Any]) -> str:
         '''Get the spill file path from a filter dictionary.
