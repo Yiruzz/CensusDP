@@ -84,14 +84,15 @@ The rule of thumb: a converse is a claim about the **questionnaire**, not about 
 Validate it before declaring it —
 
 ```
-python -m tools.check_skip_logic personas
-python -m tools.check_skip_logic viviendas
+python -m tests.test_census_declarations personas
+python -m tests.test_census_declarations viviendas
 ```
 
 reports, per rule, how many records violate the forward direction and how many carry the
-sentinel with no rule requiring it. Note the asymmetry in what that buys you: it can only
-*refute* a converse, never establish one. Deriving constraints from the data would be
-data-dependent, which is exactly what the declared domains exist to avoid.
+sentinel with no rule requiring it (and cross-checks the declared domains against the
+`etiquetas_*.csv` codebook while it is there). Note the asymmetry in what that buys you: it
+can only *refute* a converse, never establish one. Deriving constraints from the data would
+be data-dependent, which is exactly what the declared domains exist to avoid.
 
 ## Extending the DSL
 - Add a new atomic or compound constraint class under `constraints/logical_expressions/` by subclassing `LogicalExpression` and implementing `reduce(contingency_df)`.
