@@ -141,12 +141,19 @@ def shift_to_children(rows: Sequence[SparseConstraint], n_children: int, width: 
     Returns:
         List[SparseConstraint]: The rows shifted into joint space, fully-pruned rows dropped.
     """
+    base = [pruned for pruned in
+            (row.prune_to_active_space(0, active_mask) for row in rows)
+            if pruned is not None]
+
     shifted: List[SparseConstraint] = []
     for k in range(n_children):
-        for row in rows:
-            pruned = row.prune_to_active_space(k * width, active_mask)
-            if pruned is not None:
-                shifted.append(pruned)
+        if k == 0:
+            shifted.extend(base)
+            continue
+        offset = k * width
+        shifted.extend(SparseConstraint(indices=row.indices + offset, coefs=row.coefs,
+                                        sense=row.sense, rhs=row.rhs)
+                       for row in base)
     return shifted
 
 
