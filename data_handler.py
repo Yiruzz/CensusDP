@@ -430,7 +430,7 @@ class DataHandler:
 
         return sparse_vector
 
-    def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Union[sp.csr_matrix, np.ndarray], con: Optional["duckdb.DuckDBPyConnection"] = None) -> Tuple[np.ndarray, List]:
+    def materialize_node_data(self, filter_dict: Dict[str, Any], constraints: List[Constraint], query_matrix: Optional[Union[sp.csr_matrix, np.ndarray]], con: Optional["duckdb.DuckDBPyConnection"] = None) -> Tuple[np.ndarray, List]:
         '''Materialize contingency vector and prepare constraints in a single pass.
 
         Queries the contingency table based on filter_dict, then creates the (sparse-backed)
@@ -440,7 +440,8 @@ class DataHandler:
         Args:
             filter_dict (Dict[str, Any]): The node's filter conditions (column -> value mapping).
             constraints (List[Constraint]): Constraints for the node considering its level.
-            query_matrix (Union[sp.csr_matrix, np.ndarray]): Query matrix for aggregating contingency vectors.
+            query_matrix (Optional[Union[sp.csr_matrix, np.ndarray]]): Query matrix for aggregating
+                contingency vectors. None means the identity workload, each cell answered directly.
             con (Optional[duckdb.DuckDBPyConnection]): Per-thread DuckDB cursor for concurrent
                 materialization. Defaults to the shared connection when None.
 
@@ -452,7 +453,11 @@ class DataHandler:
         # Build the measurement vector y = Q @ x from the sparse histogram using DuckDB query
         x = self._create_contingency_vector(filter_dict, con)  # sparse (n_cells, 1)
 
-        if sp.issparse(query_matrix):
+        if query_matrix is None:
+            # Identity workload: y = x. Densified because DP noise hits every entry
+            # TODO: Consider the parent entries that are zero to not consisder them when materializing the data
+            y = np.asarray(x.todense()).ravel()
+        elif sp.issparse(query_matrix):
             y = np.asarray((query_matrix @ x).todense()).ravel()
         else:
             y = query_matrix @ x.toarray().ravel()

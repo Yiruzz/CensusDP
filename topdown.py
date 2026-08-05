@@ -12,7 +12,7 @@ from parallel_utils.estimation_phase import init_process, estimate_and_update_ch
 from parallel_utils import marginal_estimation
 from optimizers import build_optimizer
 from graph import JunctionTree, MarginalSelectionStrategy, MaxSpanningTreeMI, PairwiseAssociation
-from queries import QueryWorkload
+from queries import QueryWorkload, is_identity_workload
 from privacy import PrivacyMechanism
 
 from typing import Dict, Iterable, List, Optional, Union, Tuple
@@ -230,12 +230,6 @@ class TopDown():
 
         Every constraint scope is embedded as a mandatory clique alongside the requested
         marginals, so each constraint is guaranteed to fit inside some bag.
-
-        The optimizer derives its variable layout from query_matrix.shape, so Q is set to
-        the identity over the concatenated marginal space: one measurement per bag cell,
-        which reduces the objective to sum_bag ||x_bag - y_bag||^2 with no auxiliary
-        variables. The sensitivity is structural - a record falls in exactly one cell of
-        each bag, so the measurement vector has squared L2 sensitivity = number of bags.
         '''
         cliques = list(self.marginal_cliques or [])
         if self.marginal_strategy is not None:
@@ -260,7 +254,10 @@ class TopDown():
         self.data_handler.build_marginal_domains(self.junction_tree)
 
         width = self.data_handler.marginal_width
-        self.Q = sp.identity(width, format='csr', dtype=float)
+        # No Q at all: in the factored pipeline the workload is structurally the identity -
+        # each bag cell is measured directly by its own GROUP BY, never aggregated from others.
+        # The optimizers take the separable objective path when query_matrix is None.
+        self.Q = None
         self.query_sensitivity = self.junction_tree.n_bags
 
         print(f'\n  Bags: {self.junction_tree.bags}')
@@ -305,12 +302,28 @@ class TopDown():
             t1 (float): Start timestamp, for the elapsed-time report.
         '''
         print(f'Building query workload...', end=' ')
+        n_cells = self.data_handler.contingency_domain.n_cells
+
         if isinstance(self.Q, QueryWorkload):
             self.Q = self.Q.build(self.data_handler.contingency_domain)
         elif not (isinstance(self.Q, np.ndarray) or sp.issparse(self.Q)):
-            # No workload set - use the sparse identity (each cell answered directly).
-            n_cells = self.data_handler.contingency_domain.n_cells
-            self.Q = sp.identity(n_cells, format='csr', dtype=float)
+            # No workload set: every cell is answered directly, i.e. the identity.
+            self.Q = None
+
+        # Check for identity matrix, since when Q is the the identity we can afford to drop it entirely
+        # and avoid computations that depends on the form of Q.
+        if is_identity_workload(self.Q):
+            self.Q = None
+            self.query_sensitivity = 1
+            # Set explicitly rather than leaning on noise_width's fallback chain
+            # (marginal_width -> query_width -> n_cells): that ordering is implicit coupling.
+            self.data_handler.query_width = int(n_cells)
+            print(f'\n  Query matrix: identity, n_queries={n_cells}, '
+                  f'sensitivity={self.query_sensitivity}')
+            print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+            print(f'{time.time() - t1:.2f} seconds.\n')
+            return
+
         # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
         #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
         if sp.issparse(self.Q):

@@ -7,7 +7,7 @@ from .expression import (
     NotExpr,
     InExpr,
 )
-from .query_workload import QueryWorkload
+from .query_workload import QueryWorkload, is_identity_workload
 
 __all__ = [
     'col',
@@ -18,4 +18,5 @@ __all__ = [
     'NotExpr',
     'InExpr',
     'QueryWorkload',
+    'is_identity_workload',
 ]

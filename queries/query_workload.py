@@ -186,3 +186,39 @@ class QueryWorkload:
 
     def __repr__(self) -> str:
         return f"QueryWorkload({len(self._resolvers)} query spec(s))"
+
+
+def is_identity_workload(query_matrix) -> bool:
+    """True when Q is the identity, i.e. every cell is answered directly and Q can be dropped.
+
+    Args:
+        query_matrix: A scipy sparse matrix, a dense ndarray, or None.
+
+    Returns:
+        bool: True when the matrix is exactly the identity. None counts as the identity, since
+            that is how "no workload" is represented.
+    """
+    if query_matrix is None:
+        return True
+
+    n_rows, n_cols = query_matrix.shape
+    if n_rows != n_cols:
+        return False
+
+    if sp.issparse(query_matrix):
+        matrix = query_matrix.tocsr()
+        matrix.eliminate_zeros()
+        matrix.sort_indices()
+        return (matrix.nnz == n_rows
+                and np.array_equal(matrix.indptr, np.arange(n_rows + 1))
+                and np.array_equal(matrix.indices, np.arange(n_rows))
+                and bool(np.all(matrix.data == 1)))
+
+    # Dense: only reachable for small n (a dense Q is not representable otherwise), so the
+    # per-element scan is fine. np.eye is deliberately NOT materialised.
+    dense = np.asarray(query_matrix)
+    occupied = np.flatnonzero(dense.ravel())
+    return (len(occupied) == n_rows
+            and np.array_equal(occupied, np.arange(n_rows) * (n_cols + 1))
+            and bool(np.all(dense[dense != 0] == 1)))
+

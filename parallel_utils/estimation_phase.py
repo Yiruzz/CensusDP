@@ -17,7 +17,7 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
                  constraints_dict: Dict[int, List],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
-                 query_matrix: spmatrix, privacy_mechanism: PrivacyMechanism,
+                 query_matrix: Optional[spmatrix], privacy_mechanism: PrivacyMechanism,
                  query_sensitivity: int, check: bool,
                  zarr_path: str, noisy_array_name: str) -> None:
     '''Initialize global variables for parallel worker processes.
@@ -33,7 +33,8 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
         domain_dict (Dict[str, Any]): Domain mapping for query columns.
         hierarchical_columns (List[str]): Hierarchical column names.
         query_columns (List[str]): Query column names.
-        query_matrix (spmatrix): The sparse query matrix Q used in optimization.
+        query_matrix (Optional[spmatrix]): The sparse query matrix Q used in optimization, or
+                                            None for the identity workload.
         privacy_mechanism (PrivacyMechanism): Privacy mechanism instance for noise addition.
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.

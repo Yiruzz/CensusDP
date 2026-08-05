@@ -205,11 +205,8 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
 
     _separator_constraints = separator_constraints(_data_handler)
 
-    # The optimizer derives its variable layout from query_matrix.shape, so the identity
-    # over the concatenated marginal space declares "one measurement per bag cell". Every
-    # row has a single nonzero, so no auxiliary q_x variables are created and the objective
-    # reduces to sum_bag ||x_bag - y_bag||^2 - exactly the factored objective.
-    _Q = sp.identity(_data_handler.marginal_width, format="csr", dtype=float)
+    # No matrix since we consider the identitiy workload, but the optimizer backend still needs a placeholder.
+    _Q = None
 
     _constraints = constraints_dict
     _query_sensitivity = query_sensitivity

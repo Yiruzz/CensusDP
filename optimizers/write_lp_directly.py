@@ -40,6 +40,103 @@ def _write_term(f: IO, term: str, count: int, terms_per_line: int = TERMS_PER_LI
     return count
 
 
+def _write_identity_objective(f: IO, noisy_measurements: List[np.ndarray],
+                               active: List[int], n_cells: int) -> None:
+    """Objective for the IDENTITY workload: sum_k ||x_k - y_k||^2, in one pass over `active`.
+
+    With Q = I every row has its single nonzero on the diagonal, so query r is cell r and the
+    objective decomposes into one independent square per active cell.
+
+    Args:
+        f (IO): Open LP file, positioned right after the "obj:" tag.
+        noisy_measurements (List[np.ndarray]): Per-child measurement y_k, length n_cells.
+        active (List[int]): Global joint-space indices k * n_cells + j, ascending.
+        n_cells (int): Cells per child, used to split a global index into (child, cell).
+    """
+    # Pass 1: linear terms  -2*y * x[g]
+    term_count = 0
+    for g in active:
+        k, j = divmod(int(g), n_cells)
+        y = float(noisy_measurements[k][j])
+        if y == 0.0:
+            continue  # -2*0*x = 0
+        term_count = _write_term(f, f" {_fmt(-2.0 * y)} x[{g}]", term_count)
+
+    # Pass 2: quadratic terms  2 * x[g]^2, wrapped in the "[ ... ] / 2" LP convention so each
+    # evaluates to 1 * x^2.
+    if active:
+        f.write(" + [")
+        for g in active:
+            term_count = _write_term(f, f" {_fmt(2.0)} x[{g}] ^ 2", term_count)
+        f.write(" ] / 2")
+    elif term_count == 0:
+        f.write(" 0")
+
+
+def _write_workload_objective(f: IO, noisy_measurements: List[np.ndarray], active_set: set,
+                              nz_per_row: List[np.ndarray], n_queries: int,
+                              n_children: int, n_cells: int) -> None:
+    """Objective for a general workload: sum_k ||Q x_k - y_k||^2.
+
+    Rows with several nonzeros are lifted through the auxiliary q_x[k, r] so the objective
+    stays a sum of one-term squares; single-nonzero rows are squared directly on x.
+
+    Args:
+        f (IO): Open LP file, positioned right after the "obj:" tag.
+        noisy_measurements (List[np.ndarray]): Per-child measurement y_k, length n_queries.
+        active_set (set): Global joint-space indices that survived pruning.
+        nz_per_row (List[np.ndarray]): Column indices of Q's nonzeros, per row.
+        n_queries (int): Rows of Q.
+        n_children (int): Children solved jointly.
+        n_cells (int): Cells per child.
+    """
+    # Pass 1: linear terms, written directly.
+    term_count = 0
+    for r in range(n_queries):
+        nz = nz_per_row[r]
+        if len(nz) == 1:  # Identity-like row
+            j = int(nz[0])
+            for k in range(n_children):
+                base = k * n_cells
+                if (base + j) not in active_set:
+                    continue
+                y_kr = float(noisy_measurements[k][r])
+                if y_kr == 0.0:
+                    continue  # -2*0*x = 0
+                term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} x[{base + j}]", term_count)
+        else:  # General case with lifted variables
+            for k in range(n_children):
+                y_kr = float(noisy_measurements[k][r])  # noisy value for child k and query r
+                if y_kr == 0.0:  # -2*0*q_x = 0
+                    continue
+                term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} q_x[{k},{r}]", term_count)
+
+    # Pass 2: quadratic terms
+    bracket_open = False
+    for r in range(n_queries):
+        nz = nz_per_row[r]
+        if len(nz) == 1:
+            j = int(nz[0])
+            for k in range(n_children):
+                base = k * n_cells
+                if (base + j) not in active_set:
+                    continue  # x pruned to 0 -> constant term, does not affect argmin
+                if not bracket_open:
+                    f.write(" + [")
+                    bracket_open = True
+                term_count = _write_term(f, f" {_fmt(2.0)} x[{base + j}] ^ 2", term_count)
+        else:
+            for k in range(n_children):
+                if not bracket_open:
+                    f.write(" + [")
+                    bracket_open = True
+                term_count = _write_term(f, f" {_fmt(2.0)} q_x[{k},{r}] ^ 2", term_count)
+    if bracket_open:
+        f.write(" ] / 2")
+    if term_count == 0:
+        f.write(" 0")
+
+
 class OptimizationModelLP:
     '''
     Builds the model as raw Gurobi LP-format text (no gurobipy Var/Constr objects at all
@@ -95,15 +192,14 @@ class OptimizationModelLP:
             self.env.setParam(key, val)
         self.env.start()
         
-    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[List[int]] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector, written directly to an .lp file.
         There is no container that encapsulates all elements, like Pyomo's ConcreteModel.
 
         Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is a list of per-child
         measurement blocks y_k (each of length n_queries = Q.shape[0]) and the decision
         variable x is the concatenation of per-child cell-count blocks x_k
-        (each of length n_cells = Q.shape[1]). For the identity workload, Q = np.eye(n_cells)
-        is passed by TopDown.initialize(), so this path handles both cases uniformly.
+        (each of length n_cells = Q.shape[1]).
 
         Constraints are always expressed in cell space (indices 0..n_cells-1 per child).
 
@@ -112,12 +208,11 @@ class OptimizationModelLP:
             node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[SparseConstraint]): Constraints for all children of the node.
                 They are already expressed in terms of active indices and mapped to the global index space.
-            query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells).
+            query_matrix (Optional[np.ndarray]): Query matrix Q of shape (n_queries, n_cells),
+                or None for the identity workload, which is never materialised.
             active (Optional[List[int]]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
-                in the parent's support. By non-negativity + consistency, children can only be
-                non-zero there, so only those variables are created. When None (root / individual
-                node), every position is active.
+                in the parent's support.
 
         Returns:
             np.ndarray: Estimated non-negative real cell counts for the active cells only,
@@ -125,23 +220,29 @@ class OptimizationModelLP:
                 (len(active),). Pruned cells are 0 and are not stored; the caller recovers
                 each global index from the shared active list by position.
         '''
-        n_queries, n_cells = query_matrix.shape
-        n_children = len(noisy_measurements)   # len(noisy_measurements[i]) == n_queries
+        is_identity = query_matrix is None
+        n_children = len(noisy_measurements)
+        if is_identity:
+            # Under the identity n_queries == n_cells, and the measurement length gives both
+            n_queries = n_cells = len(noisy_measurements[0])
+        else:
+            n_queries, n_cells = query_matrix.shape   # len(noisy_measurements[i]) == n_queries
         n = n_children * n_cells
 
         # Active (non-pruned) global indices, in joint cell space.
         active = list(range(n)) if active is None else list(active)
-        
-        # Everything pruned: the only feasible solution is all zeros (empty active-aligned vector).
+
+        # Everything pruned: the only feasible solution is all zeros (empty active-aligned vector)
         if not active:
             return np.zeros(0)
-        
-        active_set = set(active)
+
+        # Only the lifted objective needs membership tests; the identity one walks `active` directly
+        active_set = set() if is_identity else set(active)
 
         # Indices where the matrix Q has nonzeros (in this case just a 1).
         # Needed to detect what are we actually querying for in each row.
         # For sparse CSR: extract nonzero indices directly from internal structure (no densification)
-        nz_per_row = [
+        nz_per_row = [] if is_identity else [
             query_matrix.indices[query_matrix.indptr[r] : query_matrix.indptr[r + 1]]
             for r in range(n_queries)
         ]
@@ -157,7 +258,7 @@ class OptimizationModelLP:
         # Only rows with multiple nonzeros need lifting; single-nonzero rows (e.g. the whole
         # identity workload) are squared directly. q_x is created only for the (child, row)
         # pairs that actually need it, so the identity workload allocates no auxiliary vars.
-        lift_rows = [r for r in range(n_queries) if len(nz_per_row[r]) > 1]
+        lift_rows = [] if is_identity else [r for r in range(n_queries) if len(nz_per_row[r]) > 1]
         q_x = [(k, r) for r in lift_rows for k in range(n_children)]
 
         # Start writing
@@ -191,52 +292,13 @@ class OptimizationModelLP:
                 f.write("Minimize\n")
                 f.write(" obj:")
 
-                # Pass 1: linear terms, written directly.
-                # Constant terms do not affect the optimal solution and are not written to the LP file.
-                term_count = 0              # LP format lines must not exceed 999 characters; track length and break as needed.
-                for r in range(n_queries):
-                    nz = nz_per_row[r]
-                    if len(nz) == 1:  # Identity workload case
-                        j = int(nz[0])
-                        for k in range(n_children):
-                            base = k * n_cells
-                            if (base + j) not in active_set:
-                                continue 
-                            y_kr = float(noisy_measurements[k][r])
-                            if y_kr == 0.0:
-                                continue  # -2*0*x = 0
-                            term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} x[{base + j}]", term_count)
-                    else:  # General case with lifted variables
-                        for k in range(n_children):
-                            y_kr = float(noisy_measurements[k][r]) # The noisy value for the k-th child and r-th query
-                            if y_kr == 0.0: # -2*0*q_x = 0
-                                continue
-                            term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} q_x[{k},{r}]", term_count)  # just a simple squared error with the lifted variable q_x[k, r]
-
-                # Pass 2: quadratic terms
-                bracket_open = False
-                for r in range(n_queries):
-                    nz = nz_per_row[r]
-                    if len(nz) == 1:  # Identity workload case
-                        j = int(nz[0])
-                        for k in range(n_children):
-                            base = k * n_cells
-                            if (base + j) not in active_set:
-                                continue # x pruned to 0 -> constant term, does not affect argmin
-                            if not bracket_open:
-                                f.write(" + [")
-                                bracket_open = True
-                            term_count = _write_term(f, f" {_fmt(2.0)} x[{base + j}] ^ 2", term_count)
-                    else:
-                        for k in range(n_children):
-                            if not bracket_open:
-                                f.write(" + [")
-                                bracket_open = True
-                            term_count = _write_term(f, f" {_fmt(2.0)} q_x[{k},{r}] ^ 2", term_count)
-                if bracket_open:
-                    f.write(" ] / 2")
-                if term_count == 0:
-                    f.write(" 0")
+                # Constant terms do not affect the optimal solution and are not written.
+                if is_identity:
+                    _write_identity_objective(f, noisy_measurements, active, n_cells)
+                else:
+                    _write_workload_objective(
+                        f, noisy_measurements, active_set, nz_per_row,
+                        n_queries, n_children, n_cells)
                 f.write("\n")
 
                 # ---------------------------------------------------------------------------
