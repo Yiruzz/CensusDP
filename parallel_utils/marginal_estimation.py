@@ -82,8 +82,8 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
             build_marginal_domains().
 
     Returns:
-        List[SparseConstraint]: One row per (tree edge, separator value); empty only when
-            the tree has a single bag.
+        List[SparseConstraint]: One row per (tree edge, separator value) that at least one of
+            the two bags can reach; empty only when the tree has a single bag.
     """
     junction_tree = data_handler.junction_tree
     assert junction_tree is not None, "No junction tree bound. Call build_marginal_domains first."
@@ -114,6 +114,16 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
         offset_j = data_handler.bag_offsets[j]
 
         for s in range(n_groups):
+            # A separator value neither bag can reach, the declared edit constraints removed
+            # every cell that projects to it, would give the row 0 = 0.
+            #
+            # A one-sided empty group is not skipped, and must not be. It says the other bag's
+            # cells at that value sum to zero, which is how a restriction that only one bag
+            # could express propagates to its neighbours. Dropping it would leave the model
+            # free to put mass on a combination the domain forbids.
+            if bounds_i[s] == bounds_i[s + 1] and bounds_j[s] == bounds_j[s + 1]:
+                continue
+
             cells_i = order_i[bounds_i[s]:bounds_i[s + 1]] + offset_i
             cells_j = order_j[bounds_j[s]:bounds_j[s + 1]] + offset_j
             rows.append(SparseConstraint(
