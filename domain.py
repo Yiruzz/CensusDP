@@ -378,13 +378,12 @@ class RestrictedDomain(ContingencyDomain):
         np.clip(positions, 0, len(self.valid_cells) - 1, out=positions)
         missing = self.valid_cells[positions] != codes
         if missing.any(): # Case when a record falls on a cell that is outside the restricted domain
-            offenders = super().decode(np.unique(codes[missing])[:3])
+            offenders = super().decode(np.unique(codes[missing])[:5])
+            examples = "\n  ".join(str(dict(zip(self.columns, row))) for row in offenders)
             raise ValueError(
-                f"{int(missing.sum())} record group(s) over {list(self.columns)} fall on cells "
-                f"the declared edit constraints removed, e.g. "
-                f"{[dict(zip(self.columns, row)) for row in offenders]}. The records should "
-                f"have been repaired at the source: either a rule has no SQL rendering, or "
-                f"to_sql() and reduce() disagree for it."
+                f"{int(missing.sum())} record group(s) over {list(self.columns)} contradict a "
+                f"declared edit constraint, so they fall on cells the declared domain does not "
+                f"contain. Examples:\n  {examples}\n"
             )
         return positions
 
