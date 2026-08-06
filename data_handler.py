@@ -12,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
+from constraints.domain_restriction import build_restriction
 from constraints.sparse_constraint import SparseConstraint
 from domain import ContingencyDomain
 from graph import JunctionTree
@@ -94,8 +95,8 @@ class DataHandler:
         self.marginal_width: Optional[int] = None
         self._separator_projections: Dict[Tuple[int, Tuple[str, ...]], np.ndarray] = {}
 
-        # Non-contextual constraints depend only on the bag's ub-domain, never on the node, 
-        # so they are compiled once per run. 
+        # Non-contextual constraints depend only on the bag's sub-domain, never on the node,
+        # so they are compiled once per run.
         # (id(constraint), bag) -> (constraint, indices, coefs, sense, rhs).
         self._compiled_constraints: Dict[Tuple[int, int], Tuple] = {}
 
@@ -194,7 +195,7 @@ class DataHandler:
             FROM read_parquet('{self.file_path}')
         """)
 
-    def build_contingency_domain(self) -> None:
+    def build_contingency_domain(self, constraints: Optional[Iterable[Constraint]] = None) -> None:
         '''Build the mixed-radix contingency domain for the query columns.
 
         Replaces the dense Cartesian-product DataFrame: the cell space is described
@@ -202,6 +203,10 @@ class DataHandler:
         table is materialised. Per-column values come from the user-declared
         self.domain when available.
 
+        Args:
+            constraints (Optional[Iterable[Constraint]]): Constraints that hold at every level
+                of the tree. Those declaring structural zeros are folded into the cell space
+                instead of being enforced as optimizer rows (see constraints.domain_restriction).
         '''
         assert self.duckdb_con is not None, "DuckDB connection not initialized. Call create_data_view first."
 
@@ -223,16 +228,24 @@ class DataHandler:
                 result = self.duckdb_con.execute(query).fetchall()
                 declared[col] = np.array([row[0] for row in result])
 
-        self.contingency_domain = ContingencyDomain(columns=self.query_columns, domains=declared)
+        domain = ContingencyDomain(columns=self.query_columns, domains=declared)
+        base_n_cells = domain.n_cells
+        self.contingency_domain = build_restriction(domain, constraints or [])
         self.n_cells = self.contingency_domain.n_cells
 
-        print("\n Contingency domain built with n_cells:", self.contingency_domain.n_cells, "in", end=' ')
+        if self.n_cells != base_n_cells:
+            print(f"\n Contingency domain built with n_cells: {self.n_cells} "
+                  f"({base_n_cells} before the declared edit constraints removed the "
+                  f"structurally impossible cells) in", end=' ')
+        else:
+            print("\n Contingency domain built with n_cells:", self.n_cells, "in", end=' ')
 
     # ------------------------------------------------------------------
     # Factored (junction-tree) cell space
     # ------------------------------------------------------------------
 
-    def build_marginal_domains(self, junction_tree: JunctionTree) -> None:
+    def build_marginal_domains(self, junction_tree: JunctionTree,
+                               constraints: Optional[Iterable[Constraint]] = None) -> None:
         '''Bind a junction tree and derive the per-bag cell spaces.
 
         Each bag gets its own small ContingencyDomain (a subdomain of the global one, so
@@ -241,13 +254,20 @@ class DataHandler:
         start. That layout is what gets measured, noised and spilled — the global joint
         (n_cells) is never materialized.
 
+        A bag whose columns cover a declared structural zero gets that zero folded into its
+        cell space rather than enforced as an optimizer row.
+
         Args:
             junction_tree (JunctionTree): Tree whose bags are the marginals to measure.
+            constraints (Optional[Iterable[Constraint]]): Constraints that hold at every level
+                of the tree.
         '''
         assert self.contingency_domain is not None, "Contingency domain is not built. Call build_contingency_domain first."
 
+        constraints = list(constraints or [])
         self.junction_tree = junction_tree
-        self.bag_domains = [self.contingency_domain.subdomain(bag) for bag in junction_tree.bags]
+        self.bag_domains = [build_restriction(self.contingency_domain.subdomain(bag), constraints)
+                            for bag in junction_tree.bags]
 
         offsets: List[int] = []
         total = 0
@@ -472,9 +492,42 @@ class DataHandler:
                     constraint.apply_aggregation_function(x.data)
 
             # Convert to optimizer callable against the contingency domain
-            level_constraints.append(constraint.to_sparse_constraint(self.contingency_domain))
+            sparse = constraint.to_sparse_constraint(self.contingency_domain)
+            if not self._keep_row(constraint, len(sparse.indices), sparse.rhs):
+                continue
+            level_constraints.append(sparse)
 
         return contingency_vector, level_constraints
+
+    @staticmethod
+    def _keep_row(constraint: Constraint, n_indices: int, rhs: float) -> bool:
+        '''Whether a compiled constraint still has anything to say.
+
+        A structural zero folded into the domain leaves no cell to forbid, so its row selects
+        nothing and is dropped instead of being written as `0 = 0`. An empty row with a
+        non-zero right-hand side is a different thing entirely - an unsatisfiable demand that
+        would make the whole model infeasible with no hint of why - so it is raised.
+
+        Args:
+            constraint (Constraint): The constraint being compiled, for the message.
+            n_indices (int): Number of cells the compiled row selects.
+            rhs (float): Its right-hand side.
+
+        Returns:
+            bool: True when the row must be emitted.
+
+        Raises:
+            ValueError: If the row selects no cell but demands a non-zero total.
+        '''
+        if n_indices:
+            return True
+        if rhs == 0.0:
+            return False
+        raise ValueError(
+            f"{type(constraint).__name__} over {sorted(constraint.scope())} selects no cell of "
+            f"the (restricted) domain but requires a total of {rhs}. It cannot be satisfied. "
+            f"Its scope may reference values the declared edit constraints made impossible."
+        )
 
     def _create_marginal_vector(self, bag_index: int, filters: Dict[str, Any],
                                 con: Optional["duckdb.DuckDBPyConnection"] = None) -> np.ndarray:
@@ -496,7 +549,7 @@ class DataHandler:
 
         # Encode the marginal counts into a dense vector of length bag.n_cells.
         counts = np.zeros(domain.n_cells, dtype=self.dtype)
-        if len(data): 
+        if len(data):
             np.add.at(counts, domain.encode(data), data["count"].values.astype(self.dtype))
         return counts
 
@@ -592,6 +645,8 @@ class DataHandler:
             # Only a contextual constraint's right-hand side varies per node; its cells do not.
             rhs = (float(constraint.value)
                    if isinstance(constraint, ContextualAggregateConstraint) else cached_rhs)
+            if not self._keep_row(constraint, len(indices), rhs):
+                continue
             node_constraints.append(SparseConstraint(indices, coefs, sense, rhs))
 
         return marginals, node_constraints
