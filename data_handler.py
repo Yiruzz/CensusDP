@@ -279,6 +279,13 @@ class DataHandler:
         self._separator_projections = {}
         self._compiled_constraints = {}
 
+        unrestricted = sum(getattr(domain, 'base_n_cells', domain.n_cells)
+                           for domain in self.bag_domains)
+        if unrestricted != total:
+            print(f'\n  Bag cells: {total} ({unrestricted} before the declared edit constraints '
+                  f'removed the structurally impossible ones, {unrestricted / total:.2f}x '
+                  f'narrower)', end='')
+
     def separator_projection(self, bag_index: int, columns: Sequence[str]) -> np.ndarray:
         '''Map each cell of a bag to its cell index in the separator sub-domain.
 
