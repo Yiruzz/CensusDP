@@ -22,6 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 import zarr
 
+from constraints.constraint import Constraint
 from constraints.sparse_constraint import SparseConstraint
 from data_handler import DataHandler
 from domain import ContingencyDomain
@@ -158,7 +159,8 @@ def shift_to_children(rows: Sequence[SparseConstraint], n_children: int, width: 
 
 
 def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
-                 constraints_dict: Dict[int, List], spill_dir: str, microdata_dir: str,
+                 constraints_dict: Dict[int, List], structural: List[Constraint],
+                 spill_dir: str, microdata_dir: str,
                  parquet_path: str, domain_dict: Dict[str, Any], hierarchical_columns: List[str],
                  query_columns: List[str], junction_tree: JunctionTree,
                  privacy_mechanism: PrivacyMechanism, query_sensitivity: int, check: bool,
@@ -174,6 +176,8 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
         optimizer_params (Tuple): (dtype, lp_problems_dir, solver_options) for the backend.
         optimizer_backend (str): Backend name, see optimizers.build_optimizer.
         constraints_dict (Dict[int, List]): Constraints mapped by tree level.
+        structural (List[Constraint]): The tree-wide constraints, exactly as the main process
+            selected them. Shipped rather than re-derived, see below.
         spill_dir (str): Directory for spilled node marginals.
         microdata_dir (str): Directory for temporary microdata files.
         parquet_path (str): Path to the input parquet file.
@@ -199,8 +203,10 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
     _data_handler.query_columns = query_columns
     _data_handler.file_path = parquet_path
 
+    # The cell space is derived here, not shipped, so it must come out identical to the main
+    # process's.
     _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
-    _data_handler.build_marginal_domains(junction_tree)
+    _data_handler.build_marginal_domains(junction_tree, structural)
     _data_handler.create_data_view()
 
     _separator_constraints = separator_constraints(_data_handler)

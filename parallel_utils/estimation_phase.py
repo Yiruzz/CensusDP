@@ -7,6 +7,8 @@ from scipy.sparse import spmatrix
 from data_handler import DataHandler
 from domain import ContingencyDomain
 from privacy import PrivacyMechanism
+from constraints.constraint import Constraint
+from constraints.domain_restriction import build_restriction
 from constraints.sparse_constraint import SparseConstraint
 
 from optimizers import build_optimizer
@@ -14,7 +16,7 @@ from optimizers import build_optimizer
 from typing import List, Dict, Any, Tuple, Optional
 
 def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: str,
-                 constraints_dict: Dict[int, List],
+                 constraints_dict: Dict[int, List], structural: List[Constraint],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
                  query_matrix: Optional[spmatrix], privacy_mechanism: PrivacyMechanism,
@@ -27,6 +29,8 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
                                             and solver options dict).
         optimizer_backend (str): Backend name, see optimizers.build_optimizer.
         constraints_dict (Dict[int, List]): Constraints mapped by level.
+        structural (List[Constraint]): The tree-wide constraints, exactly as the main process
+            selected them.
         spill_dir (str): Directory path for spilling vectors to disk.
         microdata_dir (str): Directory path for temporary microdata files.
         parquet_path (str): Path to the parquet file.
@@ -53,7 +57,10 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
     _data_handler.query_columns = query_columns
     _data_handler.file_path = parquet_path
 
-    _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
+    # The cell space is derived here, not shipped, so it must come out identical to the main
+    # process's.
+    _data_handler.contingency_domain = build_restriction(
+        ContingencyDomain(columns=query_columns, domains=domain_dict), structural)
     _data_handler.n_cells = _data_handler.contingency_domain.n_cells
 
     _data_handler.create_data_view()

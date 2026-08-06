@@ -8,6 +8,7 @@ from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from constraints.constraint import Constraint
+from constraints.domain_restriction import tree_wide
 from parallel_utils.estimation_phase import init_process, estimate_and_update_children
 from parallel_utils import marginal_estimation
 from optimizers import build_optimizer
@@ -57,6 +58,8 @@ class TopDown():
             optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                                 and solver options dict).
             constraints (Dict[int, List[Constraint]]): Constraints registered per tree level.
+            structural (List[Constraint]): Those registered at every level, which are the only
+                ones allowed to shape the cell space. Resolved in initialize().
             workers (int): Number of parallel workers for the estimation phase.
         """
         n_levels = len(hierarchy) + 1
@@ -88,6 +91,8 @@ class TopDown():
         self._budget_split_applied: bool = False
 
         self.constraints: Dict[int, List[Constraint]] = {i: [] for i in range(len(hierarchy) + 1)}
+        # The subset of the above that shapes the cell space
+        self.structural: List[Constraint] = []
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
@@ -112,17 +117,26 @@ class TopDown():
         self.data_handler.convert_csv_to_parquet()
         print(f'{time.time() - t1:.2f} seconds.')
 
+        # Structural zeros are folded into the cell space instead of being enforced as
+        # optimizer rows. Only constraints that are tree-wide qualify. Resolved once here and
+        # shipped to the workers verbatim, so every process shapes the same cell space.
+        self.structural = tree_wide(self.constraints)
         self.data_handler.create_data_view()
+
+        factored = self.marginal_cliques is not None or self.marginal_strategy is not None
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
-        self.data_handler.build_contingency_domain()
+        # The factored pipeline never materialises the joint, so only its per-bag domains are
+        # restricted (in _build_junction_tree), restricting the joint here would just force a
+        # size it is meant never to compute.
+        self.data_handler.build_contingency_domain(None if factored else self.structural)
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
-        if self.marginal_cliques is not None or self.marginal_strategy is not None:
+        if factored:
             print(f'Building junction tree...', end=' ')
-            self._build_junction_tree()
+            self._build_junction_tree(self.structural)
             print(f'{time.time() - t1:.2f} seconds.\n')
         else:
             self._build_query_workload(t1)
@@ -225,11 +239,16 @@ class TopDown():
               f'({len(counts)} cells) with sensitivity {len(pairs)}')
         return cliques
 
-    def _build_junction_tree(self) -> None:
+    def _build_junction_tree(self, structural: List[Constraint]) -> None:
         '''Build the junction tree and bind the per-bag cell spaces (factored pipeline).
 
         Every constraint scope is embedded as a mandatory clique alongside the requested
         marginals, so each constraint is guaranteed to fit inside some bag.
+
+        Args:
+            structural (List[Constraint]): The tree-wide constraints, as tree_wide() selects
+                them. Those declaring structural zeros are folded into each bag's cell space
+                instead of being enforced as optimizer rows.
         '''
         cliques = list(self.marginal_cliques or [])
         if self.marginal_strategy is not None:
@@ -251,7 +270,7 @@ class TopDown():
         domain = self.data_handler.contingency_domain
         weights = {column: int(size) for column, size in zip(domain.columns, domain.sizes)}
         self.junction_tree = JunctionTree.build(self.query_columns, cliques, weights)
-        self.data_handler.build_marginal_domains(self.junction_tree)
+        self.data_handler.build_marginal_domains(self.junction_tree, structural)
 
         width = self.data_handler.marginal_width
         # No Q at all: in the factored pipeline the workload is structurally the identity -
@@ -461,13 +480,13 @@ class TopDown():
 
         if self.junction_tree is not None:
             return marginal_estimation.init_process, (
-                self.optimizer, self.optimizer_backend, self.constraints, *common,
+                self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
                 self.junction_tree, self.privacy_mechanism, self.query_sensitivity,
                 self.check_correctness,
                 self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)
 
         return init_process, (
-            self.optimizer, self.optimizer_backend, self.constraints, *common,
+            self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
             self.Q, self.privacy_mechanism, self.query_sensitivity, self.check_correctness,
             self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)
 
