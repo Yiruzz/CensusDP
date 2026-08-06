@@ -328,3 +328,66 @@ class ContingencyDomain:
             np.ndarray: Length-n_cells int array of target sub-cell indices.
         """
         return self.project_cells_to(np.arange(self.n_cells, dtype=np.int64), columns)
+
+
+class RestrictedDomain(ContingencyDomain):
+    """A ContingencyDomain with the structurally impossible cells removed.
+
+    The declared edit constraints can forbid combinations of values. Keeping those cells and 
+    pinning them to zero with a `sum(x[forbidden]) == 0` row means they are still measured, 
+    still get DP noise, still become optimizer variables at the root and are still shipped 
+    to every worker. This class removes them from the cell space instead, so the constraint 
+    disappears rather than being enforced.
+
+    A cell here is a position in ``valid_cells``, not a mixed-radix code. This subclass overrides
+    encode/decode to map between the two.
+
+    Attributes:
+        valid_cells (np.ndarray): Mixed-radix codes that survive, strictly ascending.
+        base_n_cells (int): Size of the product space before the restriction.
+    """
+
+    def __init__(self, base: ContingencyDomain, valid_cells: np.ndarray) -> None:
+        super().__init__(base.columns, base.domains)
+        # The strides are the BASE ones and stay that way: super().cell_ranks() decodes a
+        # mixed-radix code with them, and the codes in valid_cells are of the base space.
+        self._strides = base.strides
+        self.base_n_cells: int = base.n_cells
+        self.valid_cells: np.ndarray = np.asarray(valid_cells, dtype=np.int64)
+
+    @property
+    def n_cells(self) -> int:
+        """Number of surviving cells."""
+        return len(self.valid_cells)
+
+    def cell_ranks(self, cells: np.ndarray, column: str) -> np.ndarray:
+        """Rank of ``column`` for the given positions (not mixed-radix codes)."""
+        return super().cell_ranks(self.valid_cells[np.asarray(cells, dtype=np.int64)], column)
+
+    def encode(self, data) -> np.ndarray:
+        """Map records to positions, refusing any that lands on a removed cell.
+
+        Raises:
+            ValueError: If any record falls on a cell the declared rules removed.
+        """
+        # Get the mixed-radix codes for the data
+        codes = super().encode(data)
+        # If the codes are valid, then they should have the same value as the valid_cells at the position where they would be inserted.
+        positions = np.searchsorted(self.valid_cells, codes)
+        # We clip in case that the code is greater than the largest valid cell, which would give an index out of bounds.
+        np.clip(positions, 0, len(self.valid_cells) - 1, out=positions)
+        missing = self.valid_cells[positions] != codes
+        if missing.any(): # Case when a record falls on a cell that is outside the restricted domain
+            offenders = super().decode(np.unique(codes[missing])[:3])
+            raise ValueError(
+                f"{int(missing.sum())} record group(s) over {list(self.columns)} fall on cells "
+                f"the declared edit constraints removed, e.g. "
+                f"{[dict(zip(self.columns, row)) for row in offenders]}. The records should "
+                f"have been repaired at the source: either a rule has no SQL rendering, or "
+                f"to_sql() and reduce() disagree for it."
+            )
+        return positions
+
+    def decode(self, indices: np.ndarray) -> np.ndarray:
+        """Recover per-column values from positions."""
+        return super().decode(self.valid_cells[np.asarray(indices, dtype=np.int64)])
