@@ -1042,18 +1042,20 @@ class DataHandler:
             output_path = os.path.join(self.microdata_dir, f'node_{node_id}_child_{i}_microdata.parquet')
             df.to_parquet(output_path, index=False)
 
-    def noisy_vectors_exist(self, n_nodes: int, mech_param_spec: str) -> bool:
+    def noisy_vectors_exist(self, n_nodes: int, mech_param_spec: str, sensitivity: int) -> bool:
         '''Check if compatible pre-computed noise vectors exist and reuse them if possible.
 
-        Searches for Zarr files matching the mechanism and parameters. Selects the first
-        compatible file with n_nodes >= requested and width >= requested. Requires exact
-        match on mechanism and parameters; compatible files can have more nodes/cells.
+        Searches for Zarr files matching the mechanism, parameters and sensitivity. Selects
+        the first compatible file with n_nodes >= requested and width >= requested;
+        compatible files can have more nodes/cells.
+
         The width is the node measurement length: the concatenated marginals under the
         factored pipeline, the full joint otherwise.
 
         Args:
             n_nodes (int): Requested number of nodes
             mech_param_spec (str): Mechanism parameter specification string (e.g., 'Laplace_1.0')
+            sensitivity (int): Squared L2 sensitivity the noise must be calibrated to
 
         Returns:
             bool: True if compatible vectors were found and loaded, False if new file created
@@ -1061,7 +1063,7 @@ class DataHandler:
         n_cells = self.noise_width
 
         # Try to find a compatible existing file
-        compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec)
+        compatible_file = self._find_compatible_noisy_vector(n_nodes, n_cells, mech_param_spec, sensitivity)
         if compatible_file:
             print(f"\n Reusing compatible noise vectors file: {os.path.basename(compatible_file)}")
             self.noise_zarr_path = compatible_file
@@ -1069,15 +1071,16 @@ class DataHandler:
             return True
 
         # No compatible file found; create a new one
-        zarr_filename = f"noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr"
+        zarr_filename = f"noisy_vectors_{n_nodes}_{n_cells}_s{sensitivity}_{mech_param_spec}.zarr"
         self.noise_zarr_path = os.path.join(self.noisy_dir, zarr_filename)
-        self._create_noisy_file(self.noise_zarr_path, n_nodes)
+        self._create_noisy_file(self.noise_zarr_path, n_nodes, sensitivity)
         return False
 
-    def _find_compatible_noisy_vector(self, n_nodes: int, n_cells: int, mech_param_spec: str) -> Optional[str]:
+    def _find_compatible_noisy_vector(self, n_nodes: int, n_cells: int, mech_param_spec: str,
+                                      sensitivity: int) -> Optional[str]:
         '''Search for a compatible pre-computed noise vector file.
 
-        Looks for files matching the pattern noisy_vectors_*_{mech_param_spec}.zarr
+        Looks for files matching the pattern noisy_vectors_*_s{sensitivity}_{mech_param_spec}.zarr
         and selects one with n_nodes_file >= n_nodes and n_cells_file >= n_cells.
         Verifies that n_rows_generated >= n_expected_nodes to ensure completeness.
         If multiple compatible files exist, returns the one with the smallest dimensions
@@ -1087,6 +1090,7 @@ class DataHandler:
             n_nodes (int): Required number of nodes
             n_cells (int): Required number of cells
             mech_param_spec (str): Exact mechanism and parameters to match
+            sensitivity (int): Exact squared L2 sensitivity to match
 
         Returns:
             Optional[str]: Path to a compatible file, or None if none exist
@@ -1101,24 +1105,25 @@ class DataHandler:
             if not filename.startswith(pattern) or not filename.endswith(".zarr"):
                 continue
 
-            # Parse filename: noisy_vectors_{n_nodes}_{n_cells}_{mech_param_spec}.zarr
+            # Parse filename: noisy_vectors_{n_nodes}_{n_cells}_s{sensitivity}_{mech_param_spec}.zarr
             # Remove prefix and suffix
             name_without_ext = filename[len(pattern):-5]  # Remove "noisy_vectors_" and ".zarr"
 
-            # Split by '_' but the mech_param_spec can contain underscores
-            # Strategy: split from the right to extract mech_param_spec first
-            parts = name_without_ext.split('_', 2)  # Split from right, max 2 splits
-            if len(parts) != 3:
+            # The first three fields never contain '_', so splitting from the left at most
+            # three times leaves mech_param_spec (which does contain '_') intact as the tail.
+            parts = name_without_ext.split('_', 3)
+            if len(parts) != 4 or not parts[2].startswith('s'):
                 continue
             try:
                 file_n_nodes = int(parts[0])
                 file_n_cells = int(parts[1])
-                file_mech_spec = parts[2]
+                file_sensitivity = int(parts[2][1:])
+                file_mech_spec = parts[3]
             except ValueError:
                 continue
 
-            # Check if mechanism matches
-            if file_mech_spec != mech_param_spec:
+            # Mechanism and sensitivity must match exactly - they define the noise scale.
+            if file_mech_spec != mech_param_spec or file_sensitivity != sensitivity:
                 continue
 
             # Check if file has enough capacity
@@ -1147,7 +1152,7 @@ class DataHandler:
         chosen_file = candidates[0][0]
         return os.path.join(self.noisy_dir, chosen_file)
 
-    def _create_noisy_file(self, zarr_path: str, n_nodes: int) -> None:
+    def _create_noisy_file(self, zarr_path: str, n_nodes: int, sensitivity: int) -> None:
         '''Create a new Zarr file to store pre-computed noise vectors.
 
         Initializes a Zarr group with zstd compression and creates the noise array
@@ -1157,6 +1162,8 @@ class DataHandler:
         Args:
             zarr_path (str): Path where the Zarr file will be created
             n_nodes (int): Number of nodes (rows in the noise array)
+            sensitivity (int): Squared L2 sensitivity the noise is calibrated to; recorded
+                in the metadata so a file's calibration is auditable from the file itself.
         '''
         compressor = numcodecs.Blosc(cname="zstd", clevel=self.COMPRESSION_LEVEL, shuffle=numcodecs.Blosc.BITSHUFFLE)
 
@@ -1167,7 +1174,12 @@ class DataHandler:
                                       chunks=(1, width), dtype=self.dtype, compressor=compressor)
 
         self.noise_zarr_group.attrs["n_expected_nodes"] = n_nodes
+        # `width`, NOT self.n_cells. El archivo se dimensiona con noise_width, que en el
+        # pipeline factorizado es el ancho marginal y no el joint; escribir self.n_cells aca
+        # dejaria el atributo contradiciendo la forma real del array - y para personas serian
+        # 3,6e14 celdas anunciadas contra 12.588 reales.
         self.noise_zarr_group.attrs["n_cells"] = width
+        self.noise_zarr_group.attrs["sensitivity"] = sensitivity
         self.noise_zarr_group.attrs["n_rows_generated"] = 0
 
     def generate_noise_vectors(self, n_workers: int, n_nodes: int, gen: Iterable[Tuple[int, int]],
