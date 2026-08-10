@@ -147,7 +147,8 @@ class TopDown():
         # Pre-generate noise vectors for all nodes
         t1 = time.time()
         print(f'Pre-generating noise vectors if needed...', end=' ')
-        if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec):
+        if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec,
+                                                     self.query_sensitivity):
             print("")
             self.data_handler.generate_noise_vectors(self.workers, self.tree._node_count,
                                                      self.tree.iter_nodes_with_levels(),
