@@ -227,7 +227,8 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
     _constraints = constraints_dict
     _query_sensitivity = query_sensitivity
     _privacy_mechanism = privacy_mechanism
-    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
+    # None when the noise cache is off, the measurement loop then samples in situ.
+    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name] if zarr_path else None
     _check = check
 
 
@@ -341,11 +342,14 @@ def estimate_and_update_children(node_id: int, node_path: str,
             filter_dict, _constraints[children_level])
         measurement = np.concatenate(marginals)
 
-        # Add noise to the measurement, either from a pre-computed file or by sampling.
-        try:
-            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, measurement, child_id)
-        except (IndexError, ValueError, KeyError, OSError):
+        # Add noise to the measurement
+        if _noisy_arr is None:
             _privacy_mechanism.add_noise(measurement, children_level, _query_sensitivity)
+        else:
+            try:
+                _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, measurement, child_id)
+            except (IndexError, ValueError, KeyError, OSError):
+                _privacy_mechanism.add_noise(measurement, children_level, _query_sensitivity)
 
         children_measurements.append(measurement)
         children_constraints.append(constraints)

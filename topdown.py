@@ -154,8 +154,13 @@ class TopDown():
 
         print(self.tree, "\n")
 
-        # Pre-generate noise vectors for all nodes
+        # Pre-generate noise vectors for all nodes. With the cache off the paths stay None and
+        # every node samples in situ.
         t1 = time.time()
+        if not self.data_handler.use_noise_cache:
+            print('Noise cache disabled; every node samples its noise in situ.\n')
+            return
+
         print(f'Pre-generating noise vectors if needed...', end=' ')
         if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec,
                                                      self.query_sensitivity):
@@ -454,12 +459,16 @@ class TopDown():
             measurement, constraints = self.data_handler.materialize_node_data(
                 root.filter_dict, self.constraints[root.level], self.Q)
 
-        try: # Add noise to the materialized measurement vector, using precomputed noise if available.
-            self.privacy_mechanism.add_noise_from_precomputed(
-                self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name],
-                measurement, root.id)
-        except (IndexError, ValueError, KeyError, OSError):
+        # Add noise to the materialized measurement vector.
+        if self.data_handler.noise_zarr_group is None:
             self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
+        else:
+            try:
+                self.privacy_mechanism.add_noise_from_precomputed(
+                    self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name],
+                    measurement, root.id)
+            except (IndexError, ValueError, KeyError, OSError):
+                self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
 
         solution = self._estimate_node_individually(root.id, measurement, constraints)
 

@@ -110,7 +110,9 @@ class DataHandler:
         self.worker_microdata_file: Optional[str] = None
         self.lp_problems_dir: Optional[str] = None
 
-        # Pre-computed noise storage (Zarr)
+        # Pre-computed noise storage (Zarr). Turning the cache off makes every node sample its
+        # own noise in situ instead.
+        self.use_noise_cache: bool = True
         self.noisy_dir: Optional[str] = None
         self.noise_zarr_group: Optional[zarr.hierarchy.Group] = None
         self.noisy_array_name: str = "Noise"

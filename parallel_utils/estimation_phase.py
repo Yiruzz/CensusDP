@@ -69,7 +69,8 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
     _privacy_mechanism = privacy_mechanism
-    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
+    # None when the noise cache is off, the measurement loop then samples in situ.
+    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name] if zarr_path else None
     _check = check
 
 def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_mask: np.ndarray, n_cells: Optional[int] = None) -> List[SparseConstraint]:
@@ -171,11 +172,14 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     for filter_dict, child_id in zip(children_filter_dicts, children_ids):
         child_vector, child_constraint = _data_handler.materialize_node_data(filter_dict, _constraints[children_level], _Q)
 
-        # Try to use pre-computed noise, fallback to in-situ generation if not available
-        try:
-            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
-        except:
+        # Add noise to the measurement.
+        if _noisy_arr is None:
             _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+        else:
+            try:
+                _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
+            except:
+                _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
 
         children_vectors.append(child_vector)
         children_constraints.append(child_constraint)
