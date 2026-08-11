@@ -1222,17 +1222,24 @@ class DataHandler:
                 for fut in finished:
                     node_id = pending.pop(fut)
 
+                    # A failed row must stop the run
                     try:
                         row_data = fut.result()
-                        arr[node_id, :] = row_data
-                        done += 1
+                    except Exception as exception:
+                        raise RuntimeError(
+                            f"Noise generation failed for node {node_id}; aborting. Publishing "
+                            f"with this row left at zero would mean releasing that node with no "
+                            f"noise at all. Original error: {type(exception).__name__}: "
+                            f"{exception}"
+                        ) from exception
 
-                        self.noise_zarr_group.attrs["n_rows_generated"] = done
+                    arr[node_id, :] = row_data
+                    done += 1
 
-                        if done % max(1, n_nodes // 20) == 0:
-                            print(f"    Progress: {done}/{n_nodes}")
-                    except Exception as e:
-                        print(f"    Error on row {node_id}: {e}")
+                    self.noise_zarr_group.attrs["n_rows_generated"] = done
+
+                    if done % max(1, n_nodes // 20) == 0:
+                        print(f"    Progress: {done}/{n_nodes}")
 
                 completed_since_refill += len(finished)
                 if completed_since_refill >= REFILL_BATCH:
@@ -1245,5 +1252,16 @@ class DataHandler:
 
             if done % max(1, n_nodes // 20) != 0:
                 print(f"    Progress: {done}/{n_nodes}")
+
+        # The per-row raise above already covers a row that errored. This catches the other
+        # way to end up short: the iterator yielding fewer tasks than the tree has nodes. The
+        # n_rows_generated attribute only guards REUSE by a later run, never the file the
+        # current run is about to read, so without this check an incomplete file is used once
+        # and rejected forever after.
+        if done != n_nodes:
+            raise RuntimeError(
+                f"Noise generation produced {done} of {n_nodes} rows. The missing rows are "
+                f"still zeros, and using them would publish those nodes without noise."
+            )
 
         self.noise_zarr_group.attrs["n_rows_generated"] = done

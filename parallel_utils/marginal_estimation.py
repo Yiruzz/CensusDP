@@ -346,10 +346,7 @@ def estimate_and_update_children(node_id: int, node_path: str,
         if _noisy_arr is None:
             _privacy_mechanism.add_noise(measurement, children_level, _query_sensitivity)
         else:
-            try:
-                _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, measurement, child_id)
-            except (IndexError, ValueError, KeyError, OSError):
-                _privacy_mechanism.add_noise(measurement, children_level, _query_sensitivity)
+            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, measurement, child_id)
 
         children_measurements.append(measurement)
         children_constraints.append(constraints)

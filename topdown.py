@@ -463,12 +463,9 @@ class TopDown():
         if self.data_handler.noise_zarr_group is None:
             self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
         else:
-            try:
-                self.privacy_mechanism.add_noise_from_precomputed(
-                    self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name],
-                    measurement, root.id)
-            except (IndexError, ValueError, KeyError, OSError):
-                self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
+            self.privacy_mechanism.add_noise_from_precomputed(
+                self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name],
+                measurement, root.id)
 
         solution = self._estimate_node_individually(root.id, measurement, constraints)
 

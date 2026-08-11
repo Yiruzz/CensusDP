@@ -70,9 +70,12 @@ class PrivacyMechanism(ABC):
             node_idx: Node ID / row index in the noise Zarr array
         """
         noise_vec = np.asarray(noisy_arr[node_idx, : len(contingency_vector)])
-        if noise_vec is None:
+        # A file could be narrower than the measurement. Checking here says which node and which file instead.
+        if len(noise_vec) != len(contingency_vector):
             raise ValueError(
-                f"Noise vector for node {node_idx} not pre-computed. "
+                f"Pre-computed noise for node {node_idx} is {len(noise_vec)} wide but the "
+                f"measurement is {len(contingency_vector)}. The noise file does not match this "
+                f"run."
             )
         contingency_vector += noise_vec
 
