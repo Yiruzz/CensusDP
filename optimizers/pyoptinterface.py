@@ -274,9 +274,16 @@ class OptimizationModel:
 
         model.optimize()
 
-        # Check solution
+        # Check solution.
+        # TIME_LIMIT with an incumbent is a usable answer, not a failure. Every hard
+        # constraint holds exactly in any incumbent, so a truncated solution is feasible.
         status = model.get_model_attribute(poi.ModelAttribute.TerminationStatus)
-        if status != poi.TerminationStatusCode.OPTIMAL and status != poi.TerminationStatusCode.LOCALLY_SOLVED:
+        accepted = (status == poi.TerminationStatusCode.OPTIMAL
+                    or status == poi.TerminationStatusCode.LOCALLY_SOLVED
+                    or (status == poi.TerminationStatusCode.TIME_LIMIT
+                        and model.get_model_attribute(poi.ModelAttribute.PrimalStatus)
+                        == poi.ResultStatusCode.FEASIBLE_POINT))
+        if not accepted:
             if status == poi.TerminationStatusCode.INFEASIBLE:
                 debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
                 model.write(debug_path)

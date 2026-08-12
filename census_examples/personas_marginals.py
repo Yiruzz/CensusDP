@@ -91,12 +91,20 @@ PRIVACY_PARAMETERS = [(TOTAL_RHO / _weight) * (2 ** i) for i in range(N_LEVELS)]
 
 
 # --------------------------------------------------------------------------------------------
-# Solver. Threads=1 per worker so the workers do not oversubscribe the machine. MIPGap gives
-# the rounding MIP a small optimality tolerance so it does not chase the last fraction on a
-# wide, high-cardinality bag.
+# Solver.
+#
+# Threads=1 per worker so the workers do not oversubscribe the machine.
+#
+# The MIP cannot reach a MIPGap of 1e-4 because its continuous relaxation "cheats", it splits
+# fractions of a  person across cells to satisfy the geographic and separator rows at once, 
+# and gets a tighter bound than the integer solution. Experimentally, 1e-3 is reachable in a
+# reasonable time with similar accuracy to 1e-4.
+#
+# TimeLimit helps the MIP avoid spending to much time on a single node and can return a feasible
+# solution that is good enough for the next level.
 # --------------------------------------------------------------------------------------------
 
-SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1, 'MIPGap': 1e-4}
+SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1, 'MIPGap': 1e-3, 'TimeLimit': 1200}
 
 # 8-core machine: 8 single-threaded workers saturate the cores; the main process is mostly
 # idle while they solve.

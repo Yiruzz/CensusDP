@@ -509,10 +509,13 @@ class OptimizationModelLP:
             model.optimize()
             y_values = {}
 
-            if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
+            # TIME_LIMIT with an incumbent is a usable answer, not a failure. Every hard
+            # constraint holds exactly in any incumbent, so a truncated solution is feasible.
+            if (model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL
+                    or (model.status == GRB.TIME_LIMIT and model.SolCount > 0)):
                 y_values = {i: model.getVarByName(f"y[{i}]").X for i in active}
                 model.dispose()
-            
+
             elif model.status == GRB.INFEASIBLE:
                 debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
                 model.write(debug_path)
