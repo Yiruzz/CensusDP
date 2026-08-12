@@ -29,7 +29,7 @@ def _min_weight_chordal(graph: nx.Graph, weights: Mapping[str, int]) -> nx.Graph
     """Triangulate a graph with a cardinality aware elimination order.
 
     A junction tree needs a chordal graph.
-    It functions as follows: pick an order and, for each vertex, connect its still-present 
+    It functions as follows: pick an order and, for each vertex, connect its still-present
     neighbours into a clique before removing it. Any order yields a chordal graph the order
     only decides how big the resulting cliques are.
 
@@ -47,7 +47,11 @@ def _min_weight_chordal(graph: nx.Graph, weights: Mapping[str, int]) -> nx.Graph
     Returns:
         A chordal supergraph of ``graph`` (its edges plus the fill edges added).
     """
-    # remaining is the shrinking elimination graph 
+    # nx.is_chordal is maximum cardinality search, O(V + E), so asking costs nothing.
+    if nx.is_chordal(graph):
+        return graph.copy()
+
+    # remaining is the shrinking elimination graph
     # chordal keeps every vertex and accumulates the needed fill edges.
     remaining = graph.copy()
     chordal = graph.copy()
