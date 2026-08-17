@@ -13,6 +13,7 @@ from parallel_utils.estimation_phase import init_process, estimate_and_update_ch
 from parallel_utils import marginal_estimation
 from optimizers import build_optimizer
 from graph import JunctionTree, MarginalSelectionStrategy, MaxSpanningTreeMI, PairwiseAssociation
+from selection_cost import build_cost_model
 from queries import QueryWorkload, is_identity_workload
 from privacy import PrivacyMechanism
 
@@ -89,6 +90,9 @@ class TopDown():
         self.marginal_strategy: Optional[MarginalSelectionStrategy] = None
         self.selection_budget_fraction: float = 0.0
         self._budget_split_applied: bool = False
+        # Hard cap a selection heuristic may not exceed with the marginal width it produces.
+        # Set via set_marginal_selection(); None leaves the heuristic unbounded.
+        self.max_marginal_width: Optional[int] = None
 
         self.constraints: Dict[int, List[Constraint]] = {i: [] for i in range(len(hierarchy) + 1)}
         # The subset of the above that shapes the cell space
@@ -213,9 +217,18 @@ class TopDown():
 
         All 2-way marginals are measured over the whole dataset in one shot and noised
         together. A record falls in exactly one cell of each pair table, so the squared L2
-        sensitivity is the number of pairs. Mutual information is then computed from the
-        NOISY tables only - the raw data is never read by the selection - and handed to the
+        sensitivity is the number of pairs. The association is then computed from the NOISY
+        tables only - the raw data is never read by the selection - and handed to the
         strategy, which returns the cliques.
+
+        Which association: the strategy declares it through `pair_statistic`. The two
+        spanning-tree heuristics want mutual information; a cost-aware one wants an L1
+        residual in records, because that is the only way its gain and its cost can be
+        compared. Reading it off the strategy is what keeps a heuristic from being handed a
+        matrix in the wrong units without anything raising.
+
+        The strategy also receives a CostModel, built from declarations only (cardinalities,
+        constraint scopes, privacy parameters) and therefore free of any further budget.
 
         Returns:
             List[Iterable[str]]: The selected cliques.
@@ -232,14 +245,25 @@ class TopDown():
             block = counts[offset:offset + domain.n_cells]
             tables[pair] = block.reshape(int(domain.sizes[0]), int(domain.sizes[1]))
 
-        association = PairwiseAssociation().compute(
+        statistic = self.marginal_strategy.pair_statistic
+        association = PairwiseAssociation(statistic=statistic).compute(
             self.query_columns, lambda a, b: tables[(a, b)])
+
+        cost = build_cost_model(
+            self.data_handler.contingency_domain,
+            structural=self.structural,
+            mechanism=self.privacy_mechanism,
+            selection_level=selection_level,
+            selection_sensitivity=len(pairs),
+            max_width=self.max_marginal_width,
+        )
 
         mandatory = {constraint.scope()
                      for level_constraints in self.constraints.values()
                      for constraint in level_constraints}
         cliques = self.marginal_strategy.select(
-            self.query_columns, association, [scope for scope in mandatory if scope])
+            self.query_columns, association, [scope for scope in mandatory if scope],
+            cost=cost)
 
         print(f'  Selection measured {len(pairs)} pairwise marginals '
               f'({len(counts)} cells) with sensitivity {len(pairs)}')
@@ -601,7 +625,8 @@ class TopDown():
         self.marginal_cliques = cliques
 
     def set_marginal_selection(self, strategy: Optional[MarginalSelectionStrategy] = None,
-                               budget_fraction: float = 0.2) -> None:
+                               budget_fraction: float = 0.2,
+                               max_width: Optional[int] = None) -> None:
         '''Switch to the factored pipeline and choose the marginals from the data, privately.
 
         Which columns are worth keeping jointly depends on how they are associated, and
@@ -626,6 +651,11 @@ class TopDown():
                 mutual information, constrained to contain the constraint cliques.
             budget_fraction (float): Share of the total budget spent on selection, in
                 [0, 1). Defaults to 0.2.
+            max_width (Optional[int]): Cap on the marginal width the strategy may produce,
+                passed through the CostModel. Strategies that ignore the CostModel ignore
+                this too. It is a coarse filter - no metric of problem size predicts the
+                rounding MIP's runtime - but it is decided from the junction tree in seconds,
+                before anything is solved, and it is the only cheap guard there is.
 
         Raises:
             ValueError: If budget_fraction is outside (0, 1).
@@ -635,6 +665,7 @@ class TopDown():
 
         self.marginal_strategy = strategy if strategy is not None else MaxSpanningTreeMI()
         self.selection_budget_fraction = budget_fraction
+        self.max_marginal_width = max_width
 
     def run(self) -> None:
         '''Run the TopDown algorithm end-to-end.

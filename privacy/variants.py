@@ -60,6 +60,28 @@ class PrivacyMechanism(ABC):
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         """Add calibrated discrete noise to contingency_vector in place."""
 
+    @abstractmethod
+    def expected_abs_noise(self, level: int, sensitivity: int) -> float:
+        """E|noise| on a single cell, in records.
+
+        The scale a caller needs to reason about noise WITHOUT drawing any. Two uses so far,
+        both in marginal selection: the expected L1 a measurement of n cells carries is
+        ``n * expected_abs_noise(...)``, which is what a cost-aware heuristic charges a
+        candidate clique for, and what it subtracts from an association estimated on a noisy
+        table before believing it (McKenna's AIM subtracts exactly this term).
+
+        Defined per mechanism because the noise family differs: for a Gaussian it is
+        sqrt(2/pi)*sigma, for a Laplace it is the scale b itself. Returning sigma instead
+        would push that constant onto every caller and get it wrong for PureDP.
+
+        Args:
+            level (int): Tree level, indexing level_params.
+            sensitivity (int): The same Delta that add_noise would be given.
+
+        Returns:
+            float: Mean absolute deviation of the noise added to one cell.
+        """
+
     def add_noise_from_precomputed(self, noisy_arr: zarr.Array, contingency_vector: np.ndarray, node_idx: int) -> None:
         """
         Add pre-computed noise to contingency_vector.
@@ -88,6 +110,10 @@ class PureDP(PrivacyMechanism):
         scale = sensitivity / self.level_params[level]
         contingency_vector += sample_dlaplace_optimized(scale, contingency_vector.size)
 
+    def expected_abs_noise(self, level: int, sensitivity: int) -> float:
+        # The mean absolute deviation of Laplace(b) is b itself.
+        return sensitivity / self.level_params[level]
+
     def report_guarantee(self) -> str:
         return f"pure epsilon-DP: total epsilon = {sum(self.level_params):.6g} (sum per-level epsilon)"
 
@@ -98,6 +124,15 @@ class ZCDP(PrivacyMechanism):
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         scale = math.sqrt(sensitivity / (2.0 * self.level_params[level]))
         contingency_vector += sample_dgauss_optimized(scale, contingency_vector.size)
+
+    def sigma(self, level: int, sensitivity: int) -> float:
+        """The discrete-Gaussian scale this level would use at that sensitivity."""
+        return math.sqrt(sensitivity / (2.0 * self.level_params[level]))
+
+    def expected_abs_noise(self, level: int, sensitivity: int) -> float:
+        # E|N(0, sigma)| = sqrt(2/pi) * sigma. The discrete Gaussian matches it to well
+        # under a percent for the sigma >~ 1 regime this pipeline operates in.
+        return math.sqrt(2.0 / math.pi) * self.sigma(level, sensitivity)
 
     def report_guarantee(self) -> str:
         return f"rho-zCDP: total rho = {sum(self.level_params):.6g} (sum per-level rho)"
@@ -190,6 +225,13 @@ class RenyiDP(PrivacyMechanism):
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         sigmas, _alpha = self._calibrate(sensitivity)
         contingency_vector += sample_dgauss_optimized(sigmas[level], contingency_vector.size)
+
+    def expected_abs_noise(self, level: int, sensitivity: int) -> float:
+        # Same Gaussian constant as ZCDP, but sigma comes from the joint-alpha calibration
+        # (cached per sensitivity, so a cost-aware heuristic sweeping bag counts pays the
+        # bisection once per distinct Delta).
+        sigmas, _alpha = self._calibrate(sensitivity)
+        return math.sqrt(2.0 / math.pi) * sigmas[level]
 
     def report_guarantee(self) -> str:
         # If the mechanism has been used at least once, report the calibrated α* and σ_i.
