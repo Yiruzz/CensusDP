@@ -174,7 +174,7 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
                  parquet_path: str, domain_dict: Dict[str, Any], hierarchical_columns: List[str],
                  query_columns: List[str], junction_tree: JunctionTree,
                  privacy_mechanism: PrivacyMechanism, query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str) -> None:
+                 zarr_path: str, noisy_array_name: str, rounding_method: str = "mip") -> None:
     '''Initialize the globals of a factored-pipeline worker process.
 
     Mirrors estimation_phase.init_process, plus the junction tree. Two things are derived
@@ -200,11 +200,10 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
         check (bool): Whether to verify parent/children totals per node.
         zarr_path (str): Path to the Zarr group holding pre-computed noise.
         noisy_array_name (str): Name of the noise array within that group.
+        rounding_method (str): How to solve the integer step, see optimizers.ROUNDING_METHODS.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism
     global _query_sensitivity, _constraints, _noisy_arr, _separator_constraints
-
-    _optimizer = build_optimizer(optimizer_backend, optimizer_params)
 
     _data_handler = DataHandler()
     _data_handler.spill_dir = spill_dir
@@ -220,6 +219,11 @@ def init_process(optimizer_params: Tuple[Any, ...], optimizer_backend: str,
     _data_handler.create_data_view()
 
     _separator_constraints = separator_constraints(_data_handler)
+
+    # Built AFTER the data handler: the sweep rounder reads the junction tree and the bag layout
+    # off it, and neither exists until build_marginal_domains has run.
+    _optimizer = build_optimizer(optimizer_backend, optimizer_params,
+                                 rounding=rounding_method, data_handler=_data_handler)
 
     # No matrix since we consider the identitiy workload, but the optimizer backend still needs a placeholder.
     _Q = None

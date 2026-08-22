@@ -21,7 +21,7 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
                  query_matrix: Optional[spmatrix], privacy_mechanism: PrivacyMechanism,
                  query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str) -> None:
+                 zarr_path: str, noisy_array_name: str, rounding_method: str = "mip") -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
@@ -44,10 +44,13 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
         check (bool): Whether to check node correctness.
         zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
         noisy_array_name (str): Name of the noise array within the Zarr group.
+        rounding_method (str): How to solve the integer step, see optimizers.ROUNDING_METHODS.
+            Always 'mip' here: the sweep needs a junction tree, and in the full-joint pipeline
+            the rounding matrix is already totally unimodular anyway.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
 
-    _optimizer = build_optimizer(optimizer_backend, optimizer_params)
+    _optimizer = build_optimizer(optimizer_backend, optimizer_params, rounding=rounding_method)
 
 
     _data_handler = DataHandler()
