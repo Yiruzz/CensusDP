@@ -11,7 +11,7 @@ from constraints.constraint import Constraint
 from constraints.domain_restriction import tree_wide
 from parallel_utils.estimation_phase import init_process, estimate_and_update_children
 from parallel_utils import marginal_estimation
-from optimizers import build_optimizer
+from optimizers import build_optimizer, ROUNDING_METHODS
 from graph import JunctionTree, MarginalSelectionStrategy, MaxSpanningTreeMI, PairwiseAssociation
 from queries import QueryWorkload, is_identity_workload
 from privacy import PrivacyMechanism
@@ -103,6 +103,9 @@ class TopDown():
         self.workers = num_workers
         self.check_correctness = check_correctness
         self.optimizer_backend = optimizer_backend
+        # 'auto' is resolved lazily, in _pool_setup, so set_rounding_method works both before
+        # and after initialize().
+        self.rounding_method: str = 'auto'
 
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
@@ -390,6 +393,13 @@ class TopDown():
         nodes with more work are dispatched first and the executor stays busy.
         '''
         root = self.tree.root
+
+        # Announced before the root is solved, because the root itself always takes the MIP:
+        # it has no parent, so the sweep has no column margins to work from.
+        rounding = self._resolve_rounding_method()
+        print(f'  Rounding method: {rounding}'
+              + (' (the hierarchy root always uses mip)' if rounding == 'sweep' else ''))
+
         self._solve_root(root)
 
         initializer, initargs = self._pool_setup()
@@ -485,17 +495,19 @@ class TopDown():
                   self.data_handler.file_path, self.data_handler.contingency_domain.domains,
                   self.hierarchical_columns, self.query_columns)
 
+        rounding = self._resolve_rounding_method()
+
         if self.junction_tree is not None:
             return marginal_estimation.init_process, (
                 self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
                 self.junction_tree, self.privacy_mechanism, self.query_sensitivity,
                 self.check_correctness,
-                self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)
+                self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding)
 
         return init_process, (
             self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
             self.Q, self.privacy_mechanism, self.query_sensitivity, self.check_correctness,
-            self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name)
+            self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding)
 
     def _estimate_node_individually(self, node_id: int, measurement: np.ndarray,
                                     constraints: List) -> sp.csc_matrix:
@@ -635,6 +647,64 @@ class TopDown():
 
         self.marginal_strategy = strategy if strategy is not None else MaxSpanningTreeMI()
         self.selection_budget_fraction = budget_fraction
+
+    def set_rounding_method(self, method: str = 'auto') -> None:
+        '''Choose how the integer rounding step is solved.
+
+        The estimation phase always solves two problems per node group: a continuous QP, then
+        an integer step that rounds it without breaking any constraint. Only the second one is
+        selected here; the QP is the same either way.
+
+        - 'mip' is the global binary program. It reproduces the fractional solution optimally,
+          but it is an integer multicommodity flow (each variable sits in its geographic row
+          plus one separator row per junction-tree edge), so it is genuinely hard and takes
+          71-74% of the solver time.
+        - 'sweep' walks the junction tree instead, rounding one bag at a time as independent
+          2-way transportation problems. Those are totally unimodular, so the continuous LP
+          already returns integers with no branch and bound. Measured on the 27-column census:
+          13.0s against 271.5s, every constraint still satisfied exactly, at +1.22% of L1
+          against the truth. Factored pipeline only.
+        - 'auto' (the default) picks 'sweep' when marginals were declared or selected, and
+          'mip' otherwise. In the full-joint pipeline the rounding matrix is already totally
+          unimodular, so its MIP solves as an LP and there is nothing to gain.
+
+        Can be called before or after initialize() - the choice is only read when the worker
+        pool is created.
+
+        Args:
+            method (str): 'auto', 'sweep' or 'mip'. Defaults to 'auto'.
+
+        Raises:
+            ValueError: If the method is not one of the three.
+        '''
+        allowed = ('auto',) + ROUNDING_METHODS
+        if method not in allowed:
+            raise ValueError(f"Unknown rounding method '{method}'. Expected one of {allowed}.")
+
+        self.rounding_method = method
+
+    def _resolve_rounding_method(self) -> str:
+        '''Turn the configured rounding method into one optimizers.build_optimizer accepts.
+
+        Returns:
+            str: One of ROUNDING_METHODS.
+
+        Raises:
+            ValueError: If 'sweep' was asked for explicitly but the pipeline is full-joint.
+        '''
+        factored = self.junction_tree is not None
+
+        if self.rounding_method == 'auto':
+            return 'sweep' if factored else 'mip'
+
+        if self.rounding_method == 'sweep' and not factored:
+            raise ValueError(
+                "rounding method 'sweep' needs a junction tree and only applies to the factored "
+                "pipeline (set_marginals / set_marginal_selection). In the full-joint pipeline "
+                "the rounding matrix is already totally unimodular, so its MIP solves as an LP - "
+                "use 'mip' or 'auto'."
+            )
+        return self.rounding_method
 
     def run(self) -> None:
         '''Run the TopDown algorithm end-to-end.

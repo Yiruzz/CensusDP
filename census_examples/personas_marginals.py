@@ -135,6 +135,14 @@ def main():
     print(f'Factored pipeline with {len(MARGINALS)} declared marginals (constraint scopes '
           f'are added automatically)')
 
+    # The integer step is rounded by sweeping the junction tree, which is what 'auto' resolves
+    # to for a factored run , so this line is the default and only here to be found. It is the
+    # difference between 13s and 271s on this instance. Uncomment the 'mip' form to compare, or
+    # if a driver ever declares within-bag constraints beyond the totals (see
+    # optimizers/sweep_rounding.py for what the sweep enforces versus what it only checks).
+    algorithm.set_rounding_method('sweep')
+    # algorithm.set_rounding_method('mip')
+
     # Population-total invariant: publish the exact real total at the national root and at
     # every REGION. Contextual - the true count is read per node at tree-build time.
     # The level argument indexes HIERARCHY (0 = REGION); set_constraint_to_level applies it to
