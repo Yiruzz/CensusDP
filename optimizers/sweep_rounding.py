@@ -164,7 +164,7 @@ class SweepRoundingModel:
 
     def rounding_estimation(self, x_tilde: np.ndarray, node_id: int,
                             constraints: List[SparseConstraint],
-                            active: Optional[List[int]] = None,
+                            active: Optional[np.ndarray] = None,
                             n: Optional[int] = None) -> sp.csc_matrix:
         """Round by sweeping the junction tree, then verify every row.
 
@@ -174,7 +174,7 @@ class SweepRoundingModel:
             node_id (int): The node whose children are being solved, for error messages.
             constraints (List[SparseConstraint]): Sparse constraint objects, already offset into
                 joint space and restricted to active indices by the caller.
-            active (Optional[List[int]]): Global joint-space indices of non-pruned cells. None
+            active (Optional[np.ndarray]): Global joint-space indices of non-pruned cells. None
                 means the hierarchy's root, which is delegated to the backend's MIP.
             n (Optional[int]): Joint vector length, required when active is provided.
 
@@ -199,7 +199,7 @@ class SweepRoundingModel:
         # infeasible for a reason unreadable from the solver.
         x_tilde = np.maximum(x_tilde, 0.0)
 
-        active = np.asarray(list(active), dtype=np.int64)
+        active = np.asarray(active, dtype=np.int64)
         if n is None:
             raise ValueError("rounding_estimation requires `n` when `active` is provided.")
         if len(x_tilde) != len(active):
