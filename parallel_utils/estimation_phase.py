@@ -193,10 +193,11 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
     # Cells where the parent is non-zero. By non-negativity + consistency, children can only
     # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j}
-    # so the optimizers instantiate variables only there. `active` stays an ordered list: the
+    # so the optimizers instantiate variables only there. `active` stays an ordered array: the
     # optimizer aligns its solution positionally to it across the real -> rounding solves.
     support = contingency_vector.indices
-    active = [k * n_cells + int(j) for k in range(num_children) for j in support]
+    active = (np.arange(num_children, dtype=np.int64)[:, None] * n_cells
+              + support.astype(np.int64)).ravel()
 
     # One boolean row over cell space answers "is this cell active?" for every child, because
     # the active set is the same support shifted by k * n_cells. Pruning then tests the LOCAL

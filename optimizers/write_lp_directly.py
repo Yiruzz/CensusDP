@@ -41,7 +41,7 @@ def _write_term(f: IO, term: str, count: int, terms_per_line: int = TERMS_PER_LI
 
 
 def _write_identity_objective(f: IO, noisy_measurements: List[np.ndarray],
-                               active: List[int], n_cells: int) -> None:
+                               active: np.ndarray, n_cells: int) -> None:
     """Objective for the IDENTITY workload: sum_k ||x_k - y_k||^2, in one pass over `active`.
 
     With Q = I every row has its single nonzero on the diagonal, so query r is cell r and the
@@ -50,7 +50,7 @@ def _write_identity_objective(f: IO, noisy_measurements: List[np.ndarray],
     Args:
         f (IO): Open LP file, positioned right after the "obj:" tag.
         noisy_measurements (List[np.ndarray]): Per-child measurement y_k, length n_cells.
-        active (List[int]): Global joint-space indices k * n_cells + j, ascending.
+        active (np.ndarray): Global joint-space indices k * n_cells + j, ascending.
         n_cells (int): Cells per child, used to split a global index into (child, cell).
     """
     # Pass 1: linear terms  -2*y * x[g]
@@ -64,7 +64,7 @@ def _write_identity_objective(f: IO, noisy_measurements: List[np.ndarray],
 
     # Pass 2: quadratic terms  2 * x[g]^2, wrapped in the "[ ... ] / 2" LP convention so each
     # evaluates to 1 * x^2.
-    if active:
+    if active.size:
         f.write(" + [")
         for g in active:
             term_count = _write_term(f, f" {_fmt(2.0)} x[{g}] ^ 2", term_count)
@@ -192,7 +192,7 @@ class OptimizationModelLP:
             self.env.setParam(key, val)
         self.env.start()
         
-    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[List[int]] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector, written directly to an .lp file.
         There is no container that encapsulates all elements, like Pyomo's ConcreteModel.
 
@@ -210,7 +210,7 @@ class OptimizationModelLP:
                 They are already expressed in terms of active indices and mapped to the global index space.
             query_matrix (Optional[np.ndarray]): Query matrix Q of shape (n_queries, n_cells),
                 or None for the identity workload, which is never materialised.
-            active (Optional[List[int]]): Global joint-space indices (in 0..n_children*n_cells-1)
+            active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
                 in the parent's support.
 
@@ -230,14 +230,15 @@ class OptimizationModelLP:
         n = n_children * n_cells
 
         # Active (non-pruned) global indices, in joint cell space.
-        active = list(range(n)) if active is None else list(active)
+        active = (np.arange(n, dtype=np.int64) if active is None
+                  else np.asarray(active, dtype=np.int64))
 
         # Everything pruned: the only feasible solution is all zeros (empty active-aligned vector)
-        if not active:
+        if active.size == 0:
             return np.zeros(0)
 
-        # Only the lifted objective needs membership tests; the identity one walks `active` directly
-        active_set = set() if is_identity else set(active)
+        # Only the lifted objective needs membership tests; the identity one walks `active` directly.
+        active_set = set() if is_identity else set(active.tolist())
 
         # Indices where the matrix Q has nonzeros (in this case just a 1).
         # Needed to detect what are we actually querying for in each row.
@@ -382,7 +383,7 @@ class OptimizationModelLP:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[List[int]] = None, n: Optional[int] = None) -> sp.csc_matrix:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[np.ndarray] = None, n: Optional[int] = None) -> sp.csc_matrix:
         '''Rounding estimation of the contingency vector, written directly to an .lp file.
 
         Purely linear (binary objective linearized as y_i, see other versions' docstrings for
@@ -394,7 +395,7 @@ class OptimizationModelLP:
             node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[SparseConstraint]): Sparse constraint objects, already offset
                 into joint space and restricted to active indices by the caller.
-            active (Optional[List[int]]): Global joint-space indices of non-pruned cells.
+            active (Optional[np.ndarray]): Global joint-space indices of non-pruned cells.
             n (Optional[int]): Joint vector length, required when active is provided.
 
         Returns:
@@ -407,9 +408,9 @@ class OptimizationModelLP:
         # Resolve active / n. x_tilde is aligned to active, so len(x_tilde) == len(active).
         if active is None:
             n = len(x_tilde)
-            active = list(range(n))
+            active = np.arange(n, dtype=np.int64)
         else:
-            active = list(active)
+            active = np.asarray(active, dtype=np.int64)
             if n is None:
                 raise ValueError("rounding_estimation requires `n` when `active` is provided.")
             if len(x_tilde) != len(active):
@@ -418,7 +419,7 @@ class OptimizationModelLP:
                 )
 
         # If everything is pruned, no binary decisions needed: all zeros.
-        if not active:
+        if active.size == 0:
             return sp.csc_matrix((n, 1), dtype=np.int64)
 
         # Start writing

@@ -359,7 +359,9 @@ def estimate_and_update_children(node_id: int, node_path: str,
     # force every child to 0 elsewhere, so variables are only created there. In a canonical
     # column the support is .indices in the csc sparse representation.
     support = parent_column.indices
-    active = [k * width + int(p) for k in range(n_children) for p in support]
+    # Computed as a numpy array to save memory
+    active = (np.arange(n_children, dtype=np.int64)[:, None] * width
+              + support.astype(np.int64)).ravel()
 
     # One boolean row over the per-node space answers "is this position active?" for every
     # child, because the active set is the same support shifted by k * width. A length-width

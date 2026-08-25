@@ -54,7 +54,7 @@ class OptimizationModel:
             self.env.set_raw_parameter(key, val)
         self.env.start()
 
-    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[List[int]] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using PyOptInterface (Gurobi backend).
 
         Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is a list of per-child
@@ -70,7 +70,7 @@ class OptimizationModel:
                 They are already expressed in terms of active indices and mapped to the global index space.
             query_matrix (Optional[np.ndarray]): Query matrix Q of shape (n_queries, n_cells),
                                             or None for the identity workload.
-            active (Optional[List[int]]): Global joint-space indices (in 0..n_children*n_cells-1)
+            active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
                 in the parent's support. By non-negativity + consistency, children can only be
                 non-zero there, so only those variables are created. When None (root / individual
@@ -94,14 +94,16 @@ class OptimizationModel:
         n = n_children * n_cells
 
         # Active (non-pruned) global indices, in joint cell space.
-        active = list(range(n)) if active is None else list(active)
-        
+        active = (np.arange(n, dtype=np.int64) if active is None
+                  else np.asarray(active, dtype=np.int64))
+
         # Everything pruned: the only feasible solution is all zeros (empty active-aligned vector).
-        if not active:
+        if active.size == 0:
             return np.zeros(0)
-        
-        # Only the lifted objective needs the active set, so we can use a set for O(1) membership tests.
-        active_set = set() if is_identity else set(active)
+
+        # Only the lifted objective needs the active set, so we can use a set for O(1)
+        # membership tests.
+        active_set = set() if is_identity else set(active.tolist())
         x = {i: model.add_variable(lb=0.0, domain=poi.VariableDomain.Continuous, name=f"x[{i}]") for i in active}
 
         # Indices where the matrix Q has nonzeros (in this case just a 1).
@@ -201,7 +203,7 @@ class OptimizationModel:
             model.close()
             raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
-    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[List[int]] = None, n: Optional[int] = None) -> sp.csc_matrix:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[np.ndarray] = None, n: Optional[int] = None) -> sp.csc_matrix:
         '''Rounding estimation of the contingency vector using PyOptInterface (Gurobi backend).
 
         Uses a linearized objective: since y_i ∈ {0,1}, y_i² = y_i. The floor part is moved
@@ -212,7 +214,7 @@ class OptimizationModel:
             node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[SparseConstraint]): Sparse constraint objects, already offset
                 into joint space and restricted to active indices by the caller.
-            active (Optional[List[int]]): Global joint-space indices of non-pruned cells.
+            active (Optional[np.ndarray]): Global joint-space indices of non-pruned cells.
             n (Optional[int]): Joint vector length, required when active is provided.
 
         Returns:
@@ -227,9 +229,9 @@ class OptimizationModel:
         # Resolve active / n. x_tilde is aligned to active, so len(x_tilde) == len(active).
         if active is None:
             n = len(x_tilde)
-            active = list(range(n))
+            active = np.arange(n, dtype=np.int64)
         else:
-            active = list(active)
+            active = np.asarray(active, dtype=np.int64)
             if n is None:
                 raise ValueError("rounding_estimation requires `n` when `active` is provided.")
             if len(x_tilde) != len(active):
@@ -238,7 +240,7 @@ class OptimizationModel:
                 )
 
         # If everything is pruned, no binary decisions needed: all zeros.
-        if not active:
+        if active.size == 0:
             return sp.csc_matrix((n, 1), dtype=np.int64)
 
         # Maps each global index to its position in the `active` list (and therefore in
