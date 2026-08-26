@@ -505,10 +505,13 @@ class SweepRoundingModel:
             model.setParam("Method", 1)
             model.optimize()
 
-            if model.SolCount == 0:
+            if model.Status != GRB.OPTIMAL:
                 raise RuntimeError(
-                    f"sweep rounding: transportation problem infeasible or unsolved at node "
-                    f"{node_id} (Gurobi status {model.Status})."
+                    f"sweep rounding: transportation problem at node {node_id} ended with "
+                    f"Gurobi status {model.Status} instead of OPTIMAL ({GRB.OPTIMAL}), with "
+                    f"{model.SolCount} solution(s). Status 3 is an infeasible transport (the "
+                    f"margins did not close, which _separator_margins should have caught "
+                    f"first)."
                 )
             segments = np.asarray(x.X, dtype=float).reshape(3, n_children, m)
         finally:

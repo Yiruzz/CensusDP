@@ -201,6 +201,16 @@ class OptimizationModel:
             raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path} for debugging.")
         else:
             model.close()
+            if status == poi.TerminationStatusCode.TIME_LIMIT:
+                raise RuntimeError(
+                    f"The QP for node {node_id} hit the TimeLimit in solver_options "
+                    f"({self.solver_options.get('TimeLimit')} s) before converging. Unlike the "
+                    f"rounding step, a truncated QP is not usable: barrier returns an interior "
+                    f"point that need not satisfy the geographic or separator rows, and "
+                    f"everything downstream assumes it does - the sweep rounder reads the "
+                    f"parent's integer counts straight off it. Raise TimeLimit or drop it, "
+                    f"rather than accepting what came back."
+                )
             raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
     def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[np.ndarray] = None, n: Optional[int] = None) -> sp.csc_matrix:
@@ -293,6 +303,16 @@ class OptimizationModel:
                 raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path} for debugging.")
             else:
                 model.close()
+                if status == poi.TerminationStatusCode.TIME_LIMIT:
+                    raise RuntimeError(
+                        f"The rounding MIP for node {node_id} hit the TimeLimit in "
+                        f"solver_options ({self.solver_options.get('TimeLimit')} s) with no "
+                        f"incumbent at all, so there is nothing to return - an incumbent would "
+                        f"have been accepted. On these models the root relaxation is usually "
+                        f"what did not finish, not the search. Raise TimeLimit, set a reachable "
+                        f"MIPGap (1e-4 is Gurobi's default and is not reachable here), or use "
+                        f"the junction-tree sweep."
+                    )
                 raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
         # Reconstruct as a sparse column vector, keeping only positive cells.

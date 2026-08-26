@@ -377,6 +377,16 @@ class OptimizationModelLP:
             else:
                 status = model.status
                 model.dispose()
+                if status == GRB.TIME_LIMIT:
+                    raise RuntimeError(
+                        f"The QP for node {node_id} hit the TimeLimit in solver_options "
+                        f"({self.solver_options.get('TimeLimit')} s) before converging. Unlike "
+                        f"the rounding step, a truncated QP is not usable: barrier returns an "
+                        f"interior point that need not satisfy the geographic or separator "
+                        f"rows, and everything downstream assumes it does - the sweep rounder "
+                        f"reads the parent's integer counts straight off it. Raise TimeLimit "
+                        f"or drop it, rather than accepting what came back."
+                    )
                 raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
         finally:
@@ -527,6 +537,15 @@ class OptimizationModelLP:
             else:
                 status = model.status
                 model.dispose()
+                if status == GRB.TIME_LIMIT:
+                    raise RuntimeError(
+                        f"The rounding MIP for node {node_id} hit the TimeLimit in "
+                        f"solver_options ({self.solver_options.get('TimeLimit')} s) with no "
+                        f"incumbent at all, so there is nothing to return - an incumbent would "
+                        f"have been accepted. On these models the root relaxation is usually "
+                        f"what did not finish, not the search. Raise TimeLimit, set a reachable "
+                        f"MIPGap, or use the junction-tree sweep."
+                    )
                 raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
             # Reconstruct as a sparse column vector, keeping only positive cells.
