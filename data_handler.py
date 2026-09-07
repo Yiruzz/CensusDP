@@ -23,6 +23,10 @@ from hierarchical_node import HierarchicalNode
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 from pathlib import Path
 
+# Fixes the record-to-cell pairing of the microdata reconstruction.
+MICRODATA_SEED = 20260907
+
+
 class DataHandler:
     '''Class to handle data loading, preprocessing and postprocessing.'''
 
@@ -902,8 +906,12 @@ class DataHandler:
         records reproduce every estimated marginal exactly.
 
         Assigning records within a separator group is arbitrary in the sense that any
-        assignment reproduces the same marginals - the bags constrain the joint only
-        through what they share.
+        assignment reproduces the same marginals, the bags constrain the joint only
+        through what they share. It is not arbitrary for the columns that share no bag. Pairing
+        both sides in cell order is maximally dependent coupling, and it invents association in
+        a direction fixed by the mixed-radix code. So the pairing is drawn uniformly at random 
+        inside each group, whose expected cross-tab is the product coupling - conditional independence
+        given the separator, i.e. the maximum-entropy joint compatible with what was measured.
 
         Every per-bag quantity is computed on the bag's support only (``m.indices`` /
         ``m.data``), never over its whole cell space.
@@ -924,6 +932,9 @@ class DataHandler:
         assert self.junction_tree is not None, "No junction tree bound. Call build_marginal_domains first."
         junction_tree = self.junction_tree
         column_index = {column: i for i, column in enumerate(self.query_columns)}
+        # Seeded so a run reproduces, and mixed with this leaf's own filter values so two leaves
+        # of the same size do not draw the same permutation.
+        rng = np.random.default_rng([MICRODATA_SEED, *repr(sorted(filter_dict.items())).encode()])
 
         # Expand the root bag's counts into one partial record per person. Each
         # occupied cell is repeated as many times as its count, so cells[r] is the root-bag
@@ -983,7 +994,10 @@ class DataHandler:
             sep_ids = domain.project_cells_to(occupied, separator)
             order = np.argsort(sep_ids, kind="stable")
             expanded = np.repeat(occupied[order], counts[order])
-            records_by_group = np.argsort(record_group, kind="stable")
+            # Which record of the group takes which of its cells is drawn uniformly at random,
+            # by shuffling before the stable sort by group. See the note above on why.
+            shuffle = rng.permutation(n_records)
+            records_by_group = shuffle[np.argsort(record_group[shuffle], kind="stable")]
 
             # Pair them positionally within each group: record r now knows its cell in this bag.
             assigned = np.empty(n_records, dtype=np.int64)
