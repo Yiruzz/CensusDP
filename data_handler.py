@@ -574,7 +574,7 @@ class DataHandler:
         be estimated from the data, and doing so costs privacy budget like any other query.
         Returning ONE vector matters - the caller noises it in a single shot, so the
         sensitivity argument is the number of pairs (a record falls in exactly one cell of
-        each pair table), exactly as the number of bags is for the per-node measurement.
+        each pair table, doubled for bounded DP), exactly as the number of bags is for the per-node measurement.
 
         Args:
             columns (Sequence[str]): Columns to pair up.

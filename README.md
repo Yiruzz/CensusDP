@@ -74,8 +74,25 @@ Notes:
   - `ApproximateDP(rhos, delta)` — ρ-zCDP under the hood; reports an equivalent (ε, δ)-DP guarantee via the Bun–Steinke inequality.
   - `RenyiDP(epsilons, delta)` — (ε, δ)-DP via joint-α Rényi-DP composition over the discrete Gaussian (the δ→ε conversion cost is paid once for the whole tree).
   Call `td.privacy_mechanism.report_guarantee()` after `td.run()` to print the resulting guarantee in human-readable form.
-- **Query workload**: Use `td.set_query_workload(QueryWorkload()...)` (see `queries.py`) or pass a binary numpy matrix directly. The L1 sensitivity Δ is computed once as the max column sum of the resulting binary `Q`.
+- **Query workload**: Use `td.set_query_workload(QueryWorkload()...)` (see `queries.py`) or pass a binary numpy matrix directly. The sensitivity Δ is computed once as twice the max column sum of the resulting binary `Q` (see "Privacy model" below).
 - **Constraints**: Constraints are objects conforming to the `Constraint` interface (see `constraints/constraint.py`). Use `td.set_constraint_to_tree(constraint)` to add a constraint to all levels, or `td.set_constraint_to_level(level, constraint)` to apply to a particular level. Constraints are evaluated and converted to callable constraint functions during tree construction in `DataHandler.build_hierarchical_tree()`.
+
+## Privacy model: bounded differential privacy
+
+Two datasets are neighbours when they have the same number of records and differ in the values of exactly one of them. This is *bounded* differential privacy (Kifer and Machanavajjhala, *No Free Lunch in Data Privacy*, SIGMOD 2011), the definition the US Census Bureau adopted for its 2020 TopDown Algorithm because the total population is invariant (Abowd et al., *The 2020 Census Disclosure Avoidance System TopDown Algorithm*, Harvard Data Science Review, 2022). The alternative, *unbounded* DP, builds neighbours by adding or removing a record.
+
+Replacing a record takes it out of one cell and puts it in another, so every sensitivity is twice the one for adding or removing a record:
+
+| Measurement | Sensitivity Δ |
+|---|---|
+| Identity workload (every cell of the full joint) | 2 |
+| Binary query workload `Q` | 2 × max column sum of `Q` (an upper bound) |
+| Factored pipeline (one marginal per junction-tree bag) | 2 × number of bags |
+| Private marginal selection (every 2-way marginal) | 2 × number of column pairs |
+
+The doubling holds for the L1 and the squared L2 sensitivity alike, so one Δ calibrates every mechanism: `PureDP` adds discrete Laplace noise with scale Δ / ε, and `ZCDP` discrete Gaussian noise with σ = √(Δ / 2ρ). The factor is the `bounded_dp_factor` attribute of `TopDown`.
+
+Since neighbours share their number of records, that number is public under this definition (Kifer et al., *Bayesian and Frequentist Semantics for Common Variations of Differential Privacy: Applications to the 2020 Census*, 2022, Definition 4.1), and enforcing it with `SumEqualRealTotal` at the root spends no budget.
 
 ## Constraints
 
@@ -111,7 +128,7 @@ sum_eq = SumEqual(expr, 100)  # Sum(expr) == 100
 # Example: enforce that the real total in each node equals reported total
 real_total = SumEqualRealTotal(TrueExpression())
 
-td.set_constraint_to_level(0, real_total)  # apply real total constraint to root (and effectively root-only)
+td.set_constraint_to_level(0, real_total)  # root and level 1: level L covers levels 0 to L + 1
 ```
 
 - When `DataHandler.build_hierarchical_tree(constraints)` runs, it will:

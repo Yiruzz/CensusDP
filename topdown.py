@@ -54,6 +54,7 @@ class TopDown():
             hierarchical_columns (List[str]): Columns representing the hierarchy levels.
             query_columns (List[str]): Columns to be queried and aggregated.
             privacy_mechanism (PrivacyMechanism): DP variant and its per-level parameters.
+            bounded_dp_factor (int): Multiplier of every sensitivity: 2, since neighbours replace a record.
             tree (HierarchicalTree): Hierarchical structure of the data.
             optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                                 and solver options dict).
@@ -79,7 +80,13 @@ class TopDown():
         self.privacy_mechanism: PrivacyMechanism = privacy_mechanism
 
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
-        self.query_sensitivity: int = 1  # L1 sensitivity of Q; computed in initialize() once Q is materialized
+        # Bounded DP: neighbouring datasets have the same number of records and differ in the
+        # values of one of them. Replacing a record takes it out of one cell and puts it in
+        # another, so every sensitivity derived for adding or removing a record at most doubles,
+        # in L1 and in squared L2 alike (exactly, for marginal tables), and one factor serves every
+        # mechanism. It is the convention of the original TopDown.
+        self.bounded_dp_factor: int = 2
+        self.query_sensitivity: int = 1  # sensitivity of the measurement; computed in initialize()
 
         # Factored pipeline. Set via set_marginals() or set_marginal_selection(); when both
         # are unset the algorithm runs the full-joint pipeline over Q instead. The two modes
@@ -216,7 +223,7 @@ class TopDown():
 
         All 2-way marginals are measured over the whole dataset in one shot and noised
         together. A record falls in exactly one cell of each pair table, so the squared L2
-        sensitivity is the number of pairs. Mutual information is then computed from the
+        sensitivity is the number of pairs, times bounded_dp_factor. Mutual information is then computed from the
         NOISY tables only - the raw data is never read by the selection - and handed to the
         strategy, which returns the cliques.
 
@@ -226,7 +233,7 @@ class TopDown():
         selection_level = len(self.privacy_mechanism.level_params) - 1
 
         counts, pairs, offsets = self.data_handler.measure_pairwise_counts(self.query_columns)
-        self.privacy_mechanism.add_noise(counts, selection_level, len(pairs))
+        self.privacy_mechanism.add_noise(counts, selection_level, self.bounded_dp_factor * len(pairs))
 
         # Slice the noisy vector back into one 2-D table per pair.
         tables = {}
@@ -245,7 +252,7 @@ class TopDown():
             self.query_columns, association, [scope for scope in mandatory if scope])
 
         print(f'  Selection measured {len(pairs)} pairwise marginals '
-              f'({len(counts)} cells) with sensitivity {len(pairs)}')
+              f'({len(counts)} cells) with sensitivity {self.bounded_dp_factor * len(pairs)}')
         return cliques
 
     def _build_junction_tree(self, structural: List[Constraint]) -> None:
@@ -286,7 +293,7 @@ class TopDown():
         # each bag cell is measured directly by its own GROUP BY, never aggregated from others.
         # The optimizers take the separable objective path when query_matrix is None.
         self.Q = None
-        self.query_sensitivity = self.junction_tree.n_bags
+        self.query_sensitivity = self.bounded_dp_factor * self.junction_tree.n_bags
 
         print(f'\n  Bags: {self.junction_tree.bags}')
         print(f'  Marginal width: {width} (full joint would be {self.data_handler.n_cells}), '
@@ -342,7 +349,7 @@ class TopDown():
         # and avoid computations that depends on the form of Q.
         if is_identity_workload(self.Q):
             self.Q = None
-            self.query_sensitivity = 1
+            self.query_sensitivity = self.bounded_dp_factor
             # Set explicitly rather than leaning on noise_width's fallback chain
             # (marginal_width -> query_width -> n_cells): that ordering is implicit coupling.
             self.data_handler.query_width = int(n_cells)
@@ -353,15 +360,15 @@ class TopDown():
             return
 
         # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
-        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
+        #       and coincides with the squared L2 sensitivity (both then doubled for bounded DP). If Q is not binary, the privacy guarantees may not hold.
         if sp.issparse(self.Q):
             assert np.all((self.Q.data == 0) | (self.Q.data == 1)), \
                 "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-            self.query_sensitivity = int(np.asarray(self.Q.sum(axis=0)).max())
+            self.query_sensitivity = self.bounded_dp_factor * int(np.asarray(self.Q.sum(axis=0)).max())
         else:
             assert np.all((self.Q == 0) | (self.Q == 1)), \
                 "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-            self.query_sensitivity = int(self.Q.sum(axis=0).max())
+            self.query_sensitivity = self.bounded_dp_factor * int(self.Q.sum(axis=0).max())
         # The node measurement is y = Q @ x, so the pre-computed noise must be this wide -
         # equal to n_cells only for the identity workload.
         self.data_handler.query_width = int(self.Q.shape[0])
