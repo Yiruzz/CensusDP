@@ -19,7 +19,7 @@ from benchmarks.common import COMPOSITIONS
 DATASETS = ('adult', 'sinasc', 'spanish_census', 'chilean_census', 'ipums_1940')
 RHOS = (0.1, 0.5, 1, 2, 5)
 COMPOSITION_RHO = 1
-COMPOSITION = None  # from exp3_composition
+COMPOSITION = 'sqrt'  # exp3_composition, 2026-09-22
 RHO = None          # from exp3_budget
 
 
