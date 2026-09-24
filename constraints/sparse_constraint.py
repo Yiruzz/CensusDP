@@ -33,29 +33,32 @@ class SparseConstraint:
         if self.sense not in ("=", "<=", ">="):
             raise ValueError(f"sense must be '=', '<=', or '>='. Got '{self.sense}'")
 
-    def prune_to_active_space(self, offset: int, active_indices_set: set) -> Optional["SparseConstraint"]:
+    def prune_to_active_space(self, offset: int, active_mask: np.ndarray) -> Optional["SparseConstraint"]:
         """
         Shift local constraint indices into global space and prune inactive variables.
+
+        The mask is indexed by the local position, not the global one, and that is what makes
+        this cheap. The active set is always {k * width + p : p in support} - the same support
+        for every child block k - so whether a position survives depends only on p, never on
+        k.
+
         Args:
-            offset (int): Global index offset applied to local indices.
-            active_indices_set (set): Set of active global indices allowed in the current optimization. Any index not in this set is discarded.
+            offset (int): Global index offset applied to the surviving local indices.
+            active_mask (np.ndarray): Boolean array of length width (the per-node space).
+                Entry p is True when position p is active. Positions where it is False are
+                dropped from the row.
 
         Returns:
-            Optional[SparseConstraint]: A new SparseConstraint containing only active global indices. Returns None if all indices are pruned.
+            Optional[SparseConstraint]: A new SparseConstraint containing only active global
+                indices. Returns None if all indices are pruned.
         """
-
-        global_indices = self.indices + offset
-        mask = np.array([i in active_indices_set for i in global_indices])
-
-        pruned_indices = global_indices[mask]
-        pruned_coefs = self.coefs[mask]
-
-        if len(pruned_indices) == 0:
+        keep = active_mask[self.indices]
+        if not keep.any():
             return None
 
         return SparseConstraint(
-            indices=pruned_indices,
-            coefs=pruned_coefs,
+            indices=self.indices[keep] + offset,
+            coefs=self.coefs[keep],
             sense=self.sense,
             rhs=self.rhs
         )

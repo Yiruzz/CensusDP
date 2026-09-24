@@ -8,13 +8,15 @@ from hierarchical_tree import HierarchicalTree
 from hierarchical_node import HierarchicalNode
 from data_handler import DataHandler
 from constraints.constraint import Constraint
+from constraints.domain_restriction import tree_wide
 from parallel_utils.estimation_phase import init_process, estimate_and_update_children
-from optimizers.pyoptinterface import OptimizationModel
-from optimizers.write_lp_directly import OptimizationModelLP
-from queries import QueryWorkload
+from parallel_utils import marginal_estimation
+from optimizers import build_optimizer, ROUNDING_METHODS
+from graph import JunctionTree, MarginalSelectionStrategy, MaxSpanningTreeMI, PairwiseAssociation
+from queries import QueryWorkload, is_identity_workload
 from privacy import PrivacyMechanism
 
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, Iterable, List, Optional, Union, Tuple
 import time
 
 class TopDown():
@@ -28,7 +30,7 @@ class TopDown():
     def __init__(self, data_path: str, hierarchy: List[str], query_columns: List[str],
                  privacy_mechanism: PrivacyMechanism, num_workers: int, out_path: str = 'noisy_data.csv',
                  solver_options: dict = {}, domain: Optional[Dict[str, List]] = None,
-                 check_correctness: bool = False, optimizer_backend: str = 'pyoptinterface') -> None:
+                 check_correctness: bool = False, optimizer_backend: str = 'write_lp') -> None:
         """Initialize the TopDown algorithm.
 
         Args:
@@ -56,6 +58,8 @@ class TopDown():
             optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                                 and solver options dict).
             constraints (Dict[int, List[Constraint]]): Constraints registered per tree level.
+            structural (List[Constraint]): Those registered at every level, which are the only
+                ones allowed to shape the cell space. Resolved in initialize().
             workers (int): Number of parallel workers for the estimation phase.
         """
         n_levels = len(hierarchy) + 1
@@ -77,7 +81,18 @@ class TopDown():
         self.Q: Union[QueryWorkload, np.ndarray, None] = None  # set via set_query_workload(); resolved in initialize()
         self.query_sensitivity: int = 1  # L1 sensitivity of Q; computed in initialize() once Q is materialized
 
+        # Factored pipeline. Set via set_marginals() or set_marginal_selection(); when both
+        # are unset the algorithm runs the full-joint pipeline over Q instead. The two modes
+        # are mutually exclusive and both fully supported.
+        self.marginal_cliques: Optional[List[Iterable[str]]] = None
+        self.junction_tree: Optional[JunctionTree] = None
+        self.marginal_strategy: Optional[MarginalSelectionStrategy] = None
+        self.selection_budget_fraction: float = 0.0
+        self._budget_split_applied: bool = False
+
         self.constraints: Dict[int, List[Constraint]] = {i: [] for i in range(len(hierarchy) + 1)}
+        # The subset of the above that shapes the cell space
+        self.structural: List[Constraint] = []
 
         self.tree: HierarchicalTree = HierarchicalTree()
 
@@ -88,6 +103,9 @@ class TopDown():
         self.workers = num_workers
         self.check_correctness = check_correctness
         self.optimizer_backend = optimizer_backend
+        # 'auto' is resolved lazily, in _pool_setup, so set_rounding_method works both before
+        # and after initialize().
+        self.rounding_method: str = 'auto'
 
     def initialize(self) -> None:
         '''Initialize the TopDown algorithm.
@@ -102,34 +120,29 @@ class TopDown():
         self.data_handler.convert_csv_to_parquet()
         print(f'{time.time() - t1:.2f} seconds.')
 
+        # Structural zeros are folded into the cell space instead of being enforced as
+        # optimizer rows. Only constraints that are tree-wide qualify. Resolved once here and
+        # shipped to the workers verbatim, so every process shapes the same cell space.
+        self.structural = tree_wide(self.constraints)
         self.data_handler.create_data_view()
+
+        factored = self.marginal_cliques is not None or self.marginal_strategy is not None
 
         t1 = time.time()
         print(f'Building contingency domain...', end=' ')
-        self.data_handler.build_contingency_domain()
+        # The factored pipeline never materialises the joint, so only its per-bag domains are
+        # restricted (in _build_junction_tree), restricting the joint here would just force a
+        # size it is meant never to compute.
+        self.data_handler.build_contingency_domain(None if factored else self.structural)
         print(f'{time.time() - t1:.2f} seconds.')
 
         t1 = time.time()
-        print(f'Building query workload...', end=' ')
-        if isinstance(self.Q, QueryWorkload):
-            self.Q = self.Q.build(self.data_handler.contingency_domain)
-        elif not (isinstance(self.Q, np.ndarray) or sp.issparse(self.Q)):
-            # No workload set - use the sparse identity (each cell answered directly).
-            n_cells = self.data_handler.contingency_domain.n_cells
-            self.Q = sp.identity(n_cells, format='csr', dtype=float)
-        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
-        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
-        if sp.issparse(self.Q):
-            assert np.all((self.Q.data == 0) | (self.Q.data == 1)), \
-                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-            self.query_sensitivity = int(np.asarray(self.Q.sum(axis=0)).max())
+        if factored:
+            print(f'Building junction tree...', end=' ')
+            self._build_junction_tree(self.structural)
+            print(f'{time.time() - t1:.2f} seconds.\n')
         else:
-            assert np.all((self.Q == 0) | (self.Q == 1)), \
-                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
-            self.query_sensitivity = int(self.Q.sum(axis=0).max())
-        print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
-        print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
-        print(f'{time.time() - t1:.2f} seconds.\n')
+            self._build_query_workload(t1)
 
         t1 = time.time()
         print(f'Building hierarchical tree structure...', end=' ')
@@ -144,8 +157,13 @@ class TopDown():
 
         print(self.tree, "\n")
 
-        # Pre-generate noise vectors for all nodes
+        # Pre-generate noise vectors for all nodes. With the cache off the paths stay None and
+        # every node samples in situ.
         t1 = time.time()
+        if not self.data_handler.use_noise_cache:
+            print('Noise cache disabled; every node samples its noise in situ.\n')
+            return
+
         print(f'Pre-generating noise vectors if needed...', end=' ')
         if not self.data_handler.noisy_vectors_exist(self.tree._node_count, self.privacy_mechanism.param_spec,
                                                      self.query_sensitivity):
@@ -153,6 +171,202 @@ class TopDown():
             self.data_handler.generate_noise_vectors(self.workers, self.tree._node_count,
                                                      self.tree.iter_nodes_with_levels(),
                                                      self.privacy_mechanism.name, self.privacy_mechanism.level_params, self.query_sensitivity)
+        print(f'{time.time() - t1:.2f} seconds.\n')
+
+    def _reserve_selection_budget(self) -> float:
+        '''Carve the marginal-selection share out of the total privacy budget.
+
+        Selection reads the data, so it must be paid for. Rather than build a second
+        mechanism, the selection is treated as one more level of the same sequential
+        composition: the per-level parameters are scaled down by (1 - fraction) and the
+        reserved share is appended as an extra entry. Under zCDP the parameters simply add
+        up, so the total is unchanged - the tree just gets a smaller share of it.
+
+            before:  [r0, r1, ..., rL]                       sum = T
+            after:   [(1-f)r0, ..., (1-f)rL, f*T]            sum = T
+
+        This works for every mechanism (PureDP, ZCDP, ApproximateDP, RenyiDP) without
+        special-casing their extra parameters, and RenyiDP's joint-alpha calibration
+        naturally accounts for the extra level. It also changes param_spec, so noise files
+        from a run with a different split are never reused.
+
+        Mutates the mechanism in place and is idempotent: calling initialize() twice does
+        not shrink the budget twice.
+
+        Returns:
+            float: The privacy parameter reserved for selection.
+        '''
+        params = self.privacy_mechanism.level_params
+        if self._budget_split_applied:
+            return params[-1]
+
+        total = sum(params)
+        reserved = self.selection_budget_fraction * total
+        remaining = 1.0 - self.selection_budget_fraction
+
+        self.privacy_mechanism.level_params = [p * remaining for p in params] + [reserved]
+        self._budget_split_applied = True
+
+        print(f'\n  Selection budget: {reserved:.6g} of {total:.6g} '
+              f'({self.selection_budget_fraction:.0%}); the tree keeps {total - reserved:.6g}')
+        return reserved
+
+    def _select_marginal_cliques(self) -> List[Iterable[str]]:
+        '''Pick the marginals to measure, spending the reserved budget on the data.
+
+        All 2-way marginals are measured over the whole dataset in one shot and noised
+        together. A record falls in exactly one cell of each pair table, so the squared L2
+        sensitivity is the number of pairs. Mutual information is then computed from the
+        NOISY tables only - the raw data is never read by the selection - and handed to the
+        strategy, which returns the cliques.
+
+        Returns:
+            List[Iterable[str]]: The selected cliques.
+        '''
+        selection_level = len(self.privacy_mechanism.level_params) - 1
+
+        counts, pairs, offsets = self.data_handler.measure_pairwise_counts(self.query_columns)
+        self.privacy_mechanism.add_noise(counts, selection_level, len(pairs))
+
+        # Slice the noisy vector back into one 2-D table per pair.
+        tables = {}
+        for pair, offset in zip(pairs, offsets):
+            domain = self.data_handler.contingency_domain.subdomain(pair)
+            block = counts[offset:offset + domain.n_cells]
+            tables[pair] = block.reshape(int(domain.sizes[0]), int(domain.sizes[1]))
+
+        association = PairwiseAssociation().compute(
+            self.query_columns, lambda a, b: tables[(a, b)])
+
+        mandatory = {constraint.scope()
+                     for level_constraints in self.constraints.values()
+                     for constraint in level_constraints}
+        cliques = self.marginal_strategy.select(
+            self.query_columns, association, [scope for scope in mandatory if scope])
+
+        print(f'  Selection measured {len(pairs)} pairwise marginals '
+              f'({len(counts)} cells) with sensitivity {len(pairs)}')
+        return cliques
+
+    def _build_junction_tree(self, structural: List[Constraint]) -> None:
+        '''Build the junction tree and bind the per-bag cell spaces (factored pipeline).
+
+        Every constraint scope is embedded as a mandatory clique alongside the requested
+        marginals, so each constraint is guaranteed to fit inside some bag.
+
+        Args:
+            structural (List[Constraint]): The tree-wide constraints, as tree_wide() selects
+                them. Those declaring structural zeros are folded into each bag's cell space
+                instead of being enforced as optimizer rows.
+        '''
+        cliques = list(self.marginal_cliques or [])
+        if self.marginal_strategy is not None:
+            self._reserve_selection_budget()
+            cliques += self._select_marginal_cliques()
+
+        # When selecting marginals with the strategy, there can be duplicates cliques when
+        # adding the scopes from the constraints here, but since the junction tree is built
+        # from a set of cliques, the duplicates are implicitly removed.
+        scopes = {constraint.scope()
+                  for level_constraints in self.constraints.values()
+                  for constraint in level_constraints}
+        cliques += [scope for scope in scopes if scope]
+
+        # Per-column cardinalities drive a cardinality-aware triangulation: without them
+        # the triangulation can fuse high-cardinality columns (region, year, occupation)
+        # into a bag of tens of millions of cells even when every constraint scope is only
+        # two columns wide.
+        domain = self.data_handler.contingency_domain
+        weights = {column: int(size) for column, size in zip(domain.columns, domain.sizes)}
+        self.junction_tree = JunctionTree.build(self.query_columns, cliques, weights)
+        self.data_handler.build_marginal_domains(self.junction_tree, structural)
+
+        width = self.data_handler.marginal_width
+        # No Q at all: in the factored pipeline the workload is structurally the identity -
+        # each bag cell is measured directly by its own GROUP BY, never aggregated from others.
+        # The optimizers take the separable objective path when query_matrix is None.
+        self.Q = None
+        self.query_sensitivity = self.junction_tree.n_bags
+
+        print(f'\n  Bags: {self.junction_tree.bags}')
+        print(f'  Marginal width: {width} (full joint would be {self.data_handler.n_cells}), '
+              f'sensitivity={self.query_sensitivity}')
+        self._report_disconnected_components()
+        print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+
+    def _report_disconnected_components(self) -> None:
+        '''Announce when the declared marginals leave the interaction graph disconnected.
+
+        A tree edge with an empty separator means its two bags share no column, i.e. the
+        marginals say those attribute groups are independent. That is a legitimate modelling
+        choice and it is not patched by inventing a correlation - measuring an extra marginal
+        would cost privacy budget (sensitivity is the number of bags) to assert a dependence
+        that was never claimed.
+
+        What is imposed is the shared-total row on each such edge, because every record
+        contributes 1 to every bag regardless of correlation. Without it the components'
+        totals drift apart under noise and the microdata cannot be reconstructed at all - the
+        join needs every bag to total the node's record count.
+        '''
+        unlinked = [(i, j) for i, j in self.junction_tree.edges()
+                    if not self.junction_tree.separator(i, j)]
+        if not unlinked:
+            return
+
+        print(f'  NOTE: the interaction graph is disconnected - {len(unlinked)} junction-tree '
+              f'edge(s) join bags that share no column:')
+        for i, j in unlinked:
+            print(f'    {self.junction_tree.bags[i]}  <->  {self.junction_tree.bags[j]}')
+        print('    Those attribute groups are treated as INDEPENDENT: no correlation between '
+              'them\n    survives into the microdata. A shared-total constraint is imposed on '
+              'each edge so the\n    bags agree on the node population and the microdata can '
+              'be generated; it costs no\n    privacy budget. Declare a marginal spanning the '
+              'groups if you want them correlated.')
+
+    def _build_query_workload(self, t1: float) -> None:
+        '''Resolve the workload matrix Q and its sensitivity (full-joint pipeline).
+
+        Args:
+            t1 (float): Start timestamp, for the elapsed-time report.
+        '''
+        print(f'Building query workload...', end=' ')
+        n_cells = self.data_handler.contingency_domain.n_cells
+
+        if isinstance(self.Q, QueryWorkload):
+            self.Q = self.Q.build(self.data_handler.contingency_domain)
+        elif not (isinstance(self.Q, np.ndarray) or sp.issparse(self.Q)):
+            # No workload set: every cell is answered directly, i.e. the identity.
+            self.Q = None
+
+        # Check for identity matrix, since when Q is the the identity we can afford to drop it entirely
+        # and avoid computations that depends on the form of Q.
+        if is_identity_workload(self.Q):
+            self.Q = None
+            self.query_sensitivity = 1
+            # Set explicitly rather than leaning on noise_width's fallback chain
+            # (marginal_width -> query_width -> n_cells): that ordering is implicit coupling.
+            self.data_handler.query_width = int(n_cells)
+            print(f'\n  Query matrix: identity, n_queries={n_cells}, '
+                  f'sensitivity={self.query_sensitivity}')
+            print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
+            print(f'{time.time() - t1:.2f} seconds.\n')
+            return
+
+        # NOTE: Privacy guarantees rely on Q being binary so that the L1 sensitivity (max column sum) is well defined
+        #       and coincides with the squared L2 sensitivity. If Q is not binary, the privacy guarantees may not hold.
+        if sp.issparse(self.Q):
+            assert np.all((self.Q.data == 0) | (self.Q.data == 1)), \
+                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+            self.query_sensitivity = int(np.asarray(self.Q.sum(axis=0)).max())
+        else:
+            assert np.all((self.Q == 0) | (self.Q == 1)), \
+                "Q must be binary (entries in {0,1}) for the column-sum sensitivity reasoning."
+            self.query_sensitivity = int(self.Q.sum(axis=0).max())
+        # The node measurement is y = Q @ x, so the pre-computed noise must be this wide -
+        # equal to n_cells only for the identity workload.
+        self.data_handler.query_width = int(self.Q.shape[0])
+        print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
+        print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
         print(f'{time.time() - t1:.2f} seconds.\n')
 
     def estimation_phase(self) -> None:
@@ -179,29 +393,21 @@ class TopDown():
         nodes with more work are dispatched first and the executor stays busy.
         '''
         root = self.tree.root
-        root.contingency_vector, root.constraints = self.data_handler.materialize_node_data(root.filter_dict, self.constraints[root.level], self.Q)
-        try:
-            self.privacy_mechanism.add_noise_from_precomputed(self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name], root.contingency_vector, root.id)
-        except:
-            self.privacy_mechanism.add_noise(root.contingency_vector, root.level, self.query_sensitivity)
 
-        # First phase: resolve root's own contingency vector
-        self._estimate_node_individually(root)
-        path = self.data_handler.spill_path(root.filter_dict)
-        self.data_handler.spill_vector(path, root.contingency_vector)
+        # Announced before the root is solved, because the root itself always takes the MIP:
+        # it has no parent, so the sweep has no column margins to work from.
+        rounding = self._resolve_rounding_method()
+        print(f'  Rounding method: {rounding}'
+              + (' (the hierarchy root always uses mip)' if rounding == 'sweep' else ''))
+
+        self._solve_root(root)
+
+        initializer, initargs = self._pool_setup()
+        worker = (marginal_estimation.estimate_and_update_children
+                  if self.junction_tree is not None else estimate_and_update_children)
 
         with ProcessPoolExecutor(max_workers=self.workers, mp_context=get_context("spawn"),
-                                initializer=init_process, initargs=(self.optimizer, self.constraints,
-                                                                    self.data_handler.spill_dir,
-                                                                    self.data_handler.microdata_dir,
-                                                                    self.data_handler.file_path,
-                                                                    self.data_handler.contingency_domain.domains,
-                                                                    self.hierarchical_columns, self.query_columns,
-                                                                    self.privacy_mechanism,
-                                                                    self.Q, self.query_sensitivity,
-                                                                    self.check_correctness,
-                                                                    self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name,
-                                                                    self.optimizer_backend)) as executor:
+                                initializer=initializer, initargs=initargs) as executor:
 
             def _submit(node):
                 node_path = self.data_handler.spill_path(node.filter_dict)
@@ -210,7 +416,7 @@ class TopDown():
                 children_level = node.children[0].level
                 is_leaf = node.children[0].is_leaf()
 
-                return executor.submit(estimate_and_update_children, node.id, node_path,
+                return executor.submit(worker, node.id, node_path,
                                      children_filter_dicts, children_ids, children_level, is_leaf)
 
             # Priority queue ordered by number of children: nodes with more children are
@@ -239,32 +445,103 @@ class TopDown():
 
                 _fill_window()
 
-    def _estimate_node_individually(self, node: HierarchicalNode) -> None:
-        '''Solve optimization for a node's own contingency vector.
+    def _solve_root(self, root: HierarchicalNode) -> None:
+        '''Materialize, noise and solve the root, then spill it for the worker pool.
+
+        The root is the only node solved on its own (every other node is solved jointly
+        with its siblings under the parent's totals), and it is solved in the main process.
+
+        In the marginal pipeline the root also needs its own separator-consistency rows:
+        nothing else would force its bags to agree with each other, and every descendant
+        inherits its totals.
 
         Args:
-            node (HierarchicalNode): The node to process.
+            root (HierarchicalNode): The tree root.
         '''
-        optimizer = OptimizationModel(*self.optimizer) if self.optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*self.optimizer)
+        path = self.data_handler.spill_path(root.filter_dict)
+
+        if self.junction_tree is not None: # Marginal case
+            marginals, constraints = self.data_handler.materialize_node_marginals(
+                root.filter_dict, self.constraints[root.level])
+            measurement = np.concatenate(marginals)
+            constraints = constraints + marginal_estimation.separator_constraints(self.data_handler)
+        else: # Full-joint case
+            measurement, constraints = self.data_handler.materialize_node_data(
+                root.filter_dict, self.constraints[root.level], self.Q)
+
+        # Add noise to the materialized measurement vector.
+        if self.data_handler.noise_zarr_group is None:
+            self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
+        else:
+            self.privacy_mechanism.add_noise_from_precomputed(
+                self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name],
+                measurement, root.id)
+
+        solution = self._estimate_node_individually(root.id, measurement, constraints)
+
+        self.data_handler.spill_vector(path, solution)
+
+    def _pool_setup(self) -> Tuple[callable, Tuple]:
+        '''Return the worker-pool initializer and its arguments for the active pipeline.
+
+        The two pipelines need different worker state - the factored one ships the junction
+        tree and derives the bag layout from it, the full-joint one ships Q - so they have
+        separate init_process functions rather than one with optional arguments.
+
+        Returns:
+            Tuple[callable, Tuple]: (initializer, initargs) for ProcessPoolExecutor.
+        '''
+        common = (self.data_handler.spill_dir, self.data_handler.microdata_dir,
+                  self.data_handler.file_path, self.data_handler.contingency_domain.domains,
+                  self.hierarchical_columns, self.query_columns)
+
+        rounding = self._resolve_rounding_method()
+
+        if self.junction_tree is not None:
+            return marginal_estimation.init_process, (
+                self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
+                self.junction_tree, self.privacy_mechanism, self.query_sensitivity,
+                self.check_correctness,
+                self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding)
+
+        return init_process, (
+            self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
+            self.Q, self.privacy_mechanism, self.query_sensitivity, self.check_correctness,
+            self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding)
+
+    def _estimate_node_individually(self, node_id: int, measurement: np.ndarray,
+                                    constraints: List) -> sp.csc_matrix:
+        '''Solve one node's own measurement vector, with no siblings to reconcile.
+
+        Args:
+            node_id (int): The node's ID, used to name the solver's temporary files.
+            measurement (np.ndarray): The node's noisy measurement vector.
+            constraints (List): SparseConstraints over that vector's index space.
+
+        Returns:
+            sp.csc_matrix: Integer estimate, shape (len(measurement), 1).
+        '''
+        optimizer = build_optimizer(self.optimizer_backend, self.optimizer)
 
         t1 = time.time()
         x_tilde = optimizer.non_negative_real_estimation(
-            noisy_measurements=[node.contingency_vector],
-            node_id=node.id,
-            constraints=node.constraints,
+            noisy_measurements=[measurement],
+            node_id=node_id,
+            constraints=constraints,
             query_matrix=self.Q
         )
         real_time = time.time() - t1
 
         t1 = time.time()
-        node.contingency_vector = optimizer.rounding_estimation(
+        solution = optimizer.rounding_estimation(
             x_tilde=x_tilde,
-            node_id=node.id,
-            constraints=node.constraints
+            node_id=node_id,
+            constraints=constraints
         )
         rounding_time = time.time() - t1
 
-        print(f'  [Node {node.id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+        print(f'  [Node {node_id}] - real {real_time:.1f}s - rounding {rounding_time:.1f}s')
+        return solution
 
     def set_constraint_to_tree(self, constraint: Constraint) -> None:
         '''Add a constraint to all nodes in the hierarchical tree.
@@ -300,6 +577,134 @@ class TopDown():
                           or a pre-built numpy ndarray of shape (n_queries, n_cells).
         '''
         self.Q = query_matrix
+
+    def set_marginals(self, cliques: Iterable[Iterable[str]]) -> None:
+        '''Switch to the factored/marginal pipeline and declare the marginals to measure.
+
+        Instead of one contingency vector over the full joint (whose length is the product
+        of all column cardinalities, and therefore unusable past a handful of columns),
+        each node holds one small marginal per junction-tree bag. Consistency between
+        overlapping bags replaces the joint.
+
+        Each clique is a set of columns to keep jointly. They are embedded in an
+        interaction graph which is then triangulated; the resulting maximal cliques are the
+        bags actually measured, so the final bags may be LARGER than what is passed here.
+        Every constraint scope registered with set_constraint_to_level is added
+        automatically, so constraints are always enforceable inside some bag.
+
+        Calling this makes Q irrelevant: the two pipelines are mutually exclusive, and
+        leaving it unset keeps the full-joint behaviour.
+
+        Args:
+            cliques (Iterable[Iterable[str]]): Column subsets to keep jointly, e.g.
+                [('P01', 'P02'), ('CANT_HOG', 'CANT_PER')].
+
+        Raises:
+            ValueError: If a declared column is not among the query columns.
+        '''
+        cliques = [list(clique) for clique in cliques]
+
+        # Validate that the cliques only contain columns that are in the query_columns list
+        unknown = {column for clique in cliques for column in clique} - set(self.query_columns)
+        if unknown:
+            raise ValueError(
+                f"Declared marginal columns not in query_columns: {sorted(unknown)}."
+            )
+        self.marginal_cliques = cliques
+
+    def set_marginal_selection(self, strategy: Optional[MarginalSelectionStrategy] = None,
+                               budget_fraction: float = 0.2) -> None:
+        '''Switch to the factored pipeline and choose the marginals from the data, privately.
+
+        Which columns are worth keeping jointly depends on how they are associated, and
+        association can only be learned by looking at the data - so the selection consumes
+        privacy budget like any other query. All 2-way marginals are measured once over the
+        whole dataset and noised together; mutual information is computed from the noisy
+        tables alone, and the strategy turns it into cliques. The raw data never reaches the
+        selection.
+
+        The reserved share is taken OUT OF the mechanism's total, not added on top: the
+        per-level parameters are scaled down by (1 - budget_fraction) and the reserved share
+        becomes an extra composition level, so the overall guarantee is exactly what you
+        configured. Spending more here buys a better structure but leaves less for the
+        counts themselves.
+
+        Can be combined with set_marginals(): the declared cliques and the selected ones are
+        both embedded. Constraint scopes are added automatically in either case.
+
+        Args:
+            strategy (Optional[MarginalSelectionStrategy]): Selection heuristic. Defaults to
+                MaxSpanningTreeMI - 2-way marginals along a maximum spanning tree over
+                mutual information, constrained to contain the constraint cliques.
+            budget_fraction (float): Share of the total budget spent on selection, in
+                [0, 1). Defaults to 0.2.
+
+        Raises:
+            ValueError: If budget_fraction is outside (0, 1).
+        '''
+        if not 0.0 < budget_fraction < 1.0:
+            raise ValueError(f"budget_fraction must be in (0, 1), got {budget_fraction}.")
+
+        self.marginal_strategy = strategy if strategy is not None else MaxSpanningTreeMI()
+        self.selection_budget_fraction = budget_fraction
+
+    def set_rounding_method(self, method: str = 'auto') -> None:
+        '''Choose how the integer rounding step is solved.
+
+        The estimation phase always solves two problems per node group: a continuous QP, then
+        an integer step that rounds it without breaking any constraint. Only the second one is
+        selected here; the QP is the same either way.
+
+        - 'mip' is the global binary program. It reproduces the fractional solution optimally,
+          but it is an integer multicommodity flow (each variable sits in its geographic row
+          plus one separator row per junction-tree edge), so it is genuinely hard and takes
+          71-74% of the solver time.
+        - 'sweep' walks the junction tree instead, rounding one bag at a time as independent
+          2-way transportation problems. Those are totally unimodular, so the continuous LP
+          already returns integers with no branch and bound. Measured on the 27-column census:
+          13.0s against 271.5s, every constraint still satisfied exactly, at +1.22% of L1
+          against the truth. Factored pipeline only.
+        - 'auto' (the default) picks 'sweep' when marginals were declared or selected, and
+          'mip' otherwise. In the full-joint pipeline the rounding matrix is already totally
+          unimodular, so its MIP solves as an LP and there is nothing to gain.
+
+        Can be called before or after initialize() - the choice is only read when the worker
+        pool is created.
+
+        Args:
+            method (str): 'auto', 'sweep' or 'mip'. Defaults to 'auto'.
+
+        Raises:
+            ValueError: If the method is not one of the three.
+        '''
+        allowed = ('auto',) + ROUNDING_METHODS
+        if method not in allowed:
+            raise ValueError(f"Unknown rounding method '{method}'. Expected one of {allowed}.")
+
+        self.rounding_method = method
+
+    def _resolve_rounding_method(self) -> str:
+        '''Turn the configured rounding method into one optimizers.build_optimizer accepts.
+
+        Returns:
+            str: One of ROUNDING_METHODS.
+
+        Raises:
+            ValueError: If 'sweep' was asked for explicitly but the pipeline is full-joint.
+        '''
+        factored = self.junction_tree is not None
+
+        if self.rounding_method == 'auto':
+            return 'sweep' if factored else 'mip'
+
+        if self.rounding_method == 'sweep' and not factored:
+            raise ValueError(
+                "rounding method 'sweep' needs a junction tree and only applies to the factored "
+                "pipeline (set_marginals / set_marginal_selection). In the full-joint pipeline "
+                "the rounding matrix is already totally unimodular, so its MIP solves as an LP - "
+                "use 'mip' or 'auto'."
+            )
+        return self.rounding_method
 
     def run(self) -> None:
         '''Run the TopDown algorithm end-to-end.

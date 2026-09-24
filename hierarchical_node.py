@@ -34,7 +34,12 @@ class HierarchicalNode:
             contingency_vector: Node's contingency vector, None when not materialized or freed.
                 Has two lifecycle states: a dense np.ndarray noisy measurement (query space)
                 right after materialization, then a sparse scipy CSC column of estimated cell
-                counts (cell space) after the node is solved. 
+                counts (cell space) after the node is solved.
+                Full-joint pipeline only — the factored pipeline uses `marginals` instead.
+            marginals (Optional[List[np.ndarray]]): Factored pipeline payload — one dense
+                vector per junction-tree bag, aligned to JunctionTree.bags. Same two
+                lifecycle states as contingency_vector (noisy measurement, then integer
+                estimate), but the full joint is never materialized.
             constraints (Optional[List[Callable]]): List of constraints for this node.
         '''
         self.id: Optional[int] = None
@@ -46,6 +51,7 @@ class HierarchicalNode:
         self.level: int = level
 
         self.contingency_vector: Optional[np.ndarray] = None
+        self.marginals: Optional[List[np.ndarray]] = None
         self.constraints: Optional[List[Callable]] = None
 
     def add_child(self, child_node: 'HierarchicalNode') -> None:

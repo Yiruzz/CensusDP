@@ -54,7 +54,7 @@ class OptimizationModel:
             self.env.set_raw_parameter(key, val)
         self.env.start()
 
-    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: np.ndarray, active: Optional[List[int]] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using PyOptInterface (Gurobi backend).
 
         Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is a list of per-child
@@ -68,8 +68,9 @@ class OptimizationModel:
             node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[SparseConstraint]): Constraints for all children of the node.
                 They are already expressed in terms of active indices and mapped to the global index space.
-            query_matrix (np.ndarray): Query matrix Q of shape (n_queries, n_cells).
-            active (Optional[List[int]]): Global joint-space indices (in 0..n_children*n_cells-1)
+            query_matrix (Optional[np.ndarray]): Query matrix Q of shape (n_queries, n_cells),
+                                            or None for the identity workload.
+            active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
                 in the parent's support. By non-negativity + consistency, children can only be
                 non-zero there, so only those variables are created. When None (root / individual
@@ -83,24 +84,32 @@ class OptimizationModel:
         '''
         model = gurobi.Model(self.env)
 
-        n_queries, n_cells = query_matrix.shape
-        n_children = len(noisy_measurements)   # len(noisy_measurements[i]) == n_queries
+        # query_matrix=None is the identity workload case
+        is_identity = query_matrix is None
+        n_children = len(noisy_measurements)
+        if is_identity:
+            n_queries = n_cells = len(noisy_measurements[0])
+        else:
+            n_queries, n_cells = query_matrix.shape   # len(noisy_measurements[i]) == n_queries
         n = n_children * n_cells
 
         # Active (non-pruned) global indices, in joint cell space.
-        active = list(range(n)) if active is None else list(active)
-        
+        active = (np.arange(n, dtype=np.int64) if active is None
+                  else np.asarray(active, dtype=np.int64))
+
         # Everything pruned: the only feasible solution is all zeros (empty active-aligned vector).
-        if not active:
+        if active.size == 0:
             return np.zeros(0)
-        
-        active_set = set(active)
+
+        # Only the lifted objective needs the active set, so we can use a set for O(1)
+        # membership tests.
+        active_set = set() if is_identity else set(active.tolist())
         x = {i: model.add_variable(lb=0.0, domain=poi.VariableDomain.Continuous, name=f"x[{i}]") for i in active}
 
         # Indices where the matrix Q has nonzeros (in this case just a 1).
         # Needed to detect what are we actually querying for in each row.
         # For sparse CSR: extract nonzero indices directly from internal structure (no densification)
-        nz_per_row = [
+        nz_per_row = [] if is_identity else [
             query_matrix.indices[query_matrix.indptr[r]: query_matrix.indptr[r + 1]]
             for r in range(n_queries)
         ]
@@ -116,7 +125,7 @@ class OptimizationModel:
         # Only rows with multiple nonzeros need lifting; single-nonzero rows (e.g. the whole
         # identity workload) are squared directly. q_x is created only for the (child, row)
         # pairs that actually need it, so the identity workload allocates no auxiliary vars.
-        lift_rows = [r for r in range(n_queries) if len(nz_per_row[r]) > 1]
+        lift_rows = [] if is_identity else [r for r in range(n_queries) if len(nz_per_row[r]) > 1]
         q_x = {}
         if lift_rows:
             for k in range(n_children):
@@ -145,22 +154,29 @@ class OptimizationModel:
         # For single-nonzero Q rows the lift is skipped, so use the underlying x directly.
         # Pruned identity terms reduce to the constant y^2 (x fixed at 0) and are dropped.
         obj_terms = []
-        for r in range(n_queries):
-            nz = nz_per_row[r]
-            if len(nz) == 1:
-                j = int(nz[0])
-                for k in range(n_children):
-                    base = k * n_cells
-                    if (base + j) not in active_set:
-                        continue
-                    y_kr = float(noisy_measurements[k][r])
-                    diff = x[base + j] - y_kr
-                    obj_terms.append(diff * diff)
-            else:
-                for k in range(n_children):
-                    y_kr = float(noisy_measurements[k][r])
-                    diff = q_x[(k, r)] - y_kr
-                    obj_terms.append(diff * diff)
+        if is_identity:
+            # Q = I: query r is cell r, so one square per active cell.
+            for g in active:
+                k, j = divmod(int(g), n_cells)
+                diff = x[g] - float(noisy_measurements[k][j])
+                obj_terms.append(diff * diff)
+        else:
+            for r in range(n_queries):
+                nz = nz_per_row[r]
+                if len(nz) == 1:
+                    j = int(nz[0])
+                    for k in range(n_children):
+                        base = k * n_cells
+                        if (base + j) not in active_set:
+                            continue
+                        y_kr = float(noisy_measurements[k][r])
+                        diff = x[base + j] - y_kr
+                        obj_terms.append(diff * diff)
+                else:
+                    for k in range(n_children):
+                        y_kr = float(noisy_measurements[k][r])
+                        diff = q_x[(k, r)] - y_kr
+                        obj_terms.append(diff * diff)
 
         model.set_objective(quicksum(obj_terms), poi.ObjectiveSense.Minimize)
 
@@ -185,9 +201,19 @@ class OptimizationModel:
             raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path} for debugging.")
         else:
             model.close()
+            if status == poi.TerminationStatusCode.TIME_LIMIT:
+                raise RuntimeError(
+                    f"The QP for node {node_id} hit the TimeLimit in solver_options "
+                    f"({self.solver_options.get('TimeLimit')} s) before converging. Unlike the "
+                    f"rounding step, a truncated QP is not usable: barrier returns an interior "
+                    f"point that need not satisfy the geographic or separator rows, and "
+                    f"everything downstream assumes it does - the sweep rounder reads the "
+                    f"parent's integer counts straight off it. Raise TimeLimit or drop it, "
+                    f"rather than accepting what came back."
+                )
             raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
-    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[List[int]] = None, n: Optional[int] = None) -> sp.csc_matrix:
+    def rounding_estimation(self, x_tilde: np.ndarray, node_id: int, constraints: List[SparseConstraint], active: Optional[np.ndarray] = None, n: Optional[int] = None) -> sp.csc_matrix:
         '''Rounding estimation of the contingency vector using PyOptInterface (Gurobi backend).
 
         Uses a linearized objective: since y_i ∈ {0,1}, y_i² = y_i. The floor part is moved
@@ -198,7 +224,7 @@ class OptimizationModel:
             node_id (int): The ID of the node for which the estimation is being performed.
             constraints (List[SparseConstraint]): Sparse constraint objects, already offset
                 into joint space and restricted to active indices by the caller.
-            active (Optional[List[int]]): Global joint-space indices of non-pruned cells.
+            active (Optional[np.ndarray]): Global joint-space indices of non-pruned cells.
             n (Optional[int]): Joint vector length, required when active is provided.
 
         Returns:
@@ -213,9 +239,9 @@ class OptimizationModel:
         # Resolve active / n. x_tilde is aligned to active, so len(x_tilde) == len(active).
         if active is None:
             n = len(x_tilde)
-            active = list(range(n))
+            active = np.arange(n, dtype=np.int64)
         else:
-            active = list(active)
+            active = np.asarray(active, dtype=np.int64)
             if n is None:
                 raise ValueError("rounding_estimation requires `n` when `active` is provided.")
             if len(x_tilde) != len(active):
@@ -224,7 +250,7 @@ class OptimizationModel:
                 )
 
         # If everything is pruned, no binary decisions needed: all zeros.
-        if not active:
+        if active.size == 0:
             return sp.csc_matrix((n, 1), dtype=np.int64)
 
         # Maps each global index to its position in the `active` list (and therefore in
@@ -260,9 +286,16 @@ class OptimizationModel:
 
         model.optimize()
 
-        # Check solution
+        # Check solution.
+        # TIME_LIMIT with an incumbent is a usable answer, not a failure. Every hard
+        # constraint holds exactly in any incumbent, so a truncated solution is feasible.
         status = model.get_model_attribute(poi.ModelAttribute.TerminationStatus)
-        if status != poi.TerminationStatusCode.OPTIMAL and status != poi.TerminationStatusCode.LOCALLY_SOLVED:
+        accepted = (status == poi.TerminationStatusCode.OPTIMAL
+                    or status == poi.TerminationStatusCode.LOCALLY_SOLVED
+                    or (status == poi.TerminationStatusCode.TIME_LIMIT
+                        and model.get_model_attribute(poi.ModelAttribute.PrimalStatus)
+                        == poi.ResultStatusCode.FEASIBLE_POINT))
+        if not accepted:
             if status == poi.TerminationStatusCode.INFEASIBLE:
                 debug_path = os.path.join(self._tmp_dir, f"infeasible_model_node_{node_id}.lp")
                 model.write(debug_path)
@@ -270,6 +303,16 @@ class OptimizationModel:
                 raise ValueError(f"Model is infeasible for node {node_id}. See {debug_path} for debugging.")
             else:
                 model.close()
+                if status == poi.TerminationStatusCode.TIME_LIMIT:
+                    raise RuntimeError(
+                        f"The rounding MIP for node {node_id} hit the TimeLimit in "
+                        f"solver_options ({self.solver_options.get('TimeLimit')} s) with no "
+                        f"incumbent at all, so there is nothing to return - an incumbent would "
+                        f"have been accepted. On these models the root relaxation is usually "
+                        f"what did not finish, not the search. Raise TimeLimit, set a reachable "
+                        f"MIPGap (1e-4 is Gurobi's default and is not reachable here), or use "
+                        f"the junction-tree sweep."
+                    )
                 raise RuntimeError(f"Solver failed for node {node_id}. Status: {status}")
 
         # Reconstruct as a sparse column vector, keeping only positive cells.

@@ -23,6 +23,7 @@ from .compound import (
     Or,
     Not,
     Implies,
+    Equivalent,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "Or",
     "Not",
     "Implies",
+    "Equivalent",
 ]

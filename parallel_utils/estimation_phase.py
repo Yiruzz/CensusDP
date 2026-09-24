@@ -7,42 +7,52 @@ from scipy.sparse import spmatrix
 from data_handler import DataHandler
 from domain import ContingencyDomain
 from privacy import PrivacyMechanism
+from constraints.constraint import Constraint
+from constraints.domain_restriction import build_restriction
 from constraints.sparse_constraint import SparseConstraint
 
-from optimizers.pyoptinterface import OptimizationModel
-from optimizers.write_lp_directly import OptimizationModelLP
+from optimizers import build_optimizer
 
 from typing import List, Dict, Any, Tuple, Optional
 
-def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, List],
+def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: str,
+                 constraints_dict: Dict[int, List], structural: List[Constraint],
                  spill_dir: str, microdata_dir: str, parquet_path: str,
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
-                 privacy_mechanism: PrivacyMechanism, query_matrix: spmatrix, query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str, optimizer_backend: str) -> None:
+                 query_matrix: Optional[spmatrix], privacy_mechanism: PrivacyMechanism,
+                 query_sensitivity: int, check: bool,
+                 zarr_path: str, noisy_array_name: str, rounding_method: str = "mip") -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
-        optimizer (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
+        optimizer_params (Tuple[type, str, Dict]): Params to pass to the solver (result dtype, temporary files directory
                                             and solver options dict).
+        optimizer_backend (str): Backend name, see optimizers.build_optimizer.
         constraints_dict (Dict[int, List]): Constraints mapped by level.
+        structural (List[Constraint]): The tree-wide constraints, exactly as the main process
+            selected them.
         spill_dir (str): Directory path for spilling vectors to disk.
         microdata_dir (str): Directory path for temporary microdata files.
         parquet_path (str): Path to the parquet file.
         domain_dict (Dict[str, Any]): Domain mapping for query columns.
         hierarchical_columns (List[str]): Hierarchical column names.
         query_columns (List[str]): Query column names.
+        query_matrix (Optional[spmatrix]): The sparse query matrix Q used in optimization, or
+                                            None for the identity workload.
         privacy_mechanism (PrivacyMechanism): Privacy mechanism instance for noise addition.
-        query_matrix (spmatrix): The sparse query matrix Q used in optimization.
         query_sensitivity (int): Query sensitivity for noise addition.
         check (bool): Whether to check node correctness.
         zarr_path (str): Path to the Zarr group holding pre-computed noise vectors.
         noisy_array_name (str): Name of the noise array within the Zarr group.
-        optimizer_backend (str): Name of optimizer that modeling the problems.
+        rounding_method (str): How to solve the integer step, see optimizers.ROUNDING_METHODS.
+            Always 'mip' here: the sweep needs a junction tree, and in the full-joint pipeline
+            the rounding matrix is already totally unimodular anyway.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
 
-    _optimizer = OptimizationModel(*optimizer) if optimizer_backend == 'pyoptinterface' else OptimizationModelLP(*optimizer)
-                    
+    _optimizer = build_optimizer(optimizer_backend, optimizer_params, rounding=rounding_method)
+
+
     _data_handler = DataHandler()
     _data_handler.spill_dir = spill_dir
     _data_handler.microdata_dir = microdata_dir
@@ -50,7 +60,10 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
     _data_handler.query_columns = query_columns
     _data_handler.file_path = parquet_path
 
-    _data_handler.contingency_domain = ContingencyDomain(columns=query_columns, domains=domain_dict)
+    # The cell space is derived here, not shipped, so it must come out identical to the main
+    # process's.
+    _data_handler.contingency_domain = build_restriction(
+        ContingencyDomain(columns=query_columns, domains=domain_dict), structural)
     _data_handler.n_cells = _data_handler.contingency_domain.n_cells
 
     _data_handler.create_data_view()
@@ -59,10 +72,11 @@ def init_process(optimizer: Tuple[type, str, Dict], constraints_dict: Dict[int, 
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
     _privacy_mechanism = privacy_mechanism
-    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name]
+    # None when the noise cache is off, the measurement loop then samples in situ.
+    _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name] if zarr_path else None
     _check = check
 
-def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_set: set, n_cells: Optional[int] = None) -> List[SparseConstraint]:
+def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_matrix, constraints: List, active_mask: np.ndarray, n_cells: Optional[int] = None) -> List[SparseConstraint]:
     '''Combine child publication constraints into joint SparseConstraints.
 
     Creates consistency constraints that ensure each parent cell equals the sum of corresponding child cells.
@@ -81,8 +95,9 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
         contingency_vector (sp.csc_matrix): The parent's sparse cell-count vector, shape (n_cells, 1).
         constraints (List): List of Constraint objects (one list per child). Each constraint's
             to_sparse_constraint() method will be called to get SparseConstraint representations.
-        active_set (set): Active joint-space global indices {k*n_cells + j} (parent support expanded
-            over children). Cells outside it are pruned and dropped from constraints.
+        active_mask (np.ndarray): Boolean array of length n_cells marking the parent's support.
+            Cells where it is False are pruned and dropped from constraints. Indexed by the
+            local cell, so one mask serves every child block - see SparseConstraint.prune_to_active_space.
         n_cells (Optional[int]): Number of contingency cells. Defaults to the worker-global
             _data_handler.n_cells; callers in the main process (no worker globals) must pass it.
 
@@ -99,7 +114,7 @@ def _combine_child_constraints(num_children: int, contingency_vector: sp.csc_mat
         base = start
 
         for sparse_constraint in child_constraints:
-            new_sparse_constraint = sparse_constraint.prune_to_active_space(base, active_set)
+            new_sparse_constraint = sparse_constraint.prune_to_active_space(base, active_mask)
             if new_sparse_constraint is not None: joint_constraints.append(new_sparse_constraint)
         start += n_cells
 
@@ -160,11 +175,11 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
     for filter_dict, child_id in zip(children_filter_dicts, children_ids):
         child_vector, child_constraint = _data_handler.materialize_node_data(filter_dict, _constraints[children_level], _Q)
 
-        # Try to use pre-computed noise, fallback to in-situ generation if not available
-        try:
-            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
-        except:
+        # Add noise to the measurement.
+        if _noisy_arr is None:
             _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+        else:
+            _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
 
         children_vectors.append(child_vector)
         children_constraints.append(child_constraint)
@@ -178,13 +193,20 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
     # Cells where the parent is non-zero. By non-negativity + consistency, children can only
     # be non-zero on these cells. Expand the support to joint-space indices {k*n_cells + j}
-    # so the optimizers instantiate variables only there. `active` stays an ordered list: the
+    # so the optimizers instantiate variables only there. `active` stays an ordered array: the
     # optimizer aligns its solution positionally to it across the real -> rounding solves.
     support = contingency_vector.indices
-    active = [k * n_cells + int(j) for k in range(num_children) for j in support]
+    active = (np.arange(num_children, dtype=np.int64)[:, None] * n_cells
+              + support.astype(np.int64)).ravel()
 
-    # Combine receives the active set so it can bake prune-to-0 + reindexing into the constraints.
-    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints, set(active))
+    # One boolean row over cell space answers "is this cell active?" for every child, because
+    # the active set is the same support shifted by k * n_cells. Pruning then tests the LOCAL
+    # cell index with a fancy-index instead of a Python membership loop per nonzero.
+    active_mask = np.zeros(n_cells, dtype=bool)
+    active_mask[support] = True
+
+    # Combine receives the mask so it can bake prune-to-0 + reindexing into the constraints.
+    joint_constraints = _combine_child_constraints(num_children, contingency_vector, children_constraints, active_mask)
 
     t1 = time.time()
     x_tilde = _optimizer.non_negative_real_estimation(

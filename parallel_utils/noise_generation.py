@@ -10,8 +10,9 @@ def initialize_mechanism(privacy_mech_name: str, level_params: List[float], cell
     Args:
         privacy_mech_name (str): Name of the privacy mechanism (e.g., 'Laplace', 'Gaussian')
         level_params (List[float]): Parameters for the mechanism at each hierarchical level
-        cells (int): Total number of contingency cells (noise vector length)
+        cells (int): Noise vector length
         data_type (str): NumPy data type for the noise arrays (e.g., 'float64')
+        sensitivity (int): Squared L2 sensitivity of the node measurement.
     '''
     global privacy_mechanism, n_cells, dtype, q_sensitivity
     privacy_mechanism = MECHANISMS[privacy_mech_name](level_params)
