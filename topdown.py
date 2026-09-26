@@ -87,6 +87,13 @@ class TopDown():
         # mechanism. It is the convention of the original TopDown.
         self.bounded_dp_factor: int = 2
         self.query_sensitivity: int = 1  # sensitivity of the measurement; computed in initialize()
+        
+        # Uneven split of each level's budget between the workload's query blocks.
+        # query_blocks is resolved in initialize() and stays None when no split was
+        # asked for, in which case the single query_sensitivity noises the whole
+        # measurement in one shot (which is the uniform split, see add_noise_blocks).
+        self.query_budget: Optional[List[float]] = None
+        self.query_blocks: Optional[List[Tuple[int, int, float]]] = None
 
         # Factored pipeline. Set via set_marginals() or set_marginal_selection(); when both
         # are unset the algorithm runs the full-joint pipeline over Q instead. The two modes
@@ -339,8 +346,9 @@ class TopDown():
         print(f'Building query workload...', end=' ')
         n_cells = self.data_handler.contingency_domain.n_cells
 
-        if isinstance(self.Q, QueryWorkload):
-            self.Q = self.Q.build(self.data_handler.contingency_domain)
+        workload = self.Q if isinstance(self.Q, QueryWorkload) else None
+        if workload is not None:
+            self.Q = workload.build(self.data_handler.contingency_domain)
         elif not (isinstance(self.Q, np.ndarray) or sp.issparse(self.Q)):
             # No workload set: every cell is answered directly, i.e. the identity.
             self.Q = None
@@ -348,6 +356,12 @@ class TopDown():
         # Check for identity matrix, since when Q is the the identity we can afford to drop it entirely
         # and avoid computations that depends on the form of Q.
         if is_identity_workload(self.Q):
+            if self.query_budget is not None and len(self.query_budget) > 1:
+                raise ValueError(
+                    f'set_query_budget() got {len(self.query_budget)} proportions but the '
+                    f'workload is the identity, which is a single block. Declare the queries '
+                    f'with a QueryWorkload to split the budget between them.'
+                )
             self.Q = None
             self.query_sensitivity = self.bounded_dp_factor
             # Set explicitly rather than leaning on noise_width's fallback chain
@@ -373,8 +387,69 @@ class TopDown():
         # equal to n_cells only for the identity workload.
         self.data_handler.query_width = int(self.Q.shape[0])
         print(f'\n  Query matrix: n_queries={self.Q.shape[0]}, sensitivity={self.query_sensitivity}')
+        if self.query_budget is not None:
+            self._build_query_blocks(workload)
         print(f'  Privacy mechanism: {self.privacy_mechanism.report_guarantee()}')
         print(f'{time.time() - t1:.2f} seconds.\n')
+
+    def _build_query_blocks(self, workload: Optional[QueryWorkload]) -> None:
+        '''Resolve set_query_budget() into per-block (start, stop, effective sensitivity).
+
+        The effective sensitivity of block q is its own sensitivity divided by its share:
+        bounded_dp_factor * max column sum of the block, over p_q. See
+        PrivacyMechanism.add_noise_blocks for why carrying the share there is exact for
+        both pure DP and zCDP.
+
+        The per-block sensitivity is read off the built matrix rather than assumed to be 1.
+        A value_counts block is a marginal so its column sum is 1, but .add() blocks and
+        hand-built definitions need not be, and a wrong sensitivity here understates the
+        noise without raising anything.
+
+        Args:
+            workload (Optional[QueryWorkload]): The workload that produced Q, or None when a
+                pre-built matrix was supplied (which carries no block structure).
+
+        Raises:
+            ValueError: If Q was not built from a QueryWorkload, if the number of
+                proportions does not match the number of query definitions, or if the noise
+                cache is on (its key cannot express a per-block split).
+        '''
+        if workload is None:
+            raise ValueError(
+                'set_query_budget() needs the workload declared as a QueryWorkload: a '
+                'pre-built matrix carries no block boundaries to split the budget over.'
+            )
+        offsets = workload.block_offsets
+        if len(self.query_budget) != len(offsets) - 1:
+            raise ValueError(
+                f'set_query_budget() got {len(self.query_budget)} proportions for '
+                f'{len(offsets) - 1} query definitions. There must be exactly one per query.'
+            )
+        if self.data_handler.use_noise_cache:
+            # The cache keys on a single scalar sensitivity (noisy_vectors_..._s{sens}_...),
+            # so a per-block split would either miss or - far worse - silently match a file
+            # generated for the uniform split and publish under-noised measurements.
+            raise ValueError(
+                'set_query_budget() is incompatible with the noise cache: its filename keys '
+                'on one scalar sensitivity and cannot express a per-block split, so a run '
+                'would silently reuse uniformly-noised vectors. Set '
+                'data_handler.use_noise_cache = False.'
+            )
+
+        blocks: List[Tuple[int, int, float]] = []
+        print('  Query budget split between blocks '
+              '(block: rows, share, own sensitivity -> effective):')
+        for index, share in enumerate(self.query_budget):
+            start, stop = offsets[index], offsets[index + 1]
+            own = self.bounded_dp_factor * int(self.Q[start:stop].sum(axis=0).max())
+            blocks.append((start, stop, own / share))
+            print(f'    [{index}] rows {start}..{stop} ({stop - start}), share {share:g}, '
+                  f'sensitivity {own} -> {own / share:g}')
+        # query_sensitivity stays the stacked scalar: it is what the run record and the
+        # noise-cache key mean by "the sensitivity of this measurement", and the blocks are
+        # what is actually applied. Leaving it a scalar keeps every consumer reading one
+        # well-defined number instead of two shapes.
+        self.query_blocks = blocks
 
     def estimation_phase(self) -> None:
         '''Run the estimation phase of the TopDown algorithm.
@@ -478,7 +553,10 @@ class TopDown():
 
         # Add noise to the materialized measurement vector.
         if self.data_handler.noise_zarr_group is None:
-            self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
+            if self.query_blocks is not None:
+                self.privacy_mechanism.add_noise_blocks(measurement, root.level, self.query_blocks)
+            else:
+                self.privacy_mechanism.add_noise(measurement, root.level, self.query_sensitivity)
         else:
             self.privacy_mechanism.add_noise_from_precomputed(
                 self.data_handler.noise_zarr_group[self.data_handler.noisy_array_name],
@@ -514,7 +592,8 @@ class TopDown():
         return init_process, (
             self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
             self.Q, self.privacy_mechanism, self.query_sensitivity, self.check_correctness,
-            self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding)
+            self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding,
+            self.query_blocks)
 
     def _estimate_node_individually(self, node_id: int, measurement: np.ndarray,
                                     constraints: List) -> sp.csc_matrix:
@@ -584,6 +663,45 @@ class TopDown():
                           or a pre-built numpy ndarray of shape (n_queries, n_cells).
         '''
         self.Q = query_matrix
+
+    def set_query_budget(self, proportions: Iterable[float]) -> None:
+        '''Split each level's privacy budget unevenly between the workload's query blocks.
+
+        Without this the whole measurement is noised in one shot at the stacked matrix's
+        sensitivity, which, for a workload of marginals, is exactly the uniform split
+        between blocks (see PrivacyMechanism.add_noise_blocks). This declares a different
+        one, the way the 2020 DAS does with its `queriesprop` line: one proportion per
+        query, applied at every geolevel.
+
+        The budget stays the total the mechanism was constructed with; the proportions
+        only decide how each level's share is divided between the queries, so they must sum
+        to 1. Under sequential composition (linear in epsilon for pure DP, in rho for zCDP)
+        that keeps the stated guarantee exactly.
+
+        Requires a QueryWorkload, since the blocks are its query definitions, a pre-built
+        matrix carries no block structure.
+
+        Args:
+            proportions: One positive proportion per query definition, summing to 1, in the
+                order the queries were declared.
+
+        Raises:
+            ValueError: If a proportion is not positive or they do not sum to 1.
+        '''
+        proportions = [float(p) for p in proportions]
+        if not proportions:
+            raise ValueError('set_query_budget() needs one proportion per query block.')
+        if any(p <= 0.0 for p in proportions):
+            raise ValueError(
+                f'Query budget proportions must all be > 0, got {proportions}. A block with '
+                f'no budget is a block that should not be measured.'
+            )
+        if abs(sum(proportions) - 1.0) > 1e-9:
+            raise ValueError(
+                f'Query budget proportions must sum to 1, got {sum(proportions):.12g}. They '
+                f'divide each level\'s budget; they do not add to it.'
+            )
+        self.query_budget = proportions
 
     def set_marginals(self, cliques: Iterable[Iterable[str]]) -> None:
         '''Switch to the factored/marginal pipeline and declare the marginals to measure.

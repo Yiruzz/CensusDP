@@ -17,7 +17,7 @@ import traceback
 
 from constraints.contextual_constraints import SumEqualRealTotal
 from constraints.logical_expressions.atomic import TrueExpression
-from privacy import ZCDP
+from privacy import PureDP, ZCDP
 from topdown import TopDown
 
 from benchmarks import common
@@ -28,7 +28,7 @@ except ImportError:  # Windows: peak memory is not recorded
     resource = None
 
 
-def parse_args(hierarchy, marginals):
+def parse_args(hierarchy, marginals, workload):
     parser = argparse.ArgumentParser()
     parser.add_argument('--sample', action='store_true', help='use the small subset')
     parser.add_argument('--depth', type=int, default=len(hierarchy),
@@ -38,6 +38,14 @@ def parse_args(hierarchy, marginals):
     parser.add_argument('--structure', default=marginals.DEFAULT,
                         choices=sorted(marginals.STRUCTURES))
     parser.add_argument('--rho', type=float, default=1.0, help='total rho-zCDP budget')
+    parser.add_argument('--epsilon', type=float,
+                        help='total pure-epsilon-DP budget; switches the mechanism from the '
+                             'discrete Gaussian to the discrete Laplace, which is what the '
+                             'DAS 1940 run uses. Overrides --rho.')
+    if workload is not None:
+        parser.add_argument('--workload', choices=sorted(workload.WORKLOADS),
+                            help='named query workload, full-joint only; without it the '
+                                 'full joint is measured on its own')
     parser.add_argument('--composition', default='exponential', choices=common.COMPOSITIONS)
     parser.add_argument('--rounding', default='auto', choices=('auto', 'sweep', 'mip'))
     parser.add_argument('--workers', type=int, default=8)
@@ -48,8 +56,13 @@ def parse_args(hierarchy, marginals):
 
 
 def default_name(args):
-    parts = ['fulljoint' if args.full_joint else args.structure, f'rho{args.rho:g}',
-             args.composition, f'd{args.depth}']
+    budget = f'eps{args.epsilon:g}' if args.epsilon else f'rho{args.rho:g}'
+    # The workload name goes in its own part rather than replacing the head, so a full-joint
+    # run under workload 'das' cannot collide with a marginal run under structure 'das'.
+    parts = ['fulljoint' if args.full_joint else args.structure]
+    if getattr(args, 'workload', None):
+        parts.append(args.workload)
+    parts += [budget, args.composition, f'd{args.depth}']
     if args.columns:
         parts.append(f'c{args.columns}')
     if args.rounding != 'auto':
@@ -68,34 +81,49 @@ def peak_memory_mb():
             'largest_worker': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / scale}
 
 
-def main(dataset, hierarchy, domains, constraints, marginals):
-    args = parse_args(hierarchy, marginals)
+def main(dataset, hierarchy, domains, constraints, marginals, workload=None):
+    args = parse_args(hierarchy, marginals, workload)
+    chosen_workload = getattr(args, 'workload', None)
+    if chosen_workload and not args.full_joint:
+        parser_error = 'a named --workload is a full-joint measurement; pass --full-joint too.'
+        raise SystemExit(parser_error)
     hierarchy = hierarchy[:args.depth]
     columns = list(domains.COLUMNS[:args.columns] if args.columns else domains.COLUMNS)
     source = common.parquet(dataset, args.sample)
     name = args.name or default_name(args)
     records, nodes = common.read_nodes(source, hierarchy)
-    rhos = common.level_rhos(args.rho, nodes, args.composition)
+    # Sequential composition is linear in epsilon under pure DP and in rho under zCDP, so the
+    # same proportional split of the total serves both frameworks.
+    total = args.epsilon if args.epsilon else args.rho
+    level_budgets = common.level_rhos(total, nodes, args.composition)
+    mechanism = PureDP(level_budgets) if args.epsilon else ZCDP(level_budgets)
     rounding = args.rounding if args.rounding != 'auto' else ('mip' if args.full_joint else 'sweep')
     record = {
         'dataset': dataset, 'name': name, 'sample': args.sample, 'records': records,
         'hierarchy': hierarchy, 'nodes_per_level': nodes, 'columns': columns,
         'mode': 'full_joint' if args.full_joint else 'marginal',
         'structure': None if args.full_joint else args.structure,
-        'rho': args.rho, 'composition': args.composition, 'level_rhos': rhos,
+        'rho': args.rho, 'composition': args.composition, 'level_rhos': level_budgets,
+        'mechanism': type(mechanism).__name__, 'epsilon': args.epsilon,
+        'workload': chosen_workload,
+        'query_budget': list(workload.WORKLOADS[chosen_workload][1]) if chosen_workload else None,
         'rounding': rounding, 'workers': args.workers, 'check': args.check,
         'solver_options': common.SOLVER_OPTIONS, 'status': 'error', 'seconds': {},
     }
 
     try:
         algorithm = TopDown(data_path=source, hierarchy=hierarchy, query_columns=columns,
-                            privacy_mechanism=ZCDP(rhos),
+                            privacy_mechanism=mechanism,
                             out_path=common.out_path(dataset, f'{name}.csv'),
                             solver_options=common.SOLVER_OPTIONS, num_workers=args.workers,
                             check_correctness=args.check,
                             domain={column: domains.DOMAINS[column] for column in columns})
         algorithm.data_handler.use_noise_cache = False
-        if args.full_joint:
+        if chosen_workload:
+            builder, proportions = workload.WORKLOADS[chosen_workload]
+            algorithm.set_query_workload(builder(columns))
+            algorithm.set_query_budget(proportions)
+        elif args.full_joint:
             algorithm.set_query_workload(None)
         else:
             bags = [[c for c in bag if c in columns] for bag in marginals.STRUCTURES[args.structure]]

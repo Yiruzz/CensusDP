@@ -8,7 +8,7 @@ import duckdb
 
 DATA = Path('data')
 
-SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1, 'MIPGap': 5e-3, 'TimeLimit': 1200}
+SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1, 'MIPGap': 5e-3, 'TimeLimit': 14400}
 
 COMPOSITIONS = ('exponential', 'uniform', 'proportional', 'sqrt')
 

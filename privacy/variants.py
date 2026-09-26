@@ -60,6 +60,47 @@ class PrivacyMechanism(ABC):
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         """Add calibrated discrete noise to contingency_vector in place."""
 
+    def add_noise_blocks(self, contingency_vector: np.ndarray, level: int,
+                         blocks: List[Tuple[int, int, float]]) -> None:
+        """Noise a measurement whose query budget is split unevenly between row blocks.
+
+        `blocks` is a list of (start, stop, effective_sensitivity), covering the whole
+        vector. Each block is noised on its own, which is what the 2020 DAS does, it treats
+        the level's queries as separate mechanisms under sequential composition, giving
+        query q the share p_q of the level's budget.
+
+        The share is carried in the sensitivity rather than in a per-block privacy
+        parameter, because every mechanism here calibrates through the ratio
+        sensitivity / parameter:
+
+            PureDP  b = Δ/ε       ->  (Δ_q/p_q)/ε  = Δ_q/(p_q·ε)
+            ZCDP    σ = √(Δ/2ρ)   ->  √((Δ_q/p_q)/2ρ) = √(Δ_q/(2·p_q·ρ))
+
+        so passing the effective sensitivity Δ_q/p_q reproduces "block q gets p_q of the
+        level's budget" exactly, for both frameworks, with no per-mechanism special case.
+
+        Note the degenerate case, which is the invariant worth remembering: with uniform
+        shares p_q = 1/k and marginal blocks (Δ_q = bounded_dp_factor), every effective
+        sensitivity is bounded_dp_factor·k, precisely the max-column-sum sensitivity of
+        the stacked matrix. A single-shot add_noise() on a stacked workload is the uniform
+        allocation, this method is its generalisation.
+
+        Args:
+            contingency_vector: Measurement vector, modified in place.
+            level: Tree level, selecting the per-level privacy parameter.
+            blocks: (start, stop, effective_sensitivity) per block, in row order.
+        """
+        if not blocks or blocks[0][0] != 0 or blocks[-1][1] != len(contingency_vector):
+            raise ValueError(
+                f"Query budget blocks must cover the whole measurement "
+                f"(length {len(contingency_vector)}), got {blocks[:3]}... "
+                f"spanning {blocks[0][0] if blocks else None}..{blocks[-1][1] if blocks else None}."
+            )
+        for start, stop, sensitivity in blocks:
+            # A slice of an ndarray is a view, so the in-place += inside add_noise writes
+            # straight through to contingency_vector.
+            self.add_noise(contingency_vector[start:stop], level, sensitivity)
+
     def add_noise_from_precomputed(self, noisy_arr: zarr.Array, contingency_vector: np.ndarray, node_idx: int) -> None:
         """
         Add pre-computed noise to contingency_vector.

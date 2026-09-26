@@ -21,7 +21,8 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
                  domain_dict: Dict[str, Any], hierarchical_columns: List[str], query_columns: List[str],
                  query_matrix: Optional[spmatrix], privacy_mechanism: PrivacyMechanism,
                  query_sensitivity: int, check: bool,
-                 zarr_path: str, noisy_array_name: str, rounding_method: str = "mip") -> None:
+                 zarr_path: str, noisy_array_name: str, rounding_method: str = "mip",
+                 query_blocks: Optional[List[Tuple[int, int, float]]] = None) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
@@ -47,8 +48,13 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
         rounding_method (str): How to solve the integer step, see optimizers.ROUNDING_METHODS.
             Always 'mip' here: the sweep needs a junction tree, and in the full-joint pipeline
             the rounding matrix is already totally unimodular anyway.
+        query_blocks (Optional[List[Tuple[int, int, float]]]): Per-block (start, stop,
+            effective sensitivity) when the level budget is split unevenly between the
+            workload's queries, see TopDown.set_query_budget. None means one shot at
+            query_sensitivity, which is the uniform split.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
+    global _query_blocks
 
     _optimizer = build_optimizer(optimizer_backend, optimizer_params, rounding=rounding_method)
 
@@ -71,6 +77,7 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
     _constraints = constraints_dict
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
+    _query_blocks = query_blocks
     _privacy_mechanism = privacy_mechanism
     # None when the noise cache is off, the measurement loop then samples in situ.
     _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name] if zarr_path else None
@@ -177,7 +184,10 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
 
         # Add noise to the measurement.
         if _noisy_arr is None:
-            _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
+            if _query_blocks is not None:
+                _privacy_mechanism.add_noise_blocks(child_vector, children_level, _query_blocks)
+            else:
+                _privacy_mechanism.add_noise(child_vector, children_level, _query_sensitivity)
         else:
             _privacy_mechanism.add_noise_from_precomputed(_noisy_arr, child_vector, child_id)
 
