@@ -69,8 +69,6 @@ def convert(release_dir, name, epsilon):
     gq_cases = ' '.join(f"WHEN '{code}' THEN {value}"
                         for code, value in GQTYPE_TO_HHGQ.items())
     con = duckdb.connect()
-    # The part files carry no header of their own; 1_header is a separate file,
-    # which is why the column names are supplied here.
     columns = ', '.join(f"'{n}': 'VARCHAR'" for n in names)
     select = f"""
         SELECT
@@ -83,7 +81,8 @@ def convert(release_dir, name, epsilon):
             CAST(QAGE    AS INTEGER)                   AS age,
             CAST(CENHISP AS INTEGER) - 1               AS hispanic,
             CAST(CENRACE AS INTEGER) - 1               AS race
-        FROM read_csv('{parts}', delim='|', header=false, columns={{{columns}}})
+        FROM read_csv('{parts}', delim='|', header=false, auto_detect=false,
+                      quote='', escape='', columns={{{columns}}})
     """
     con.execute(f"COPY ({select}) TO '{target}' (FORMAT CSV, DELIMITER ';', HEADER)")
 
