@@ -7,12 +7,30 @@ recode in the release's 1940 writer is injective:
 
     our column   MDF column   forward (ipums_1940_writer.py)   inverse here
     age          QAGE         age                              QAGE
-    race         CENRACE      race + 1, zero-padded to 2       CENRACE - 1
+    race         CENRACE      race + 1, zero-padded to 2       (CENRACE - 2) mod 6  (!)
     hispanic     CENHISP      0 -> '1', else '2'               CENHISP - 1
     sex          QSEX         0 -> '1', else '2'               QSEX - 1
     hhgq         GQTYPE       0->000 1->101 2->201 3->301       the same map,
                               4->401 5->501 6->601 else 701     read backwards
 
+The race inverse is not CENRACE - 1, and the extra shift is compensating for a defect in
+the release rather than a quirk of ours. `ipums_1940_reader.py:59-60` reads
+
+    # 1940s RACE has 6 values, which are re-indexed by subtracting 1, ...
+    cenrace1940 = race            # 1..6, and nothing is subtracted
+
+so IPUMS RACE 1..6 goes into an axis that `Race1940Attr.getLevels()` declares as 0..5
+(0 = White ... 5 = Other Asian or Pacific Islander) and that the config declares as
+`cenrace1940.legal: 0-5`. Value 6 is outside that range and wraps to 0, so the histogram's
+race axis is rotated one position: index 0 holds Other Asian or Pacific Islander, index 1
+holds White, and so on. The writer then adds 1 back and documents '01 = White alone', so
+**the published MDF labels every race category one position off**, with one wrapped.
+Measured on the national release, every category matches its neighbour to within the DP
+noise, confirming a pure rotation rather than anything data-dependent.
+
+Undoing it here is deliberate. Leaving it in would make the TVD of every race marginal
+measure a labelling error instead of the privacy mechanism, which is what the comparison
+is for. The defect is reported separately; it is not repaired by pretending it is ours.
 CITIZEN is absent. `IPUMSPersonWriter.var_list` (ipums_1940_writer.py:246) has it
 commented out, so the DAS spends budget on that dimension -- it appears in the
 `detailed` query and in `age * hispanic * cenrace * citizen`, 60% of the
@@ -80,7 +98,7 @@ def convert(release_dir, name, epsilon):
             CAST(QSEX    AS INTEGER) - 1               AS sex,
             CAST(QAGE    AS INTEGER)                   AS age,
             CAST(CENHISP AS INTEGER) - 1               AS hispanic,
-            CAST(CENRACE AS INTEGER) - 1               AS race
+            ((CAST(CENRACE AS INTEGER) - 2) % 6 + 6) % 6 AS race
         FROM read_csv('{parts}', delim='|', header=false, auto_detect=false,
                       quote='', escape='', columns={{{columns}}})
     """
