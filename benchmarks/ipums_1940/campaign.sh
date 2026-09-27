@@ -64,9 +64,17 @@ run_one() {
   timeout "$RUN_TIMEOUT" python -m benchmarks.ipums_1940.driver $args \
       --composition uniform --workers "$WORKERS" --name "$name" > "$CAMP/$name.log" 2>&1 &
   pid=$!
-  base="$(meminfo_mb)"
+  base="$(meminfo_mb)"; peak_init=0; peak_est=0; peak_merge=0; pooled=0
   while kill -0 "$pid" 2>/dev/null; do
     rss="$(meminfo_mb)"
+    procs="$(ps -u "$WHO" -o comm= 2>/dev/null | grep -c python)"
+    if [ "${procs:-1}" -gt 1 ]; then
+      pooled=1; [ "$rss" -gt "$peak_est" ] && peak_est="$rss"
+    elif [ "$pooled" = 1 ]; then
+      [ "$rss" -gt "$peak_merge" ] && peak_merge="$rss"
+    else
+      [ "$rss" -gt "$peak_init" ] && peak_init="$rss"
+    fi
     [ "${rss:-0}" -gt "$peak" ] && peak="$rss"
     n=$((n + 1))
     [ $((n % 90)) -eq 0 ] && say "    ...$(( ($(date +%s) - t0) / 60 )) min, peak rss ${peak}M"
@@ -89,8 +97,8 @@ run_one() {
   fi
   drop "$csv" "$OUT/${name}_5col.csv"
 
-  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "baseline_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
-    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$(awk "BEGIN{print $base/1024}")" "$cores" "$CORES" "$n" "$name" "$five" \
+  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "peak_initialize_gb": %.2f, "peak_estimation_gb": %.2f, "peak_merge_gb": %.2f, "baseline_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
+    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$(awk "BEGIN{print $peak_init/1024}")" "$(awk "BEGIN{print $peak_est/1024}")" "$(awk "BEGIN{print $peak_merge/1024}")" "$(awk "BEGIN{print $base/1024}")" "$cores" "$CORES" "$n" "$name" "$five" \
     > "$CAMP/$name.campaign.json"
 }
 
