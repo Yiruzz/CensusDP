@@ -14,6 +14,10 @@ mkdir -p "$CAMP" "$DATADIR"
 cd "$CENSUSDP" || exit 1        # common.py resolves data/ relative to the repository root
 
 STARTED="$(date +%s)"
+CORES="$(nproc)"
+# Busy and total CPU jiffies. A measured run has the host to itself, so machine-wide IS
+# the run -- and it is the same instrument the vmstat reading during the DAS run used.
+jiffies() { awk '/^cpu /{i=$5+$6; t=0; for(k=2;k<=NF;k++) t+=$k; print t-i, t}' /proc/stat; }
 say() { printf '%s  %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
 # Everything deleted is a CSV this script created under $OUT; nothing else is ever removed.
 drop() { for p in "$@"; do case "$p" in "$OUT"/*.csv) rm -f -- "$p" ;;
@@ -47,12 +51,14 @@ fi
 run_one() {
   name="$2"; csv="$OUT/$name.csv"
   if [ "$1" = fj ]; then args="--full-joint --workload das --epsilon 4"
-  else args="--structure das --rho $RHO"; fi
+  # mip, not the default sweep: at 4,640 cells the root is ~51 x 4,640 binaries, and a global
+  # controlled rounding is the closer analogue of what the DAS does.
+  else args="--structure das --rho $RHO --rounding mip"; fi
 
   say ""; say "───────── $name : $args --composition uniform --workers $WORKERS"
   drop "$csv" "$OUT/${name}_5col.csv"
 
-  t0="$(date +%s)"; peak=0; n=0
+  t0="$(date +%s)"; peak=0; n=0; set -- $(jiffies); jb=$1; jt=$2
   # shellcheck disable=SC2086
   timeout "$RUN_TIMEOUT" python -m benchmarks.ipums_1940.driver $args \
       --composition uniform --workers "$WORKERS" --name "$name" > "$CAMP/$name.log" 2>&1 &
@@ -70,11 +76,13 @@ run_one() {
     sleep 20
   done
   wait "$pid"; status=$?; elapsed=$(( $(date +%s) - t0 ))
+  set -- $(jiffies)
+  cores="$(awk "BEGIN{d=$2-$jt; print (d>0 ? ($1-$jb)/d*$CORES : 0)}")"
   pkill -u "$WHO" -f 'benchmarks.ipums_1940.driver' 2>/dev/null   # a worker can outlive a kill
 
   five=none
   if [ "$status" -eq 0 ]; then
-    say "    done in ${elapsed}s, peak rss ${peak}M"
+    say "    done in ${elapsed}s, peak rss ${peak}M, $(printf %.1f "$cores") of $CORES cores busy on average"
     five="$(python -m benchmarks.ipums_1940.score_five "$name" 2>>"$LOG")" || five=none
     if [ "$five" != none ]; then
       python -m benchmarks.metrics ipums_1940 "$five" 2>&1 | tee -a "$LOG" | tail -5
@@ -84,8 +92,8 @@ run_one() {
   fi
   drop "$csv" "$OUT/${name}_5col.csv"
 
-  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
-    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$n" "$name" "$five" \
+  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
+    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$cores" "$CORES" "$n" "$name" "$five" \
     > "$CAMP/$name.campaign.json"
 }
 
