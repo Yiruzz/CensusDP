@@ -19,6 +19,7 @@ CORES="$(nproc)"
 # the run -- and it is the same instrument the vmstat reading during the DAS run used.
 jiffies() { awk '/^cpu /{i=$5+$6; t=0; for(k=2;k<=NF;k++) t+=$k; print t-i, t}' /proc/stat; }
 say() { printf '%s  %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
+meminfo_mb() { awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%d", (t-a)/1024}' /proc/meminfo; }
 # Everything deleted is a CSV this script created under $OUT; nothing else is ever removed.
 drop() { for p in "$@"; do case "$p" in "$OUT"/*.csv) rm -f -- "$p" ;;
          *) echo "refusing to delete $p" >&2; exit 1 ;; esac; done; }
@@ -63,13 +64,9 @@ run_one() {
   timeout "$RUN_TIMEOUT" python -m benchmarks.ipums_1940.driver $args \
       --composition uniform --workers "$WORKERS" --name "$name" > "$CAMP/$name.log" 2>&1 &
   pid=$!
-  # Summed RSS of the driver and its forked pool workers -- a fork inherits argv, so the module
-  # name matches every one. runner.py's own memory_mb is getrusage, whose CHILDREN figure is the
-  # largest single finished child rather than the sum over the pool, so it is a different
-  # quantity and must not be tabulated against the das1940 number.
+  base="$(meminfo_mb)"
   while kill -0 "$pid" 2>/dev/null; do
-    rss="$(ps -u "$WHO" -o rss=,args= 2>/dev/null | grep -F 'ipums_1940.driver' \
-           | awk '{s+=$1} END {printf "%d", s/1024}')"
+    rss="$(meminfo_mb)"
     [ "${rss:-0}" -gt "$peak" ] && peak="$rss"
     n=$((n + 1))
     [ $((n % 90)) -eq 0 ] && say "    ...$(( ($(date +%s) - t0) / 60 )) min, peak rss ${peak}M"
@@ -92,8 +89,8 @@ run_one() {
   fi
   drop "$csv" "$OUT/${name}_5col.csv"
 
-  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
-    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$cores" "$CORES" "$n" "$name" "$five" \
+  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "baseline_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
+    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$(awk "BEGIN{print $base/1024}")" "$cores" "$CORES" "$n" "$name" "$five" \
     > "$CAMP/$name.campaign.json"
 }
 
