@@ -94,6 +94,7 @@ class TopDown():
         # measurement in one shot (which is the uniform split, see add_noise_blocks).
         self.query_budget: Optional[List[float]] = None
         self.query_blocks: Optional[List[Tuple[int, int, float]]] = None
+        self.query_weights: Optional[np.ndarray] = None
 
         # Factored pipeline. Set via set_marginals() or set_marginal_selection(); when both
         # are unset the algorithm runs the full-joint pipeline over Q instead. The two modes
@@ -451,6 +452,24 @@ class TopDown():
         # well-defined number instead of two shapes.
         self.query_blocks = blocks
 
+        # Objective weights, 1/sigma^2 per row. Splitting the budget unevenly makes the blocks
+        # unequally noisy, so an objective that weighs every term at 1.0 trusts them all the
+        # same and is dominated by whichever block has the most cells. The variance is asked of
+        # the mechanism since it depends on it.
+        #
+        # One row per level, indexed by the level whose noise is weighted.
+        # The exact discrete variance makes the ratio between blocks depend on the level's
+        # parameter. Normalised so the best-measured block weighs 1. The argmin is invariant
+        # to a global scale, and equally noisy blocks then get exactly 1.0, the unweighted model.
+        n_levels = len(self.privacy_mechanism.level_params)
+        self.query_weights = np.ones((n_levels, self.Q.shape[0]), dtype=float)
+        for level in range(n_levels):
+            variances = [self.privacy_mechanism.noise_variance(sensitivity, level)
+                         for _, _, sensitivity in blocks]
+            best = min(variances)
+            for (start, stop, _), variance in zip(blocks, variances):
+                self.query_weights[level, start:stop] = best / variance
+
     def estimation_phase(self) -> None:
         '''Run the estimation phase of the TopDown algorithm.
 
@@ -593,7 +612,7 @@ class TopDown():
             self.optimizer, self.optimizer_backend, self.constraints, self.structural, *common,
             self.Q, self.privacy_mechanism, self.query_sensitivity, self.check_correctness,
             self.data_handler.noise_zarr_path, self.data_handler.noisy_array_name, rounding,
-            self.query_blocks)
+            self.query_blocks, self.query_weights)
 
     def _estimate_node_individually(self, node_id: int, measurement: np.ndarray,
                                     constraints: List) -> sp.csc_matrix:
@@ -614,7 +633,8 @@ class TopDown():
             noisy_measurements=[measurement],
             node_id=node_id,
             constraints=constraints,
-            query_matrix=self.Q
+            query_matrix=self.Q,
+            query_weights=None if self.query_weights is None else self.query_weights[0]
         )
         real_time = time.time() - t1
 

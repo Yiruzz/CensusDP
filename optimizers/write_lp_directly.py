@@ -75,8 +75,9 @@ def _write_identity_objective(f: IO, noisy_measurements: List[np.ndarray],
 
 def _write_workload_objective(f: IO, noisy_measurements: List[np.ndarray], active_set: set,
                               nz_per_row: List[np.ndarray], n_queries: int,
-                              n_children: int, n_cells: int) -> None:
-    """Objective for a general workload: sum_k ||Q x_k - y_k||^2.
+                              n_children: int, n_cells: int,
+                              weights: Optional[np.ndarray] = None) -> None:
+    """Objective for a general workload: sum_k ||W (Q x_k - y_k)||^2.
 
     Rows with several nonzeros are lifted through the auxiliary q_x[k, r] so the objective
     stays a sum of one-term squares; single-nonzero rows are squared directly on x.
@@ -89,11 +90,14 @@ def _write_workload_objective(f: IO, noisy_measurements: List[np.ndarray], activ
         n_queries (int): Rows of Q.
         n_children (int): Children solved jointly.
         n_cells (int): Cells per child.
+        weights (Optional[np.ndarray]): Per-row weight, length n_queries. None weighs every
+            row at 1.0 and reproduces the unweighted objective exactly.
     """
     # Pass 1: linear terms, written directly.
     term_count = 0
     for r in range(n_queries):
         nz = nz_per_row[r]
+        w = 1.0 if weights is None else float(weights[r])
         if len(nz) == 1:  # Identity-like row
             j = int(nz[0])
             for k in range(n_children):
@@ -103,18 +107,19 @@ def _write_workload_objective(f: IO, noisy_measurements: List[np.ndarray], activ
                 y_kr = float(noisy_measurements[k][r])
                 if y_kr == 0.0:
                     continue  # -2*0*x = 0
-                term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} x[{base + j}]", term_count)
+                term_count = _write_term(f, f" {_fmt(-2.0 * w * y_kr)} x[{base + j}]", term_count)
         else:  # General case with lifted variables
             for k in range(n_children):
                 y_kr = float(noisy_measurements[k][r])  # noisy value for child k and query r
                 if y_kr == 0.0:  # -2*0*q_x = 0
                     continue
-                term_count = _write_term(f, f" {_fmt(-2.0 * y_kr)} q_x[{k},{r}]", term_count)
+                term_count = _write_term(f, f" {_fmt(-2.0 * w * y_kr)} q_x[{k},{r}]", term_count)
 
     # Pass 2: quadratic terms
     bracket_open = False
     for r in range(n_queries):
         nz = nz_per_row[r]
+        w = 1.0 if weights is None else float(weights[r])
         if len(nz) == 1:
             j = int(nz[0])
             for k in range(n_children):
@@ -124,13 +129,13 @@ def _write_workload_objective(f: IO, noisy_measurements: List[np.ndarray], activ
                 if not bracket_open:
                     f.write(" + [")
                     bracket_open = True
-                term_count = _write_term(f, f" {_fmt(2.0)} x[{base + j}] ^ 2", term_count)
+                term_count = _write_term(f, f" {_fmt(2.0 * w)} x[{base + j}] ^ 2", term_count)
         else:
             for k in range(n_children):
                 if not bracket_open:
                     f.write(" + [")
                     bracket_open = True
-                term_count = _write_term(f, f" {_fmt(2.0)} q_x[{k},{r}] ^ 2", term_count)
+                term_count = _write_term(f, f" {_fmt(2.0 * w)} q_x[{k},{r}] ^ 2", term_count)
     if bracket_open:
         f.write(" ] / 2")
     if term_count == 0:
@@ -192,7 +197,7 @@ class OptimizationModelLP:
             self.env.setParam(key, val)
         self.env.start()
         
-    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, query_weights: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector, written directly to an .lp file.
         There is no container that encapsulates all elements, like Pyomo's ConcreteModel.
 
@@ -210,7 +215,9 @@ class OptimizationModelLP:
                 They are already expressed in terms of active indices and mapped to the global index space.
             query_matrix (Optional[np.ndarray]): Query matrix Q of shape (n_queries, n_cells),
                 or None for the identity workload, which is never materialised.
-            active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
+            query_weights (Optional[np.ndarray]): Per-row objective weight 1/sigma^2, length
+            n_queries. It is what makes an uneven set_query_budget() split coherent.
+        active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
                 in the parent's support.
 
@@ -299,7 +306,7 @@ class OptimizationModelLP:
                 else:
                     _write_workload_objective(
                         f, noisy_measurements, active_set, nz_per_row,
-                        n_queries, n_children, n_cells)
+                        n_queries, n_children, n_cells, query_weights)
                 f.write("\n")
 
                 # ---------------------------------------------------------------------------

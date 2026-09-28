@@ -22,7 +22,8 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
                  query_matrix: Optional[spmatrix], privacy_mechanism: PrivacyMechanism,
                  query_sensitivity: int, check: bool,
                  zarr_path: str, noisy_array_name: str, rounding_method: str = "mip",
-                 query_blocks: Optional[List[Tuple[int, int, float]]] = None) -> None:
+                 query_blocks: Optional[List[Tuple[int, int, float]]] = None,
+                 query_weights: Optional[np.ndarray] = None) -> None:
     '''Initialize global variables for parallel worker processes.
 
     Args:
@@ -52,9 +53,12 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
             effective sensitivity) when the level budget is split unevenly between the
             workload's queries, see TopDown.set_query_budget. None means one shot at
             query_sensitivity, which is the uniform split.
+        query_weights (Optional[np.ndarray]): Per-row objective weight 1/sigma^2, shape
+            (n_levels, n_queries), indexed by the children's level.
+            None means every term weighs 1.0, which is correct exactly when every block is equally noisy.
     '''
     global _optimizer, _data_handler, _Q, _check, _privacy_mechanism, _query_sensitivity, _constraints, _noisy_arr
-    global _query_blocks
+    global _query_blocks, _query_weights
 
     _optimizer = build_optimizer(optimizer_backend, optimizer_params, rounding=rounding_method)
 
@@ -78,6 +82,7 @@ def init_process(optimizer_params: Tuple[type, str, Dict], optimizer_backend: st
     _Q = query_matrix
     _query_sensitivity = query_sensitivity
     _query_blocks = query_blocks
+    _query_weights = query_weights
     _privacy_mechanism = privacy_mechanism
     # None when the noise cache is off, the measurement loop then samples in situ.
     _noisy_arr = zarr.open_group(zarr_path, mode="r")[noisy_array_name] if zarr_path else None
@@ -224,6 +229,7 @@ def estimate_and_update_children(node_id: int, node_path: str, children_filter_d
         node_id=node_id,
         constraints=joint_constraints,
         query_matrix=_Q,
+        query_weights=None if _query_weights is None else _query_weights[children_level],
         active=active
     )
     real_time = time.time() - t1

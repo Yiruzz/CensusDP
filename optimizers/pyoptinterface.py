@@ -54,7 +54,7 @@ class OptimizationModel:
             self.env.set_raw_parameter(key, val)
         self.env.start()
 
-    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
+    def non_negative_real_estimation(self, noisy_measurements: List[np.ndarray], node_id: int, constraints: List[SparseConstraint], query_matrix: Optional[np.ndarray] = None, query_weights: Optional[np.ndarray] = None, active: Optional[np.ndarray] = None) -> np.ndarray:
         '''Non-negative estimation of the contingency vector using PyOptInterface (Gurobi backend).
 
         Minimizes sum_k ||Q @ x_k - y_k||^2, where noisy_measurements is a list of per-child
@@ -70,7 +70,9 @@ class OptimizationModel:
                 They are already expressed in terms of active indices and mapped to the global index space.
             query_matrix (Optional[np.ndarray]): Query matrix Q of shape (n_queries, n_cells),
                                             or None for the identity workload.
-            active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
+            query_weights (Optional[np.ndarray]): Per-row objective weight 1/sigma^2, length
+            n_queries. It is what makes an uneven set_query_budget() split coherent.
+        active (Optional[np.ndarray]): Global joint-space indices (in 0..n_children*n_cells-1)
                 of the non-pruned cells — i.e. {k*n_cells + j} for each child k and each cell j
                 in the parent's support. By non-negativity + consistency, children can only be
                 non-zero there, so only those variables are created. When None (root / individual
@@ -163,6 +165,7 @@ class OptimizationModel:
         else:
             for r in range(n_queries):
                 nz = nz_per_row[r]
+                w = 1.0 if query_weights is None else float(query_weights[r])
                 if len(nz) == 1:
                     j = int(nz[0])
                     for k in range(n_children):
@@ -171,12 +174,12 @@ class OptimizationModel:
                             continue
                         y_kr = float(noisy_measurements[k][r])
                         diff = x[base + j] - y_kr
-                        obj_terms.append(diff * diff)
+                        obj_terms.append(w * diff * diff)
                 else:
                     for k in range(n_children):
                         y_kr = float(noisy_measurements[k][r])
                         diff = q_x[(k, r)] - y_kr
-                        obj_terms.append(diff * diff)
+                        obj_terms.append(w * diff * diff)
 
         model.set_objective(quicksum(obj_terms), poi.ObjectiveSense.Minimize)
 

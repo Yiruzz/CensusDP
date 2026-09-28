@@ -60,6 +60,25 @@ class PrivacyMechanism(ABC):
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         """Add calibrated discrete noise to contingency_vector in place."""
 
+    def noise_variance(self, sensitivity: float, level: int) -> float:
+        """Per-cell variance of the noise this mechanism adds at that sensitivity and level.
+
+        Exists so a caller that needs to compare blocks (TopDown weights its objective by
+        1/variance when set_query_budget() splits the budget unevenly) does not have to
+        assume how the mechanism turns sensitivity into scale. It is different for Laplace
+        vs Gaussian.
+
+        Subclasses return the exact variance of their discrete mechanism. 
+
+        Raises:
+            NotImplementedError: For a mechanism that does not report one.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not report a noise variance, so an uneven set_query_budget() "
+            f"split cannot be weighted in the objective. Implement noise_variance(), or use "
+            f"a uniform split, where every weight is 1 and none is needed."
+        )
+
     def add_noise_blocks(self, contingency_vector: np.ndarray, level: int,
                          blocks: List[Tuple[int, int, float]]) -> None:
         """Noise a measurement whose query budget is split unevenly between row blocks.
@@ -129,6 +148,11 @@ class PureDP(PrivacyMechanism):
         scale = sensitivity / self.level_params[level]
         contingency_vector += sample_dlaplace_optimized(scale, contingency_vector.size)
 
+    def noise_variance(self, sensitivity: float, level: int) -> float:
+        # Discrete Laplace, P(k) ∝ q^|k| with q = exp(-1/b): Var = 2q / (1-q)^2 (2b^2 in the limit).
+        q = math.exp(-self.level_params[level] / sensitivity)
+        return 2.0 * q / (1.0 - q) ** 2
+
     def report_guarantee(self) -> str:
         return f"pure epsilon-DP: total epsilon = {sum(self.level_params):.6g} (sum per-level epsilon)"
 
@@ -139,6 +163,14 @@ class ZCDP(PrivacyMechanism):
     def add_noise(self, contingency_vector: np.ndarray, level: int, sensitivity: int) -> None:
         scale = math.sqrt(sensitivity / (2.0 * self.level_params[level]))
         contingency_vector += sample_dgauss_optimized(scale, contingency_vector.size)
+
+    def noise_variance(self, sensitivity: float, level: int) -> float:
+        # Discrete Gaussian, P(k) ∝ exp(-k^2 / 2σ^2): no closed form, but the series is
+        # below machine precision past 12σ (σ^2 in the limit).
+        sigma_sq = sensitivity / (2.0 * self.level_params[level])
+        n = np.arange(1, int(12 * math.sqrt(sigma_sq)) + 11)
+        w = np.exp(-n * n / (2.0 * sigma_sq))
+        return 2.0 * float((n * n * w).sum()) / (1.0 + 2.0 * float(w.sum()))
 
     def report_guarantee(self) -> str:
         return f"rho-zCDP: total rho = {sum(self.level_params):.6g} (sum per-level rho)"
