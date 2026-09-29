@@ -1,6 +1,5 @@
 set -u
 REPS="${REPS:-5}"; WORKERS="${WORKERS:-20}"; RUN_TIMEOUT="${RUN_TIMEOUT:-18000}"
-RHO=0.160090750693364
 
 CENSUSDP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DAS1940="${DAS1940_HOME:-$HOME/das1940}"
@@ -51,24 +50,26 @@ fi
 # ─────────────────────────────────── one run
 run_one() {
   name="$2"; csv="$OUT/$name.csv"
-  if [ "$1" = fj ]; then args="--full-joint --workload das --epsilon 4"
-  # mip, not the default sweep: at 4,640 cells the root is ~51 x 4,640 binaries, and a global
-  # controlled rounding is the closer analogue of what the DAS does.
-  else args="--structure das --rho $RHO --rounding mip"; fi
+  # Both arms: pure DP at the same epsilon as the DAS -- no delta, no zCDP conversion -- under
+  # their uniform per-level split, so the measurement structure is the only thing that differs.
+  if [ "$1" = fj ]; then args="--full-joint --workload das --epsilon 4 --composition uniform"
+  # mip rather than the default sweep: at 4,640 cells a global controlled rounding is the closer
+  # analogue of what the DAS does.
+  else args="--structure das --epsilon 4 --rounding mip --composition uniform"; fi
 
-  say ""; say "───────── $name : $args --composition uniform --workers $WORKERS"
+  say ""; say "───────── $name : $args --workers $WORKERS"
   drop "$csv" "$OUT/${name}_5col.csv"
 
-  t0="$(date +%s)"; peak=0; n=0; set -- $(jiffies); jb=$1; jt=$2
+  t0="$(date +%s)"; peak=0; local n=0; set -- $(jiffies); jb=$1; jt=$2
   # shellcheck disable=SC2086
   timeout "$RUN_TIMEOUT" python -m benchmarks.ipums_1940.driver $args \
-      --composition uniform --workers "$WORKERS" --name "$name" > "$CAMP/$name.log" 2>&1 &
+      --workers "$WORKERS" --name "$name" > "$CAMP/$name.log" 2>&1 &
   pid=$!
   base="$(meminfo_mb)"; peak_init=0; peak_est=0; peak_merge=0; pooled=0
   while kill -0 "$pid" 2>/dev/null; do
     rss="$(meminfo_mb)"
-    procs="$(ps -u "$WHO" -o comm= 2>/dev/null | grep -c python)"
-    if [ "${procs:-1}" -gt 1 ]; then
+    procs="$(pgrep -u "$WHO" -f multiprocessing.spawn 2>/dev/null | wc -l)"
+    if [ "${procs:-0}" -gt 0 ]; then
       pooled=1; [ "$rss" -gt "$peak_est" ] && peak_est="$rss"
     elif [ "$pooled" = 1 ]; then
       [ "$rss" -gt "$peak_merge" ] && peak_merge="$rss"
