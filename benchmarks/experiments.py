@@ -63,6 +63,14 @@ def exp3_budget():
     return [(dataset, marginal(dataset, rho=rho)) for dataset in DATASETS for rho in RHOS]
 
 
+def exp3_depth():
+    """Utility per tree level of the reference run cut to 3 tree levels (national + 2), so every
+    dataset spends the whole budget over the same depth. Spain already has 3 levels: its
+    reference runs serve as they are."""
+    return [(dataset, marginal(dataset, depth=2)) for dataset in DATASETS
+            if dataset != 'spanish_census']
+
+
 def reference():
     """Experiments 4 and 5 run nothing of their own: they read the reference run's metrics
     (3-way TVD per level, and every pair with its U in both files)."""
@@ -82,5 +90,5 @@ def exp7():
 
 
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
-               'exp3_budget': exp3_budget, 'exp4': reference, 'exp5': reference, 'exp6': exp6,
-               'exp7': exp7}
+               'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': reference,
+               'exp5': reference, 'exp6': exp6, 'exp7': exp7}
