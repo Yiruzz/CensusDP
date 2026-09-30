@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 from pathlib import Path
 
 import duckdb
@@ -9,6 +10,10 @@ import duckdb
 DATA = Path('data')
 
 SOLVER_OPTIONS = {'OutputFlag': 0, 'Threads': 1, 'MIPGap': 5e-3, 'TimeLimit': 14400}
+# The DAS solves every model at BarConvTol 1e-8. We leave the key out, so optimizers.DEFAULT_SOLVER_OPTIONS
+# supplies 1e-12.
+if os.environ.get('BAR_CONV_TOL'):
+    SOLVER_OPTIONS['BarConvTol'] = float(os.environ['BAR_CONV_TOL'])
 
 COMPOSITIONS = ('exponential', 'uniform', 'proportional', 'sqrt')
 
