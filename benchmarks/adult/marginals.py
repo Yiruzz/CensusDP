@@ -1,7 +1,8 @@
 """Declared marginal structures for Adult. Runs use DEFAULT unless --structure says otherwise.
 """
 
-from .domains import COLUMNS
+from benchmarks.structures import register_family
+from .domains import COLUMNS, DOMAINS
 
 STRUCTURES = {
     # Every column paired with the label.
@@ -26,3 +27,6 @@ STRUCTURES = {
 }
 
 DEFAULT = 'blocks'
+
+# The derived family of DEFAULT, for experiment 6: benchmarks/structures.py.
+DERIVED = register_family(STRUCTURES, DEFAULT, DOMAINS)

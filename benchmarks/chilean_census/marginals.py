@@ -2,6 +2,8 @@
 bags automatically.
 """
 
+from benchmarks.structures import register_family
+from .domains import DOMAINS
 STRUCTURES = {
     'baseline': [
         ['P07', 'P08', 'P09'],  # relationship x sex x age
@@ -16,3 +18,6 @@ STRUCTURES = {
 }
 
 DEFAULT = 'baseline'
+
+# The derived family of DEFAULT, for experiment 6: benchmarks/structures.py.
+DERIVED = register_family(STRUCTURES, DEFAULT, DOMAINS)

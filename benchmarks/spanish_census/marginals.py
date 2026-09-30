@@ -4,6 +4,8 @@
 SEXO_* column, the nucleus and the spouse off TIPOPER, where the declared rules cut the bags down.
 """
 
+from benchmarks.structures import register_family
+from .domains import DOMAINS
 STRUCTURES = {
     'blocks': [
         # Person and spouse
@@ -57,3 +59,6 @@ STRUCTURES = {
 }
 
 DEFAULT = 'blocks'
+
+# The derived family of DEFAULT, for experiment 6: benchmarks/structures.py.
+DERIVED = register_family(STRUCTURES, DEFAULT, DOMAINS)

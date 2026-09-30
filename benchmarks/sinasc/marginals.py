@@ -5,6 +5,8 @@ association. At full depth it matched larger bags in TVD at a fifth of the time,
 small municipalities make wide bags noisy.
 """
 
+from benchmarks.structures import register_family
+from .domains import DOMAINS
 STRUCTURES = {
     'blocks': [
         ['PARTO', 'STCESPARTO', 'STTRABPART', 'TPAPRESENT', 'TPNASCASSI'],
@@ -20,3 +22,6 @@ STRUCTURES = {
 }
 
 DEFAULT = 'blocks'
+
+# The derived family of DEFAULT, for experiment 6: benchmarks/structures.py.
+DERIVED = register_family(STRUCTURES, DEFAULT, DOMAINS)
