@@ -52,10 +52,10 @@ run_one() {
   name="$2"; csv="$OUT/$name.csv"
   # Both arms: pure DP at the same epsilon as the DAS -- no delta, no zCDP conversion -- under
   # their uniform per-level split, so the measurement structure is the only thing that differs.
-  if [ "$1" = fj ]; then args="--full-joint --workload das --epsilon 4 --composition uniform"
+  if [ "$1" = fj ]; then args="--full-joint --workload das --epsilon 4 --composition uniform --unit-bounds"
   # mip rather than the default sweep: at 4,640 cells a global controlled rounding is the closer
   # analogue of what the DAS does.
-  else args="--structure das --epsilon 4 --rounding mip --composition uniform"; fi
+  else args="--structure das --epsilon 4 --rounding mip --composition uniform --unit-bounds"; fi
 
   say ""; say "───────── $name : $args --workers $WORKERS"
   drop "$csv" "$OUT/${name}_5col.csv"
