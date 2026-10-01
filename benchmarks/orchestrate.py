@@ -121,7 +121,7 @@ def main():
     parser.add_argument('--reps', type=int, default=5, help='rounds, one run of every configuration each')
     parser.add_argument('--datasets', nargs='+', help='only these datasets')
     parser.add_argument('--sample', action='store_true', help='use the small subsets')
-    parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--workers', type=int, default=20)
     parser.add_argument('--timeout', type=float, help='hours before a run is killed')
     parser.add_argument('--retry', action='store_true', help='run again what failed or timed out')
     parser.add_argument('--keep-csv', action='store_true', help='keep the synthetic microdata')

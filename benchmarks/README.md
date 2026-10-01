@@ -235,8 +235,7 @@ python -m benchmarks.orchestrate exp4 exp5 exp7 --reps 5 --timeout 12 2>&1 | tee
 
 - **Experiment 4** (3-way TVD by granularity) and **5** (utility by marginal coverage, MI
   heatmap) run nothing: they read `levels` and `<name>_metrics.json` of the reference run.
-- **Experiment 6** (marginal size) is postponed: SINASC and Spain declare only `blocks` for now,
-  and the structures to compare are chosen when this experiment is designed.
+- **Experiment 6** (marginal size) has its own step, 2.5, with a generated family of structures.
 - **Experiment 7** (global MIP against the sweep): 5 new configurations. The MIP may not finish at
   full depth; a `timeout` in round 1 is itself the result, so drop that configuration from
   `experiments.py` before the next rounds instead of paying 12 h per round.
@@ -254,6 +253,27 @@ Spain is excluded from `exp3_depth`: it already has 3 levels, so its step 2.2 re
 its arm. `read_nodes` slices the saved counts to the truncated hierarchy
 (`stored['nodes'][:len(hierarchy) + 1]`, with a prefix check), so the budget is split over the
 three levels that exist and not over the five the file records.
+
+### Step 2.5 — Structure (experiment 6): 115 runs
+
+A family of structures derived mechanically from each dataset's declared one, by
+`benchmarks/structures.py`: **merge** the two bags sharing an attribute whose union has the fewest
+cells (rungs `_m1`, `_m2`, ... toward the joint), or **split** every bag of three or more attributes
+by dropping the pair with the largest cardinality product (rungs `_s1`, `_s2`, ... away from it).
+Both rules are width-extremal, so they are deterministic with no tuning constant, and neither reads
+the data, so no budget goes to selection. Each `marginals.py` registers its family as `DERIVED`.
+
+```bash
+python -m benchmarks.orchestrate exp6 --reps 5 --timeout 4 2>&1 | tee -a data/out/orchestrate.log
+```
+
+27 configurations x 5 rounds = 135 runs, of which the 20 declared anchors are the step 2.2
+reference runs and are skipped. `chilean_census` is excluded: its 21 bags come from 8 declared
+marginals plus 30 constraint scopes, every scope is a mandatory clique (`topdown.py:285`), and
+merging or splitting the marginals moves its width by 2% and its bag count by 1.
+
+The analysis plots the bags the junction tree **returned** (`bags` in the run record), never the
+ones requested: a split can be re-fused by the triangulation.
 
 ---
 
@@ -274,7 +294,7 @@ Fill in as the steps finish. The values that change runs also go in `experiments
 | Part 2 composition (`COMPOSITION`) | `sqrt` | step 2.1 below: best leaf TVD on 4 of 5 datasets, and better than `exponential` on all 5 | 2026-09-22 |
 | Part 2 budget (`RHO`) | `1` | step 2.2 below: no budget wins on utility, so this is the operating point of experiments 4 to 7, not a privacy claim; the sweep is the result | 2026-09-23 |
 | Experiment 4: split contained and other triples | _open_ | | |
-| Experiment 6: which structures to compare | _postponed_ | | 2026-09-14 |
+| Experiment 6: which structures to compare | the family generated from each declaration (`structures.py`), Chile excluded | step 2.5 below | 2026-09-30 |
 
 ### Step 1.1 — DAS
 
@@ -739,3 +759,104 @@ Enumdist.
 > SINASC UF at SNR 3.63 with 0.00143), most plausibly because with only 2 bags of very unequal width
 > the count per cell averaged over the concatenation is a poor summary. Redo it with a per-bag SNR
 > before using it.
+
+### Step 2.5 — structure
+
+135 runs (27 configurations x 5 rounds) at rho = 1 with `sqrt` and the sweep, 20 workers, all
+`ok`. Median of 5 throughout, and every comparison below has **disjoint min-max ranges** over the 5
+rounds unless said otherwise. Coverage is the fraction of attribute pairs inside some bag.
+
+**What the tree returned.** Merges are respected on all four datasets. Splits are exact on adult
+and IPUMS only: SINASC 17 -> 14, 21 -> 17, 21 -> 18 bags; Spain 64 -> 62, 77 -> 71, 79 -> 70,
+80 -> 70. Spain's `blocks_s3` and `blocks_s4` come out as the **same structure** (70 bags,
+W 76,020 against 75,999, tvd2 0.04543 both): the family saturates there, and a figure should show
+one of them. IPUMS `das_m1` is the full joint in one bag, identical to the declared `joint`.
+
+**Whole-tree utility and cost.** Mean of `tvd2` over the levels; seconds are initialize plus
+estimation; GB is `memory_mb` main plus largest worker:
+
+| dataset | structure | bags | coverage | W | Delta | tvd2 | seconds | GB |
+|---|---|---|---|---|---|---|---|---|
+| adult | `blocks_s2` | 13 | 14.3% | 2,884 | 26 | 0.12456 | 1.5 | 0.53 |
+| | `blocks_s1` | 11 | 18.7% | 3,384 | 22 | **0.12269** | 1.6 | 0.54 |
+| | `blocks` | 7 | 23.1% | 27,188 | 14 | 0.13785 | 3.5 | 0.56 |
+| | `blocks_m1` | 6 | 26.4% | 40,705 | 12 | 0.17032 | 4.7 | 0.59 |
+| | `blocks_m2` | 5 | 28.6% | 82,085 | 10 | 0.19974 | 7.6 | 0.64 |
+| | `blocks_m3` | 4 | 31.9% | 503,960 | 8 | 0.28295 | 37.5 | 1.20 |
+| sinasc | `blocks_s3` | 18 | 11.6% | 1,919 | 36 | 0.04037 | 64.1 | 4.44 |
+| | `blocks_s2` | 17 | 13.2% | 2,135 | 34 | 0.03994 | 63.6 | 4.45 |
+| | `blocks_s1` | 14 | 17.9% | 3,680 | 28 | 0.03855 | 69.0 | 4.45 |
+| | `blocks` | 9 | 21.1% | 6,844 | 18 | **0.03798** | 43.8 | 4.45 |
+| | `blocks_m1` | 8 | 23.2% | 18,204 | 16 | 0.03843 | 134.9 | 4.48 |
+| | `blocks_m2` | 7 | 24.7% | 31,536 | 14 | 0.03915 | 210.0 | 4.36 |
+| | `blocks_m3` | 6 | 27.9% | 57,009 | 12 | 0.04179 | 337.5 | 4.57 |
+| | `blocks_m4` | 5 | 29.5% | 81,160 | 10 | 0.04498 | 468.1 | 4.65 |
+| spanish_census | `blocks_s4` | 70 | 3.2% | 75,999 | 140 | 0.06112 | 243.7 | 9.45 |
+| | `blocks_s3` | 70 | 3.3% | 76,020 | 140 | 0.06111 | 248.9 | 9.46 |
+| | `blocks_s2` | 71 | 3.3% | 76,029 | 142 | 0.06419 | 241.0 | 9.54 |
+| | `blocks_s1` | 62 | 3.9% | 77,808 | 124 | 0.06192 | 213.2 | 9.43 |
+| | `blocks` | 41 | 4.6% | 135,481 | 82 | **0.05762** | 310.6 | 9.51 |
+| | `blocks_m1` | 40 | 4.6% | 135,567 | 80 | 0.05770 | 302.8 | 9.48 |
+| | `blocks_m2` | 39 | 4.7% | 139,806 | 78 | 0.05783 | 307.4 | 9.51 |
+| | `blocks_m3` | 38 | 4.8% | 155,871 | 76 | 0.05793 | 323.2 | 9.56 |
+| | `blocks_m4` | 37 | 4.9% | 161,614 | 74 | 0.05803 | 332.1 | 9.58 |
+| ipums_1940 | `das_s2` | 5 | 33.3% | 496 | 10 | 0.01805 | 4,691.2 | 14.54 |
+| | `das_s1` | 4 | 46.7% | 736 | 8 | **0.01651** | 4,005.2 | 15.18 |
+| | `das` | 2 | 60.0% | 4,640 | 4 | 0.02099 | 1,932.2 | 16.79 |
+| | `das_m1` | 1 | 100.0% | 44,544 | 2 | 0.02419 | 9,509.7 | 22.04 |
+
+**More coverage is not better.** On adult, splitting improves tvd2 11% and halves the time, while
+merging to 31.9% coverage doubles it and costs 25x the time. On IPUMS the optimum is **interior**,
+at 46.7%: better than the declaration and better than the full joint. SINASC and Spain are
+optimal at their declaration. Spain's merges are within 0.7% of each other, because its 41 bags are
+fixed by the constraint scopes much as Chile's are (coverage moves 4.6% -> 4.9%).
+
+**The finding: the best structure changes down the tree, and it follows records per node.** Per
+level, with records per node:
+
+| dataset | level | records/node | best | its coverage | runner-up |
+|---|---|---|---|---|---|
+| ipums_1940 | national | 132,404,766 | `das_m1` 0.00038 | **100.0%** | `das` 0.00042 |
+| | STATEFIP | 2,596,171 | `das_s1` 0.00196 | 46.7% | `das` 0.00200 |
+| | COUNTY | 42,601 | `das_s1` 0.00953 | 46.7% | `das_s2` 0.01029 |
+| | SUPDIST | 41,311 | `das_s1` 0.00942 | 46.7% | `das_s2` 0.01023 |
+| | ENUMDIST | 871 | `das_s1` 0.06061 | 46.7% | `das_s2` 0.06362 |
+| sinasc | national | 2,561,858 | `blocks` 0.01075 | **21.1%** | `blocks_m1` 0.01108 |
+| | REGIAO | 512,371 | `blocks` 0.01132 | 21.1% | `blocks_m1` 0.01173 |
+| | UF | 94,883 | `blocks` 0.01470 | 21.1% | `blocks_m1` 0.01538 |
+| | REGSAUD | 5,693 | `blocks_s1` 0.02967 | **17.9%** | `blocks` 0.02996 |
+| | CODMUNRES | 459 | `blocks_s1` 0.12240 | 17.9% | `blocks_s2` 0.12312 |
+| spanish_census | national | 4,707,186 | `blocks_m2` 0.04070 | **4.7%** | `blocks_m4` 0.04071 |
+| | CPRO | 90,522 | `blocks_m1` 0.04871 | 4.6% | `blocks` 0.04872 |
+| | CMUN | 5,178 | `blocks` 0.08336 | **4.6%** | `blocks_m1` 0.08364 |
+| adult | every level | 48,842 -> 3,256 | `blocks_s1` / `blocks_s2` | 18.7% / 14.3% | tied with each other at levels 1-3 |
+
+Within every dataset, the coverage of the best structure **never increases** going down the tree.
+IPUMS crosses from the joint to `das_s1` between the national node and the states; SINASC crosses
+from `blocks` to `blocks_s1` between UF (94,883 per node) and REGSAUD (5,693). That is not the
+level where SINASC's measured and unmeasured pairs swap: in experiment 5 they never do (1.4 at the
+leaves), so the two crossings are different quantities; Spain crosses
+from a merge to its declaration between the nation and CMUN. Adult never has enough records for
+coverage to pay. Two of these are close but still disjoint: IPUMS STATEFIP (0.00195-0.00196
+against 0.00198-0.00202) and the Spain national merges (0.04069-0.04072 against 0.04075-0.04079).
+At CPRO, Spain's `blocks_m1` and `blocks` are tied.
+
+The mechanism: the error has a term set by coverage (what no bag measures is filled in by the
+coupling), which does not depend on the node's size, and a noise term that grows with the cells
+per bag and with sqrt(bags) through Delta and shrinks with the records in the node. High up, the
+noise is negligible and coverage decides; at the leaves the noise decides and the smallest tables
+win. Records per node fall by five orders of magnitude on IPUMS, so **no single structure is best
+at every level**.
+
+**Cost has an interior minimum too.** Time is not monotone in the width. IPUMS `das_s1`, with 6x
+fewer cells than the declaration, is **2.1x slower** (4,005 s against 1,932 s), and `das_s2` 2.4x;
+SINASC `blocks_s1` is 1.6x slower than `blocks`. Wide bags cost cells; many bags cost separator
+rows and transports in the sweep. On IPUMS and SINASC the minimum sits at the declaration; on adult
+and Spain the splits are faster (0.46x and 0.69x). Memory barely moves except where W does: IPUMS
+22.0 GB for the joint against 14.5 GB for `das_s2`, adult 1.20 GB against 0.53 GB.
+
+**What this buys the paper.** It answers experiment 6 with a mechanism rather than a ranking: the
+choice of marginals is a bias-variance trade-off whose balance point moves with the records per
+node, so it is set by the depth of the hierarchy as much as by the data. The IPUMS family runs from
+the marginal pipeline to the full-joint pipeline, so the same figure also says where each pipeline
+wins.
