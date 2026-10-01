@@ -6,6 +6,11 @@ while declaring 0..5 legal; here it is shifted to 0..5.
 
     python -m benchmarks.ipums_1940.prepare          # sample only: Alaska
     python -m benchmarks.ipums_1940.prepare --full   # also the 132M-person full count
+    python -m benchmarks.ipums_1940.prepare --units [--full]   # only the unit counts
+
+Besides the persons it writes the unit counts the DAS holds invariant (`gqhh_vect`): occupied
+households and group-quarters facilities per enumeration district and hhgq, one per H record, with
+the same recode as the persons. benchmarks/ipums_1940/constraints.py turns them into bounds.
 """
 
 import sys
@@ -16,6 +21,13 @@ from benchmarks import common
 
 DATASET = 'ipums_1940'
 RAW = {True: 'data/ipums_1940/EXT1940USCB_AK.dat', False: 'data/ipums_1940/EXT1940USCB.dat.gz'}
+
+# map_to_hhgq in ipums_1940_reader.py, applied by the DAS to persons and units alike.
+HHGQ = """CASE WHEN gqtype = 0 THEN 0
+            WHEN gqtype IN (2, 3, 4) THEN gqtype - 1
+            WHEN gqtype IN (6, 7, 8) THEN gqtype - 2
+            WHEN gqtype = 9 AND gq IN (1, 2, 5) THEN 0
+            WHEN gqtype = 9 THEN 7 END"""
 
 QUERY = """
 WITH lines AS (
@@ -34,12 +46,7 @@ WITH lines AS (
            CAST(substr(line, 118, 1) AS INTEGER) AS citizen
     FROM lines WHERE substr(line, 1, 1) = 'P'
 )
-SELECT STATEFIP, COUNTY, SUPDIST, ENUMDIST,
-       CASE WHEN gqtype = 0 THEN 0
-            WHEN gqtype IN (2, 3, 4) THEN gqtype - 1
-            WHEN gqtype IN (6, 7, 8) THEN gqtype - 2
-            WHEN gqtype = 9 AND gq IN (1, 2, 5) THEN 0
-            WHEN gqtype = 9 THEN 7 END AS hhgq,
+SELECT STATEFIP, COUNTY, SUPDIST, ENUMDIST, {hhgq} AS hhgq,
        sex - 1 AS sex,
        LEAST(age, 115) AS age,
        CASE WHEN hispan = 0 THEN 0 ELSE 1 END AS hispanic,
@@ -49,15 +56,36 @@ FROM persons JOIN households USING (serial)
 """
 
 
+# The households CTE of QUERY, alone: the DAS reads every H record into its unit table.
+UNITS = QUERY[:QUERY.index('), persons AS')] + """)
+SELECT STATEFIP, COUNTY, SUPDIST, ENUMDIST, {hhgq} AS hhgq, count(*) AS units
+FROM households GROUP BY ALL
+"""
+
+
+def units_path(sample):
+    return common.parquet(DATASET, sample)[:-len('.parquet')] + '_units.parquet'
+
+
 def build(sample):
     target = common.parquet(DATASET, sample)
     con = duckdb.connect()
-    con.execute(f"COPY ({QUERY.format(raw=RAW[sample])}) TO '{target}' (FORMAT PARQUET)")
+    con.execute(f"COPY ({QUERY.format(raw=RAW[sample], hhgq=HHGQ)}) TO '{target}' (FORMAT PARQUET)")
     rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{target}')").fetchone()[0]
     print(f'{target}: {rows:,} persons')
 
 
+def build_units(sample):
+    target = units_path(sample)
+    con = duckdb.connect()
+    con.execute(f"COPY ({UNITS.format(raw=RAW[sample], hhgq=HHGQ)}) TO '{target}' (FORMAT PARQUET)")
+    rows = con.execute(f"SELECT hhgq, SUM(units) FROM read_parquet('{target}') GROUP BY 1 ORDER BY 1").fetchall()
+    print(f'{target}: units per hhgq {rows}')
+
+
 if __name__ == '__main__':
-    build(sample=True)
-    if '--full' in sys.argv:
-        build(sample=False)
+    steps = [build_units] if '--units' in sys.argv else [build, build_units]
+    for step in steps:
+        step(sample=True)
+        if '--full' in sys.argv:
+            step(sample=False)

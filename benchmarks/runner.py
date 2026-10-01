@@ -48,6 +48,9 @@ def parse_args(hierarchy, marginals, workload):
                                  'full joint is measured on its own')
     parser.add_argument('--composition', default='exponential', choices=common.COMPOSITIONS)
     parser.add_argument('--rounding', default='auto', choices=('auto', 'sweep', 'mip'))
+    parser.add_argument('--unit-bounds', action='store_true',
+                        help="the DAS's household and group-quarters unit bounds; IPUMS 1940 only "
+                             '(benchmarks/ipums_1940/constraints.py)')
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--check', action='store_true',
                         help='verify that children sum to their parent (adds time)')
@@ -67,6 +70,8 @@ def default_name(args):
         parts.append(f'c{args.columns}')
     if args.rounding != 'auto':
         parts.append(args.rounding)
+    if args.unit_bounds:
+        parts.append('units')
     if args.sample:
         parts.append('sample')
     return '_'.join(parts)
@@ -108,6 +113,7 @@ def main(dataset, hierarchy, domains, constraints, marginals, workload=None):
         'workload': chosen_workload,
         'query_budget': list(workload.WORKLOADS[chosen_workload][1]) if chosen_workload else None,
         'rounding': rounding, 'workers': args.workers, 'check': args.check,
+        'unit_bounds': args.unit_bounds,
         'solver_options': common.SOLVER_OPTIONS, 'status': 'error', 'seconds': {},
     }
 
@@ -132,6 +138,9 @@ def main(dataset, hierarchy, domains, constraints, marginals, workload=None):
         algorithm.set_constraint_to_level(0, SumEqualRealTotal(TrueExpression()))
         for rule in constraints.constraints(columns):
             algorithm.set_constraint_to_tree(rule)
+        if args.unit_bounds:
+            for rule in constraints.unit_bounds(hierarchy, args.sample):
+                algorithm.set_constraint_to_tree(rule)
 
         try:
             started = time.perf_counter()
