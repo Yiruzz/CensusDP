@@ -502,7 +502,7 @@ class DataHandler:
         for constraint in constraints:
             match constraint:
                 case ContextualAggregateConstraint():
-                    constraint.apply_aggregation_function(x.data)
+                    constraint.apply_aggregation_function(x.data, filter_dict)
 
             # Convert to optimizer callable against the contingency domain
             sparse = constraint.to_sparse_constraint(self.contingency_domain)
@@ -652,7 +652,7 @@ class DataHandler:
                 case ContextualAggregateConstraint():
                     # The bag's marginal sums to the node total, so contextual values
                     # (e.g. the real total) are computed from it directly.
-                    constraint.apply_aggregation_function(marginals[bag_index])
+                    constraint.apply_aggregation_function(marginals[bag_index], filter_dict)
 
             indices, coefs, sense, cached_rhs = self._compiled_constraint(constraint, bag_index)
             # Only a contextual constraint's right-hand side varies per node; its cells do not.

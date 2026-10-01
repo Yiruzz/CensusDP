@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Callable
+from typing import Callable, Optional
 
 from constraints.sparse_constraint import SparseConstraint
 from constraints.logical_expressions.base import LogicalExpression
@@ -31,11 +31,13 @@ class ContextualAggregateConstraint(AggregateConstraint, ABC):
         super().__init__(expression=expression, value=-1)
         self.aggregation_function = aggregation_function
         
-    def apply_aggregation_function(self, counts: np.ndarray) -> int:
+    def apply_aggregation_function(self, counts: np.ndarray, filter_dict: Optional[dict] = None) -> int:
         """Calculate the value for the aggregate expression.
 
         Args:
             counts (np.ndarray): The counts array to use for calculation.
+            filter_dict (Optional[dict]): The node's geography, for the subclasses whose value
+                depends on which node it is rather than on its counts (SumBoundOfNode).
         Returns:
             int: The calculated value.
         """
@@ -77,5 +79,31 @@ class SumEqualRealTotal(ContextualAggregateConstraint):
             rhs=float(self.value)
         )
     
+class SumBoundOfNode(ContextualAggregateConstraint):
+    """sum(x[mask]) <sense> value, where the value is read off the node's geography, not its counts.
+
+    Args:
+        expression (LogicalExpression): The cells the sum runs over.
+        sense (str): "=", "<=" or ">=". Fixed per constraint: the factored pipeline compiles the
+            row once per bag and reuses its sense for every node.
+        values (dict): The value per node, keyed by the tuple of its filter_dict values in hierarchy
+            order: () for the root, (state,) for a state, and so on.
+    """
+
+    def __init__(self, expression: LogicalExpression, sense: str, values: dict) -> None:
+        super().__init__(expression=expression, aggregation_function=None)
+        self.sense = sense
+        self.values = values
+
+    def apply_aggregation_function(self, counts: np.ndarray, filter_dict: Optional[dict] = None) -> int:
+        self.value = self.values[tuple(filter_dict.values())]
+        return self.value
+
+    def to_sparse_constraint(self, domain) -> SparseConstraint:
+        indices = np.flatnonzero(self.expression.reduce(domain))
+        return SparseConstraint(indices=indices, coefs=np.ones(len(indices)), sense=self.sense,
+                                rhs=float(self.value))
+
+
 # NOTE: Add more aggregate expressions as needed
 
