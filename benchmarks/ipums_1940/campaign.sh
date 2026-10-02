@@ -1,5 +1,8 @@
 set -u
 REPS="${REPS:-5}"; WORKERS="${WORKERS:-20}"; RUN_TIMEOUT="${RUN_TIMEOUT:-18000}"
+# ARMS picks the arms and TAG goes into the run names, so a variant does not overwrite the main runs:
+# BAR_CONV_TOL=1e-8 ARMS=fj TAG=1e8 bash campaign.sh writes ours_fj1e8_rep*.
+ARMS="${ARMS:-fj mg}"; TAG="${TAG:-}"
 
 CENSUSDP="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DAS1940="${DAS1940_HOME:-$HOME/das1940}"
@@ -24,7 +27,7 @@ drop() { for p in "$@"; do case "$p" in "$OUT"/*.csv) rm -f -- "$p" ;;
          *) echo "refusing to delete $p" >&2; exit 1 ;; esac; done; }
 
 . "$CENSUSDP/venv/bin/activate" || exit 1
-say "=== $REPS replicate(s) per arm, $WORKERS workers, timeout ${RUN_TIMEOUT}s"
+say "=== $REPS replicate(s) per arm ($ARMS), $WORKERS workers, timeout ${RUN_TIMEOUT}s, BarConvTol ${BAR_CONV_TOL:-default}"
 
 # ─────────────────────────────────── preparation, skipped when already done
 if [ ! -f "$DATADIR/EXT1940USCB_AK.dat" ]; then   # prepare.py always builds the sample first
@@ -103,8 +106,8 @@ run_one() {
     > "$CAMP/$name.campaign.json"
 }
 
-for arm in fj mg; do
-  n=1; while [ "$n" -le "$REPS" ]; do run_one "$arm" "ours_${arm}_rep$n"; n=$((n + 1)); done
+for arm in $ARMS; do
+  n=1; while [ "$n" -le "$REPS" ]; do run_one "$arm" "ours_${arm}${TAG}_rep$n"; n=$((n + 1)); done
 done
 
 say ""; say "=== campaign done, $(( ($(date +%s) - STARTED) / 60 )) min total"
