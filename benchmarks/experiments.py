@@ -9,7 +9,8 @@ cannot express yet. Part 2 (experiments 3 to 7) starts with experiment 3, in two
   1. exp3_composition: every composition at COMPOSITION_RHO. The winner goes in COMPOSITION.
   2. exp3_budget: every rho with COMPOSITION. The chosen one goes in RHO.
 Until both are set, an experiment that needs them refuses to list its runs.
-Experiment 4 is pending: for now it reads the 3-way TVD per level of the reference run.
+Experiment 4 reruns the reference configuration, because the synthetic CSVs are not kept and its
+triples are sampled differently (see exp4).
 """
 
 import importlib
@@ -23,6 +24,7 @@ COMPOSITION = 'sqrt'  # exp3_composition, 2026-09-22
 RHO = 1               # exp3_budget, 2026-09-23
 # Its structure is decided by its constraint scopes, not by its marginals -- see exp6.
 EXP6_EXCLUDED = ('chilean_census',)
+TRIPLES = 100
 
 
 def decided(config):
@@ -74,9 +76,20 @@ def exp3_depth():
 
 
 def reference():
-    """Experiments 4 and 5 run nothing of their own: they read the reference run's metrics
-    (3-way TVD per level, and every pair with its U in both files)."""
+    """Experiment 5 runs nothing of its own: it reads the reference run's metrics (every pair
+    with its U in both files)."""
     return [(dataset, marginal(dataset)) for dataset in DATASETS]
+
+
+def exp4():
+    """3-way TVD per level of the reference configuration, with the triples stratified.
+
+    The reference runs drew 100 triples uniformly, which reached 0 to 5 contained ones per dataset
+    (0 on Chile and Spain), so this reruns the configuration and evaluates every contained triple
+    plus TRIPLES of the rest per number of pairs a bag measures. The `triples` key goes to
+    benchmarks.metrics, not to the driver, and keeps these runs apart from the reference ones.
+    """
+    return [(dataset, marginal(dataset, triples=TRIPLES)) for dataset in DATASETS]
 
 
 def exp6():
@@ -122,5 +135,5 @@ def exp7():
 
 
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
-               'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': reference,
+               'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': exp4,
                'exp5': reference, 'exp6': exp6, 'exp7': exp7}

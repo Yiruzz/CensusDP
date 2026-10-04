@@ -28,6 +28,7 @@ from benchmarks import common
 from benchmarks.experiments import EXPERIMENTS
 
 NAMED = ('full_joint', 'structure', 'rho', 'composition', 'rounding')
+METRIC_FLAGS = ('triples',)
 
 
 def label(config):
@@ -90,8 +91,10 @@ def run(dataset, config, name, rep, args):
              for suffix in ('.json', '_metrics.json', '.log', '.csv')}
     for path in files.values():
         path.unlink(missing_ok=True)  # nothing stale from an earlier attempt
+    driver = {key: value for key, value in config.items() if key not in METRIC_FLAGS}
+    metrics = {key: value for key, value in config.items() if key in METRIC_FLAGS}
     command = [sys.executable, '-m', f'benchmarks.{dataset}.driver', '--name', name,
-               '--workers', str(args.workers)] + flags(config)
+               '--workers', str(args.workers)] + flags(driver)
     if args.sample:
         command.append('--sample')
     code = call(command, files['.log'], args.timeout and args.timeout * 3600)
@@ -102,7 +105,8 @@ def run(dataset, config, name, rep, args):
     if code != 0:
         row.update(status='timeout' if code == 'timeout' else 'error', returncode=code)
     else:
-        code = call([sys.executable, '-m', 'benchmarks.metrics', dataset, name], files['.log'])
+        code = call([sys.executable, '-m', 'benchmarks.metrics', dataset, name] + flags(metrics),
+                    files['.log'])
         if code == 0:
             metrics = json.loads(files['_metrics.json'].read_text(encoding='utf-8'))
             row.update(levels=metrics['levels'], workload=metrics['workload'],

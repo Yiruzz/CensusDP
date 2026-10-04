@@ -7,7 +7,8 @@ Runs in its own process, after the run, so it never touches the time or memory t
 For every marginal, the original and synthetic distributions are compared inside each node of
 a level (TVD, and L1 over counts) and averaged over the nodes of that level. Pairs are split
 into those inside some junction-tree bag and the rest; triples into those contained in a bag
-and the rest. Pairs also carry their national symmetric uncertainty U in both files.
+and the rest, the rest also by how many of their pairs a bag measures. Pairs also carry their
+national symmetric uncertainty U in both files.
 Writes data/out/<dataset>/<name>_metrics.json.
 """
 
@@ -37,7 +38,8 @@ def evaluate(original, synthetic_csv, domains, hierarchy, bags, triples=100, wor
         domains: Declared domain of every query column.
         hierarchy: The hierarchy columns the run used.
         bags: Junction-tree bags; [all columns] for a full-joint run.
-        triples: How many 3-way marginals to evaluate, drawn once with a fixed seed.
+        triples: How many triples not contained in a bag to evaluate per number of measured
+            pairs (0, 1 or 2), drawn with a fixed seed. Every contained triple is evaluated.
         workload: Extra marginals to report on their own (e.g. the DAS queries).
 
     Returns:
@@ -62,14 +64,20 @@ def evaluate(original, synthetic_csv, domains, hierarchy, bags, triples=100, wor
                       'u_original': _uncertainty(tables[0].reshape(shape)),
                       'u_synthetic': _uncertainty(tables[1].reshape(shape))})
 
-    chosen = list(itertools.combinations(columns, 3))
-    if len(chosen) > triples:
-        chosen = sorted(random.Random(0).sample(chosen, triples))
+    strata = {}
+    for triple in itertools.combinations(columns, 3):
+        contained = any(set(triple) <= bag for bag in bag_sets)
+        measured = sum(any(set(pair) <= bag for bag in bag_sets)
+                       for pair in itertools.combinations(triple, 2))
+        strata.setdefault((contained, measured), []).append(triple)
+    rng = random.Random(0)
     triple_rows = []
-    for triple in chosen:
-        tvd, l1, _ = _compare(data, triple, sizes, parents)
-        triple_rows.append({'columns': list(triple), 'tvd': tvd, 'l1': l1,
-                            'contained': any(set(triple) <= bag for bag in bag_sets)})
+    for (contained, measured), members in sorted(strata.items()):
+        chosen = members if contained or len(members) <= triples else sorted(rng.sample(members, triples))
+        for triple in chosen:
+            tvd, l1, _ = _compare(data, triple, sizes, parents)
+            triple_rows.append({'columns': list(triple), 'tvd': tvd, 'l1': l1, 'contained': contained,
+                                'measured_pairs': measured, 'weight': len(members) / len(chosen)})
 
     workload_rows = []
     for marginal in workload:
@@ -79,8 +87,9 @@ def evaluate(original, synthetic_csv, domains, hierarchy, bags, triples=100, wor
     levels = []
     for level, column in enumerate(['national'] + list(hierarchy)):
         def mean(rows, keep=lambda row: True, key='tvd'):
-            values = [row[key][level] for row in rows if keep(row)]
-            return float(np.mean(values)) if values else None
+            kept = [row for row in rows if keep(row)]
+            return float(np.average([row[key][level] for row in kept],
+                                    weights=[row.get('weight', 1) for row in kept])) if kept else None
         levels.append({
             'level': level, 'column': column, 'nodes': int(parents[level].max()) + 1,
             'tvd2': mean(pairs),
@@ -89,6 +98,8 @@ def evaluate(original, synthetic_csv, domains, hierarchy, bags, triples=100, wor
             'tvd3': mean(triple_rows),
             'tvd3_contained': mean(triple_rows, lambda row: row['contained']),
             'tvd3_other': mean(triple_rows, lambda row: not row['contained']),
+            **{f'tvd3_pairs{k}': mean(triple_rows, lambda row, k=k: not row['contained']
+                                      and row['measured_pairs'] == k) for k in range(3)},
             'workload_l1': mean(workload_rows, key='l1'),
         })
     return {'levels': levels, 'pairs': pairs, 'triples': triple_rows, 'workload': workload_rows}
@@ -206,7 +217,8 @@ def main():
     parser = argparse.ArgumentParser(description='Utility metrics of one finished run.')
     parser.add_argument('dataset')
     parser.add_argument('name', help='the run, as in data/out/<dataset>/<name>.json')
-    parser.add_argument('--triples', type=int, default=100, help='3-way marginals to evaluate')
+    parser.add_argument('--triples', type=int, default=100,
+                        help='non-contained triples to evaluate per number of measured pairs')
     parser.add_argument('--discard', action='store_true', help='delete the synthetic CSV afterwards')
     args = parser.parse_args()
 
