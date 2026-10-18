@@ -12,7 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 from constraints.constraint import Constraint
 from constraints.contextual_constraints import ContextualAggregateConstraint
-from constraints.domain_restriction import build_restriction
+from constraints.domain_restriction import build_restriction, propagate_restriction
 from constraints.sparse_constraint import SparseConstraint
 from domain import ContingencyDomain
 from graph import JunctionTree
@@ -274,6 +274,7 @@ class DataHandler:
         self.junction_tree = junction_tree
         self.bag_domains = [build_restriction(self.contingency_domain.subdomain(bag), constraints)
                             for bag in junction_tree.bags]
+        self.bag_domains = propagate_restriction(self.contingency_domain, junction_tree, self.bag_domains)
 
         offsets: List[int] = []
         total = 0

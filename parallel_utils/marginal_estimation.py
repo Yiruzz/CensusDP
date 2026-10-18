@@ -117,10 +117,10 @@ def separator_constraints(data_handler) -> List[SparseConstraint]:
             # A separator value neither bag can reach, the declared edit constraints removed
             # every cell that projects to it, would give the row 0 = 0.
             #
-            # A one-sided empty group is not skipped, and must not be. It says the other bag's
-            # cells at that value sum to zero, which is how a restriction that only one bag
-            # could express propagates to its neighbours. Dropping it would leave the model
-            # free to put mass on a combination the domain forbids.
+            # propagate_restriction already removed every cell whose separator value the neighbour
+            #  cannot reach. It is still not skipped, so that if it ever did arise the row would 
+            # pin the other bag's cells at that value to zero rather than leave mass on a combination 
+            # the domain forbids.
             if bounds_i[s] == bounds_i[s + 1] and bounds_j[s] == bounds_j[s + 1]:
                 continue
 
