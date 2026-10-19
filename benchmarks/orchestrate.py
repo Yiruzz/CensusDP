@@ -70,26 +70,38 @@ def session_pss_mb(session):
 
 
 class MemorySampler(threading.Thread):
-    """Peak memory of a running process tree, sampled from outside it once per `interval`.
+    """Peak memory of a running process tree, sampled from outside it.
 
-    Records both instruments: the machine-wide one, so the structures table reports the same
-    quantity as the DAS table, and the PSS of the run's own session as a cross-check that does not
-    depend on what else the host holds. Linux only.
+    Records two instruments. The PSS of the run's own session is the one the structures table
+    reports: it does not depend on what else the host holds. The machine-wide one is the DAS
+    table's, and includes a host baseline of about 5 GB that moves by half a GB between runs, so
+    it is kept as a cross-check (peak minus baseline agreed with the PSS within 0.3 GB on the test).
+
+    The first sample is taken at once and the interval doubles from `first` up to `interval`: an
+    ADULT run lasts about two seconds, and a fixed second gave it a single sample, while reading
+    smaps_rollup ten times a second on the 20 GB processes of IPUMS would cost the run itself.
+    Linux only.
     """
 
-    def __init__(self, session, interval=1.0):
+    def __init__(self, session, interval=1.0, first=0.1):
         super().__init__(daemon=True)
-        self.session, self.interval = session, interval
+        self.session, self.interval, self.first = session, interval, first
         self.finished = threading.Event()
         self.baseline_machine = machine_mb()
         self.peak_machine = self.peak_pss = 0.0
         self.samples = 0
 
+    def sample(self):
+        self.peak_machine = max(self.peak_machine, machine_mb())
+        self.peak_pss = max(self.peak_pss, session_pss_mb(self.session))
+        self.samples += 1
+
     def run(self):
-        while not self.finished.wait(self.interval):
-            self.peak_machine = max(self.peak_machine, machine_mb())
-            self.peak_pss = max(self.peak_pss, session_pss_mb(self.session))
-            self.samples += 1
+        wait = self.first
+        self.sample()
+        while not self.finished.wait(wait):
+            self.sample()
+            wait = min(2 * wait, self.interval)
 
     def result(self):
         self.finished.set()
@@ -97,7 +109,7 @@ class MemorySampler(threading.Thread):
         return {'peak_machine_gb': self.peak_machine / 1024,
                 'baseline_machine_gb': self.baseline_machine / 1024,
                 'peak_session_pss_gb': self.peak_pss / 1024,
-                'samples': self.samples, 'interval_s': self.interval}
+                'samples': self.samples, 'interval_s': self.interval, 'first_interval_s': self.first}
 
 
 def label(config):
