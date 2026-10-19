@@ -77,15 +77,16 @@ class MemorySampler(threading.Thread):
     table's, and includes a host baseline of about 5 GB that moves by half a GB between runs, so
     it is kept as a cross-check (peak minus baseline agreed with the PSS within 0.3 GB on the test).
 
-    The first sample is taken at once and the interval doubles from `first` up to `interval`: an
-    ADULT run lasts about two seconds, and a fixed second gave it a single sample, while reading
-    smaps_rollup ten times a second on the 20 GB processes of IPUMS would cost the run itself.
-    Linux only.
+    The first sample is taken at once, then one every `first` seconds for the first `fast` seconds
+    and one every `interval` after that: an ADULT run lasts one to four seconds, and a fixed second
+    gave it a single sample, while reading smaps_rollup ten times a second on the 20 GB processes of
+    IPUMS would cost the run itself. Those processes only grow after the first seconds, when the
+    sampling has already slowed down. Linux only.
     """
 
-    def __init__(self, session, interval=1.0, first=0.1):
+    def __init__(self, session, interval=1.0, first=0.1, fast=10.0):
         super().__init__(daemon=True)
-        self.session, self.interval, self.first = session, interval, first
+        self.session, self.interval, self.first, self.fast = session, interval, first, fast
         self.finished = threading.Event()
         self.baseline_machine = machine_mb()
         self.peak_machine = self.peak_pss = 0.0
@@ -97,11 +98,11 @@ class MemorySampler(threading.Thread):
         self.samples += 1
 
     def run(self):
-        wait = self.first
+        started = time.monotonic()
         self.sample()
-        while not self.finished.wait(wait):
+        while not self.finished.wait(self.first if time.monotonic() - started < self.fast
+                                     else self.interval):
             self.sample()
-            wait = min(2 * wait, self.interval)
 
     def result(self):
         self.finished.set()
@@ -109,7 +110,8 @@ class MemorySampler(threading.Thread):
         return {'peak_machine_gb': self.peak_machine / 1024,
                 'baseline_machine_gb': self.baseline_machine / 1024,
                 'peak_session_pss_gb': self.peak_pss / 1024,
-                'samples': self.samples, 'interval_s': self.interval, 'first_interval_s': self.first}
+                'samples': self.samples, 'interval_s': self.interval, 'first_interval_s': self.first,
+                'fast_s': self.fast}
 
 
 def label(config):
