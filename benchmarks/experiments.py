@@ -128,6 +128,28 @@ def exp6():
     return runs
 
 
+# The rows of tab:structures in the paper: each dataset's best split, its declaration and its last
+# merge (docs/figures/fig_structures.py prints the whole family).
+EXP6_TABLE = {'ipums_1940': ('das_s2', 'das_s1', 'das', 'das_m1'),
+              'sinasc': ('blocks_s1', 'blocks', 'blocks_m4'),
+              'spanish_census': ('blocks_s1', 'blocks', 'blocks_m4'),
+              'adult': ('blocks_s1', 'blocks', 'blocks_m3')}
+
+
+def exp6_memory():
+    """The rows of tab:structures again, only to measure the peak memory of the whole run.
+
+    exp6 recorded memory as runner.peak_memory_mb(): the main process plus the LARGEST single
+    worker (RUSAGE_CHILDREN is a max, not a sum), a lower bound with 20 workers alive at once, and
+    not the instrument of the DAS table. The `memory` flag makes the orchestrator sample the run's
+    whole process tree from outside it and skip the metrics, since utility and time are already
+    recorded by exp6. It also gives these runs their own names, and `select` in the figures refuses
+    them unless asked, so they never enter a utility median.
+    """
+    return [(dataset, marginal(dataset, structure=structure, memory=1))
+            for dataset, structures in EXP6_TABLE.items() for structure in structures]
+
+
 def exp7():
     """Global rounding MIP vs the junction-tree sweep."""
     return [(dataset, marginal(dataset, rounding=rounding)) for dataset in DATASETS
@@ -136,4 +158,4 @@ def exp7():
 
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
                'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': exp4,
-               'exp5': reference, 'exp6': exp6, 'exp7': exp7}
+               'exp5': reference, 'exp6': exp6, 'exp6_memory': exp6_memory, 'exp7': exp7}

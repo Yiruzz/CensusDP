@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -29,6 +30,74 @@ from benchmarks.experiments import EXPERIMENTS
 
 NAMED = ('full_joint', 'structure', 'rho', 'composition', 'rounding')
 METRIC_FLAGS = ('triples',)
+# Read by the orchestrator itself, never passed to the driver or the metrics.
+ORCHESTRATOR_FLAGS = ('memory',)
+
+
+def machine_mb():
+    """MemTotal - MemAvailable in MB: the machine-wide instrument of benchmarks/ipums_1940/campaign.sh."""
+    values = {}
+    with open('/proc/meminfo', encoding='ascii') as handle:
+        for line in handle:
+            key, value = line.split(':', 1)
+            values[key] = int(value.split()[0])
+    return (values['MemTotal'] - values['MemAvailable']) / 1024
+
+
+def session_pss_mb(session):
+    """Sum of Pss + SwapPss in MB over every process of a session.
+
+    PSS charges each shared page to the processes mapping it in equal parts, so the copy-on-write
+    pages the forked workers share with the main process are counted once, where a sum of RSS
+    would count them once per worker. SwapPss keeps the swapped pages, which RSS hides.
+    """
+    total = 0
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f'/proc/{entry}/stat', encoding='ascii', errors='replace') as handle:
+                # After the parenthesised command name: state ppid pgrp session ...
+                if int(handle.read().rsplit(')', 1)[1].split()[3]) != session:
+                    continue
+            with open(f'/proc/{entry}/smaps_rollup', encoding='ascii') as handle:
+                for line in handle:
+                    if line.startswith(('Pss:', 'SwapPss:')):
+                        total += int(line.split()[1])
+        except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError, ValueError):
+            continue  # the process ended between the listing and the read
+    return total / 1024
+
+
+class MemorySampler(threading.Thread):
+    """Peak memory of a running process tree, sampled from outside it once per `interval`.
+
+    Records both instruments: the machine-wide one, so the structures table reports the same
+    quantity as the DAS table, and the PSS of the run's own session as a cross-check that does not
+    depend on what else the host holds. Linux only.
+    """
+
+    def __init__(self, session, interval=1.0):
+        super().__init__(daemon=True)
+        self.session, self.interval = session, interval
+        self.finished = threading.Event()
+        self.baseline_machine = machine_mb()
+        self.peak_machine = self.peak_pss = 0.0
+        self.samples = 0
+
+    def run(self):
+        while not self.finished.wait(self.interval):
+            self.peak_machine = max(self.peak_machine, machine_mb())
+            self.peak_pss = max(self.peak_pss, session_pss_mb(self.session))
+            self.samples += 1
+
+    def result(self):
+        self.finished.set()
+        self.join()
+        return {'peak_machine_gb': self.peak_machine / 1024,
+                'baseline_machine_gb': self.baseline_machine / 1024,
+                'peak_session_pss_gb': self.peak_pss / 1024,
+                'samples': self.samples, 'interval_s': self.interval}
 
 
 def label(config):
@@ -60,12 +129,20 @@ def recorded(path):
     return status
 
 
-def call(command, log, timeout=None):
-    """Run a command with its output appended to log. Returns its exit code, or 'timeout'."""
+def call(command, log, timeout=None, memory=None):
+    """Run a command with its output appended to log. Returns its exit code, or 'timeout'.
+
+    With `memory` (a dict), the run's process tree is sampled while it runs and the peaks are
+    written into it. The process is started in a session of its own, so its session id is its pid.
+    """
     with open(log, 'a', encoding='utf-8') as handle:
         process = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT,
                                    env={**os.environ, 'PYTHONUNBUFFERED': '1'},
                                    start_new_session=True)
+        sampler = None
+        if memory is not None:
+            sampler = MemorySampler(process.pid)
+            sampler.start()
         try:
             code = process.wait(timeout=timeout)
         except BaseException as stop:  # timeout, Ctrl+C or kill: take the workers down too
@@ -78,6 +155,8 @@ def call(command, log, timeout=None):
                 raise
             code = 'timeout'
         finally:
+            if sampler is not None:
+                memory.update(sampler.result())
             # A killed run leaves its spill behind (DataHandler.initialize_directories).
             for kind in ('spill', 'microdata'):
                 shutil.rmtree(common.DATA / 'data_cache' / f'topdown_{kind}_{process.pid}',
@@ -91,19 +170,25 @@ def run(dataset, config, name, rep, args):
              for suffix in ('.json', '_metrics.json', '.log', '.csv')}
     for path in files.values():
         path.unlink(missing_ok=True)  # nothing stale from an earlier attempt
-    driver = {key: value for key, value in config.items() if key not in METRIC_FLAGS}
+    driver = {key: value for key, value in config.items()
+              if key not in METRIC_FLAGS and key not in ORCHESTRATOR_FLAGS}
     metrics = {key: value for key, value in config.items() if key in METRIC_FLAGS}
     command = [sys.executable, '-m', f'benchmarks.{dataset}.driver', '--name', name,
                '--workers', str(args.workers)] + flags(driver)
     if args.sample:
         command.append('--sample')
-    code = call(command, files['.log'], args.timeout and args.timeout * 3600)
+    memory = {} if config.get('memory') else None
+    code = call(command, files['.log'], args.timeout and args.timeout * 3600, memory)
 
     row = {'name': name, 'rep': rep, 'config': config, 'status': 'error'}
     if files['.json'].exists():
         row.update(json.loads(files['.json'].read_text(encoding='utf-8')))
+    if memory is not None:
+        row['memory_sampled'] = memory
     if code != 0:
         row.update(status='timeout' if code == 'timeout' else 'error', returncode=code)
+    elif memory is not None:
+        row['status'] = 'ok'  # utility is not recomputed: exp6 already holds it
     else:
         code = call([sys.executable, '-m', 'benchmarks.metrics', dataset, name] + flags(metrics),
                     files['.log'])
