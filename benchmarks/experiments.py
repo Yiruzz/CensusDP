@@ -132,7 +132,7 @@ def exp6():
 # merge (docs/figures/fig_structures.py prints the whole family).
 EXP6_TABLE = {'ipums_1940': ('das_s2', 'das_s1', 'das', 'das_m1'),
               'sinasc': ('blocks_s1', 'blocks', 'blocks_m4'),
-              'spanish_census': ('blocks_s1', 'blocks', 'blocks_m4'),
+              'spanish_census': ('blocks_s3', 'blocks', 'blocks_m4'),
               'adult': ('blocks_s1', 'blocks', 'blocks_m3')}
 
 
