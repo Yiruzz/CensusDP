@@ -64,8 +64,11 @@ run_one() {
   drop "$csv" "$OUT/${name}_5col.csv"
 
   t0="$(date +%s)"; peak=0; local n=0; set -- $(jiffies); jb=$1; jt=$2
+  # sample_memory runs the driver in a session of its own and writes its PSS peak, the instrument
+  # of the structures table, to $name.memory.json. The loop below keeps the machine-wide one.
   # shellcheck disable=SC2086
-  timeout "$RUN_TIMEOUT" python -m benchmarks.ipums_1940.driver $args \
+  python -m benchmarks.sample_memory "$CAMP/$name.memory.json" -- \
+      timeout "$RUN_TIMEOUT" python -m benchmarks.ipums_1940.driver $args \
       --workers "$WORKERS" --name "$name" > "$CAMP/$name.log" 2>&1 &
   pid=$!
   base="$(meminfo_mb)"; peak_init=0; peak_est=0; peak_merge=0; pooled=0
@@ -92,6 +95,7 @@ run_one() {
   five=none
   if [ "$status" -eq 0 ]; then
     say "    done in ${elapsed}s, peak rss ${peak}M, $(printf %.1f "$cores") of $CORES cores busy on average"
+    say "    session: $(cat "$CAMP/$name.memory.json" 2>/dev/null)"
     five="$(python -m benchmarks.ipums_1940.score_five "$name" 2>>"$LOG")" || five=none
     if [ "$five" != none ]; then
       python -m benchmarks.metrics ipums_1940 "$five" 2>&1 | tee -a "$LOG" | tail -5
@@ -101,8 +105,8 @@ run_one() {
   fi
   drop "$csv" "$OUT/${name}_5col.csv"
 
-  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "peak_initialize_gb": %.2f, "peak_estimation_gb": %.2f, "peak_merge_gb": %.2f, "baseline_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json"}\n' \
-    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$(awk "BEGIN{print $peak_init/1024}")" "$(awk "BEGIN{print $peak_est/1024}")" "$(awk "BEGIN{print $peak_merge/1024}")" "$(awk "BEGIN{print $base/1024}")" "$cores" "$CORES" "$n" "$name" "$five" \
+  printf '{"name": "%s", "status": %d, "wall_seconds": %d, "peak_rss_gb": %.2f, "peak_initialize_gb": %.2f, "peak_estimation_gb": %.2f, "peak_merge_gb": %.2f, "baseline_rss_gb": %.2f, "mean_cores_busy": %.2f, "host_cores": %d, "rss_samples": %d, "run_record": "%s.json", "metrics": "%s_metrics.json", "memory": "%s.memory.json"}\n' \
+    "$name" "$status" "$elapsed" "$(awk "BEGIN{print $peak/1024}")" "$(awk "BEGIN{print $peak_init/1024}")" "$(awk "BEGIN{print $peak_est/1024}")" "$(awk "BEGIN{print $peak_merge/1024}")" "$(awk "BEGIN{print $base/1024}")" "$cores" "$CORES" "$n" "$name" "$five" "$name" \
     > "$CAMP/$name.campaign.json"
 }
 
