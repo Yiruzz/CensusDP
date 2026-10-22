@@ -177,21 +177,44 @@ extrapolate before committing the server (`RUNNING_1940.md` §5).
 2. The neighbouring relation is already aligned: TopDown uses bounded DP (sensitivity × 2), like
    the DAS.
 3. The per-query proportions: ours measures one workload per level with one ε.
-4. The invariants: the DAS holds state and enumeration-district counts; ours holds the total at
-   the two top levels.
+4. The invariants: the DAS holds the state totals and, per enumeration district, the occupied
+   households and group quarters of each type. Settled: `--unit-bounds` reproduces them, after
+   `python -m benchmarks.ipums_1940.prepare --units --full` has written the unit counts once.
 
-How to settle 3 and 4 goes in the decisions table. Then:
+How 3 and 4 were settled is in the decisions table. Both arms run through the campaign script,
+which also measures time and machine-wide memory:
 
 ```bash
-python -m benchmarks.orchestrate exp1 exp2 --reps 5 --timeout 24 2>&1 | tee -a data/out/orchestrate.log
+bash benchmarks/ipums_1940/campaign.sh
 ```
 
 - **Experiment 1:** utility at the DAS configuration: ours full-joint against the DAS, TVD per
   level and L1 of the DAS queries (`marginals.WORKLOAD`).
-- **Experiment 2:** time, memory and width against the number of columns (1 to 6), ours full-joint
-  and marginal (`das` structure). The DAS schema is fixed, so the DAS is one point at 6 columns.
+- **Experiment 2, performance:** time and memory of the three systems on IPUMS 1940 (Table 3).
+  Its scaling sweep moved to ESCENSUS, step 1.3.
 - **Results:** ours in `data/out/ipums_1940/runs.jsonl`; the DAS in `~/das/out/*`, evaluated into
   `data/out/ipums_1940/das_*_metrics.json`.
+
+### Step 1.3 — Scaling with the number of attributes (experiment 2): 100 runs
+
+Width, time and peak memory (session PSS) against the first d of the 78 ESCENSUS columns, both
+pipelines, at the Part 2 configuration (ρ = 1, sqrt, 20 workers, `BarConvTol` 1e-12): the sweep is
+not compared with the DAS. IPUMS 1940 cannot show it, since its full joint over 6 attributes is
+44,544 cells and never breaks.
+
+```bash
+unset BAR_CONV_TOL
+python -m benchmarks.orchestrate exp2 --reps 5 --timeout 4 2>&1 | tee -a data/out/orchestrate.log
+```
+
+- **Marginal:** d ∈ {2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 78}, each declared bag cut to the
+  kept columns. d = 78 is the `blocks` row of `exp6_memory` and is skipped as recorded.
+- **Full-joint:** d = 2 … 8. The joint is 7.4·10⁶ cells at d = 6 (502 s on the laptop sample with
+  4 workers), 1.5·10⁹ at d = 7 (12 GB per dense vector) and 8.5·10¹⁰ at d = 8, where one vector
+  alone exceeds the server's RAM. Running out of memory is the expected result: the run is
+  recorded as `error` (or `timeout`) with its sampled memory peak, and the figure draws the width
+  of every larger d as computed, not run.
+- No metrics: the TVD of different attribute sets is not comparable, and the `memory` flag skips them.
 
 ---
 
@@ -224,7 +247,7 @@ python -m benchmarks.orchestrate exp3_budget --reps 5 --timeout 12 2>&1 | tee -a
 Round 1 is one run of every ρ on every dataset, then round 2, and so on. Write the chosen ρ in
 the decisions table and in `RHO` in `experiments.py`.
 
-### Step 2.3 — Experiments 4, 5 and 7: 25 runs
+### Step 2.3 — Experiments 4, 5 and 7: 50 runs
 
 The reference run of each dataset (its default structure, `RHO`, `COMPOSITION`, sweep) is already
 in step 2.2, and every experiment below reuses it:
@@ -233,8 +256,13 @@ in step 2.2, and every experiment below reuses it:
 python -m benchmarks.orchestrate exp4 exp5 exp7 --reps 5 --timeout 12 2>&1 | tee -a data/out/orchestrate.log
 ```
 
-- **Experiment 4** (3-way TVD by granularity) and **5** (utility by marginal coverage, MI
-  heatmap) run nothing: they read `levels` and `<name>_metrics.json` of the reference run.
+- **Experiment 4** (3-way TVD by granularity) reruns the reference configuration with
+  `triples=100` (25 runs, named `..._sweep_triples100_rN`): `benchmarks.metrics` then evaluates
+  every triple contained in a bag plus up to 100 of the rest per number of measured pairs (0, 1,
+  2). It has to rerun because the synthetic CSV of the reference runs is already deleted. The key
+  goes to the metrics, not the driver, so the runs are otherwise identical to the reference.
+- **Experiment 5** (utility by marginal coverage, MI heatmap) runs nothing: it reads `levels` and
+  `<name>_metrics.json` of the reference run.
 - **Experiment 6** (marginal size) has its own step, 2.5, with a generated family of structures.
 - **Experiment 7** (global MIP against the sweep): 5 new configurations. The MIP may not finish at
   full depth; a `timeout` in round 1 is itself the result, so drop that configuration from
@@ -286,14 +314,14 @@ Fill in as the steps finish. The values that change runs also go in `experiments
 | Part 1 budget | the DAS configuration above | `ipums_1940.ini`, `strategies_1940.py` | 2026-09-14 |
 | Neighbouring relation, both parts | bounded DP: every sensitivity × 2 (`TopDown.bounded_dp_factor`), like the DAS | DAS `programs/engine/primitives.py` | 2026-09-14 |
 | Part 1: ours, per-query proportions | the DAS's own `.2 .5 .05 .05 .05 .05 .1`, via `--workload das` + `set_query_budget` | step 1.1: `queriesprop` in `ipums_1940.ini` | 2026-09-29 |
-| Part 1: invariants of ours | exact total at levels 0 and 1 only; the DAS also holds state totals and per-enumdist household/GQ counts, so it gets **more** free information than we do | step 1.2 | 2026-09-29 |
+| Part 1: invariants of ours | the DAS's: exact totals of the nation and the states, plus `hhgq_total_lb/ub` from the per-enumdist unit counts (`--unit-bounds`) | step 1.2 | 2026-10-01 |
 | Part 1: budget axis of experiment 1 (ε = 4 only, or scaled) | _open_ | | |
 | Part 1: DAS national, or state by state | _open_ | | |
 | Part 1: `citizen`, not written by the DAS | score both sides over the five columns its MDF publishes (`score_five.py`); `citizen` is measured by neither | step 1.2 | 2026-09-29 |
 | Part 1: DAS repetitions | 5 (reps 2-6 timed; rep1 utility only), and 5 per arm of ours | step 1.1 | 2026-09-29 |
 | Part 2 composition (`COMPOSITION`) | `sqrt` | step 2.1 below: best leaf TVD on 4 of 5 datasets, and better than `exponential` on all 5 | 2026-09-22 |
 | Part 2 budget (`RHO`) | `1` | step 2.2 below: no budget wins on utility, so this is the operating point of experiments 4 to 7, not a privacy claim; the sweep is the result | 2026-09-23 |
-| Experiment 4: split contained and other triples | _open_ | | |
+| Experiment 4: split contained and other triples | every contained triple, plus up to 100 of the rest per number of measured pairs (0, 1, 2), weighted by stratum size; own runs with `triples=100` | step 2.3 below: the uniform sample of 100 reached 0 contained triples on Chile and Spain | 2026-10-04 |
 | Experiment 6: which structures to compare | the family generated from each declaration (`structures.py`), Chile excluded | step 2.5 below | 2026-09-30 |
 
 ### Step 1.1 — DAS
@@ -378,66 +406,145 @@ evicted was cold and never faulted in again.
 
 ### Step 1.2 — ours with the DAS configuration
 
-Ten national runs, 5 per arm, 20 workers, all `ok` (`benchmarks/ipums_1940/campaign.sh`). The arms
-differ in the measurement structure and nothing else — same epsilon, same per-level split, same
-bounded DP, both pure DP:
+Ten national runs, 5 per arm, 20 workers, all `ok` (`benchmarks/ipums_1940/campaign.sh`), on the
+same host as the DAS. Since 2026-10-01 both arms also hold the DAS's invariants (`--unit-bounds`,
+below), so the arms differ in the measurement structure and nothing else — same epsilon, same
+per-level split, same bounded DP, same invariants, both pure DP:
 
 ```
-fj:  --full-joint --workload das --epsilon 4 --composition uniform
-mg:  --structure das --epsilon 4 --rounding mip --composition uniform
+fj:  --full-joint --workload das --epsilon 4 --composition uniform --unit-bounds
+mg:  --structure das --epsilon 4 --rounding mip --composition uniform --unit-bounds
 ```
+
+The ten runs without the unit bounds (2026-09-27) are kept locally in
+`data/out/ipums_1940/exp1_sin_unidades/` and summarised in the box at the end of this step.
 
 **Cost**, median of 5, on the same host as the DAS:
 
 | | DAS | ours full-joint | ours marginal |
 |---|---|---|---|
-| wall, median | 270.5 min | **65.4 min** | **29.4 min** |
-| speedup vs DAS | 1.0x | **4.1x** | **9.2x** |
-| min-max | 16,140-16,310 s (1.05%) | 3,884-3,944 s (1.5%) | 1,761-1,782 s (1.2%) |
-| peak memory | 214.9 GB | 59.9 GB | 22.3 GB |
-| net of the host baseline | — | 53.1 GB | 15.2 GB |
-| times less than the DAS | — | **3.6x** (4.0x net) | **9.6x** (14.2x net) |
+| wall, median | 270.5 min | **63.4 min** | **30.0 min** |
+| speedup vs DAS | 1.0x | **4.3x** | **9.0x** |
+| min-max | 16,140-16,310 s (1.05%) | 3,782-3,823 s (1.1%) | 1,802 s, all five |
+| peak memory | 214.9 GB | 76.0 GB (72.8-80.2) | 22.8 GB (22.0-23.1) |
+| net of the host baseline | — | 70.4 GB | 17.4 GB |
+| times less than the DAS | — | **2.8x** (3.1x net) | **9.4x** (12.4x net) |
 | did it page? | yes, 176 GiB out | no | no |
-| cores busy of 24 | — | 18.4 | 16.9 |
+| cores busy of 24 | — | 18.3 | 16.8 |
 | width | 44,544 | 44,544 | 4,640 |
 | sensitivity | 14 | 14 | 4 |
+
+`wall_seconds` is quantised to the 20 s sampling period of `campaign.sh`, which is why the marginal
+arm reads 1,802 s five times; its estimation phase in the run records is 1,522-1,530 s.
 
 **Utility**, 2-way TVD over the five columns the DAS MDF publishes (`citizen` is written by neither),
 median of 5 each:
 
 | level | nodes | DAS | ours full-joint | fj / DAS | ours marginal | mg / DAS |
 |---|---|---|---|---|---|---|
-| national | 1 | 0.000643 | 0.000068 | **0.11** | 0.000266 | **0.41** |
-| STATEFIP | 51 | 0.004323 | 0.001933 | **0.45** | 0.001625 | **0.38** |
-| COUNTY | 3,108 | 0.025564 | 0.026026 | 1.02 | 0.023803 | **0.93** |
-| SUPDIST | 3,205 | 0.025157 | 0.025614 | 1.02 | 0.023473 | **0.93** |
-| ENUMDIST | 152,009 | 0.178726 | 0.183567 | 1.03 | 0.159334 | **0.89** |
+| national | 1 | 0.000643 | 0.000067 | **0.10** | 0.000239 | **0.37** |
+| STATEFIP | 51 | 0.004323 | 0.001925 | **0.45** | 0.001474 | **0.34** |
+| COUNTY | 3,108 | 0.025564 | 0.025352 | 0.99 | 0.019973 | **0.78** |
+| SUPDIST | 3,205 | 0.025157 | 0.024955 | 0.99 | 0.019720 | **0.78** |
+| ENUMDIST | 152,009 | 0.178726 | 0.178259 | 1.00 | 0.147493 | **0.83** |
 
 L1 on the DAS's own seven query groups:
 
 | level | DAS | ours full-joint | fj / DAS | ours marginal | mg / DAS |
 |---|---|---|---|---|---|
-| national | 7,196.0 | 3,645.0 | 0.51 | 2,014.0 | **0.28** |
-| STATEFIP | 2,816.7 | 2,694.9 | 0.96 | 1,447.2 | **0.51** |
-| COUNTY | 1,457.0 | 1,469.7 | 1.01 | 739.0 | **0.51** |
-| SUPDIST | 1,455.9 | 1,470.0 | 1.01 | 735.4 | **0.51** |
-| ENUMDIST | 381.7 | 386.0 | 1.01 | 296.3 | **0.78** |
+| national | 7,196.0 | 4,037.0 | 0.56 | 2,017.0 | **0.28** |
+| STATEFIP | 2,816.7 | 2,721.9 | 0.97 | 1,408.0 | **0.50** |
+| COUNTY | 1,457.0 | 1,458.5 | 1.00 | 633.2 | **0.43** |
+| SUPDIST | 1,455.9 | 1,459.2 | 1.00 | 629.1 | **0.43** |
+| ENUMDIST | 381.7 | 381.8 | 1.00 | 280.2 | **0.73** |
 
-**The full-joint arm is the controlled replication and it reaches parity**: within 3% of the DAS at
-County, Supdist and Enumdist, which are the levels where both solve the same problem over the same
-44,544-cell histogram. That is the number that says this implementation of TopDown is faithful, and
-it only became true with the generalised-least-squares fix (see the box below).
+**The full-joint arm is the controlled replication, and with the same invariants it reaches parity
+below the states**: 0.99-1.00x at County, Supdist and Enumdist, with disjoint ranges against the
+DAS in our favour, and the same L1 on the Bureau's queries (381.8 against 381.7 at the leaves).
 
 **The marginal arm is the result.** Measuring two bags instead of seven query groups over the full
-joint, at the same epsilon = 4, it is better at every level — 0.89x at the leaves, where the released
-microdata actually lives — while being 9.2x faster and needing at least 9.6x less memory. It halves
-the L1 on the Bureau's own queries at three of the five levels.
+joint, at the same epsilon = 4 and the same invariants, it is better at every level — 0.83x at the
+leaves, where the released microdata actually lives — while being 9.0x faster and needing 9.4x less
+memory. It halves the L1 on the Bureau's own queries, or better, at four of the five levels.
 
-**What is NOT established: why we are 9x better at national and 2.2x at STATEFIP.** The budget is
-matched, so the cause is the estimator or the invariants, and the invariants run the wrong way (the
-DAS holds more free information than we do). Do not claim a cause in the paper. The measurement that
-would narrow it is to split `metrics.py`'s per-pair TVD on whether the pair involves `hhgq`, which
-isolates the effect of `theinvariants.enumdist` and `hhgq_total_lb/ub`.
+**What the unit bounds changed.** DAS / ours over the pairs with and without `hhgq`:
+
+| | COUNTY | SUPDIST | ENUMDIST |
+|---|---|---|---|
+| fj, pairs with `hhgq`, before | 0.919 | 0.919 | 0.883 |
+| fj, pairs with `hhgq`, **now** | **1.005** | **1.006** | **1.004** |
+| fj, pairs without `hhgq`, before -> now | 1.006 -> 1.008 | 1.006 -> 1.008 | 1.007 -> 1.002 |
+
+The DAS's 2-3% lead at the fine levels was entirely in the pairs with `hhgq`, and it closed when ours
+got the same invariants; the other pairs did not move. Per pair at Enumdist, `hhgq x sex` 0.06014
+against the DAS's 0.06008, `hhgq x race` 0.04780 against 0.04850. The marginal arm gained more —
+Enumdist 0.1593 -> 0.1475, County 0.0238 -> 0.0200, disjoint at every level — mostly in the `hhgq`
+pairs its two bags split apart (`hhgq x hispanic` 0.0604 -> 0.0234).
+
+The price is memory in the full-joint arm, 59.9 -> 76.0 GB (+27%); the marginal arm goes 22.3 ->
+22.8 GB and neither arm got slower. Every active cell now sits in one upper-bound row of its type and,
+for a group-quarters type, in one lower-bound row, which at the leaves adds about 1.5x the nonzeros
+of the geographic rows (measured on the true supports). Most of them are redundant — the upper rows
+where the child has units of that type (`units x 99999`) and the lower rows where it has none
+(`>= 0`) — and a third of the leaf variables exist only to be pinned at zero, because the pruning
+gives every child its parent's support. Dropping the redundant rows, or giving each child its own
+support, would recover it; neither is implemented (decided 2026-10-01).
+
+**The DAS's invariants, and how ours reproduces them.** `theinvariants.enumdist = gqhh_vect,
+gqhh_tot` publishes the occupied households and group-quarters facilities of each type per
+enumeration district, read from the H records; `hhgq_total_lb/ub` (`querybase_constraints.py:123`)
+turns them into persons of type g >= units of type g for every group-quarters type, and <= units x
+99999, i.e. none at all where there is no such unit. The DAS computes them at the enumeration
+districts and sums them upwards (`nodes.py`, `addInReduce`), recomputing at the states with the
+exact total and keeping the stricter. Ours: `prepare.py --units` writes the unit counts with the same
+recode as the persons, `ipums_1940/constraints.py::unit_bounds` builds one `SumBoundOfNode` per type
+and sense, and `--unit-bounds` registers them at every level. What the DAS adds at the states (<=
+total minus the minimum of the other types; = total when a type is alone) is implied by the exact
+state total plus the lower bounds, so the feasible sets are identical everywhere except one national
+bound: summing the state bounds excludes the population of states with no facility of a type, which
+happens for types 2, 4 and 5 (in 2, 3 and 15 states). That bound is 308x, 711x and 12,727x above the
+true count, so it never binds. On the full data the true counts satisfy the bounds at every level
+(no violation, server, 2026-10-01). On the Alaska sample a release without them puts persons in 380
+enumeration-district x type combinations with no facility of that type.
+
+**Why we are better above the states, first half: the solver tolerance.** The DAS solves every model at
+`BarConvTol` 1e-8 (`configs/default.ini`, read at `optimization/optimizer.py:340`); ours sets 1e-12
+(`optimizers.DEFAULT_SOLVER_OPTIONS`, a correctness default, see `CLAUDE.md`). The national node
+solved alone, same noise, weights and constraints, median of 5 seeds: at 1e-8 the mean 2-way TVD is
+0.000187 and the support 44,536 of 44,544 cells; at 1e-12, 0.000070 and 9,746, against a true
+support of 15,633. On the server, the full-joint arm rerun at the DAS's tolerance, 5 replicates
+with the unit bounds (`BAR_CONV_TOL=1e-8 ARMS=fj TAG=1e8 bash benchmarks/ipums_1940/campaign.sh`,
+`ours_fj1e8_rep1..5`, 2026-10-03), reproduces the DAS on the six pairs without `hispanic` at every
+level, 0.96 / 0.99 / 1.00 / 1.00 / 1.00x from the root down, and its workload L1 is 7,250 against
+7,196 at the root and 2,773 against 2,817 at the states. Over all ten pairs it is 0.27x at the root
+and 0.47x at the states; the rest is `hispanic`, below. Cost: 3,903 s (3,902-3,923) and 83.1 GB, 3%
+and 9% above the same arm at 1e-12. **This is the full-joint arm the paper reports**
+(`docs/figures/campaign.py::FULL_JOINT`), so that it replicates the DAS; the tables above are the same
+arm at our 1e-12. `BAR_CONV_TOL` in the environment sets it (`benchmarks/common.py`).
+
+**`hispanic`: a defect in the DAS's reader, not in its algorithm** (found 2026-10-04, full write-up
+in `das1940/HANDOFF.md` §5.18). The four pairs with `hispanic` sit at 0.00127-0.00130 at the root in
+every DAS run, against 30-60% spread run to run on the other pairs. The reader keeps IPUMS `RACE` as
+1..6 in an axis declared 0..5, and the histogram index is computed by `nprmiSQLString`
+(`programs/reader/sql_spar_table.py:47`), a ravel_multi_index in SQL with no range check. Race comes
+right after `hispanic` in the histogram, so race 6, Other Asian or Pacific Islander, carries into it:
+those persons land in race index 0 with `hispanic` inverted, and the Hispanic ones also one year
+older. What looked like a rotation of the race axis is the whole histogram shifted by two cells.
+From the truth, 168,885 non-Hispanic minus 4,509 Hispanic Other Asian/PI gives **164,376 Hispanics
+too many (+7.46%)**, a TVD of 0.00124 in each `hispanic` pair at the root by itself. The releases left
+on the server confirm it: `CENRACE 01` with `CENHISP 2` holds 646 in Oregon and 404 in Alaska, against
+558 and 406 non-Hispanic Other Asian/PI in the truth; a rotation would have put them under
+`CENHISP 1`. `das_release.py` undoes the race labels but not the carry. **Not corrected, by
+decision** (2026-10-04): it is the release's implementation, the comparison reports the DAS as it
+runs, and the paper describes the defect with a `% TODO` to settle with the advisors. Correcting it
+would need the national releases, which are deleted after scoring, so it means rerunning the DAS
+with the exact inverse in `das_release.py`.
+
+> **Before the unit bounds** (2026-09-27, `exp1_sin_unidades/`). Cost: full-joint 65.4 min (4.1x),
+> 59.9 GB; marginal 29.4 min (9.2x), 22.3 GB. 2-way TVD national / STATEFIP / COUNTY / SUPDIST /
+> ENUMDIST: full-joint 0.000068 / 0.001933 / 0.026026 / 0.025614 / 0.183567 (1.02-1.03x the DAS
+> below the states); marginal 0.000266 / 0.001625 / 0.023803 / 0.023473 / 0.159334 (0.89x at the
+> leaves). L1 at the leaves: full-joint 386.0, marginal 296.3.
 
 > **The generalised-least-squares fix, `6f53051`.** Before it, the full-joint arm was at **2x** the
 > DAS's TVD at County, Supdist and Enumdist (0.0527 / 0.0517 / 0.2887 against 0.0256 / 0.0251 /
@@ -450,13 +557,6 @@ isolates the effect of `theinvariants.enumdist` and `hhgq_total_lb/ub`.
 > rho)); hardcoding the square would have squared the weight spread again under zCDP. Reproduced on
 > two machines: a 12-worker laptop run gave 0.000069 / 0.001925 / 0.026039 / 0.025645 / 0.183594
 > against the server's median of 5 at 0.000068 / 0.001933 / 0.026026 / 0.025614 / 0.183567.
-
-> **Three things in the paper draft are now stale.** (1) The marginal arm no longer needs zCDP:
-> `main.tex` says it "relies on zCDP, so it cannot be run with pure DP" and uses rho = 0.160 for
-> (4, 1e-10)-DP, with a guarantee "weaker by delta". It now runs pure epsilon = 4, so that caveat
-> goes and the comparison is delta-free. (2) "each of our implementations once" — it is five each.
-> (3) `tab:das-performance` carries 28.2? and 4.1? for memory and 120.0 for the DAS; the numbers are
-> 59.9, 22.3 and 214.9.
 
 ### Step 2.1 — composition
 
@@ -651,15 +751,70 @@ for 0.2-2.4% of TVD.
 > change, at 1,200 s; the limit never bound for them (3 s, 155 s, 1,959 s), so those runs are
 > equivalent, but `runs.jsonl` records two different `solver_options` for the same configuration.
 
-**Experiments 4 and 5** ran nothing of their own, as designed: their 25 configurations are the
-reference runs, already `ok`. Experiment 4 reads `levels` (3-way TVD per level), which is in
-`runs.jsonl`. Experiment 5 reads `<name>_metrics.json` (every pair with its U in both files), which
+**Experiment 4 (3-way TVD by how many pairs of a triple are measured).** The first version read
+the reference runs, whose 100 triples were drawn uniformly. Almost no triple is inside a bag, so
+the "contained" curve rested on 5 triples on IPUMS, 5 on SINASC, 4 on adult and **none** on Chile
+or Spain. Redesigned on 2026-10-04: every contained triple is evaluated, and the rest are sampled
+up to 100 per stratum of measured pairs, with a fixed seed and each triple weighted by its stratum
+size, so `tvd3` and `tvd3_other` still estimate the mean over all triples. No dataset has a
+non-contained triple with all three pairs measured, so the strata are clean:
+
+| dataset | triples | contained | 2 pairs | 1 pair | 0 pairs |
+|---|---|---|---|---|---|
+| ipums_1940 | 20 | 5 | 6 | 9 | - |
+| chilean_census | 2,925 | 14 | 87 | 709 | 2,115 |
+| spanish_census | 76,076 | 87 | 333 | 9,561 | 66,095 |
+| sinasc | 1,140 | 29 | 72 | 489 | 550 |
+| adult | 364 | 10 | 53 | 116 | 185 |
+
+25 runs (5 datasets x 5 rounds) of the reference configuration with `triples=100`, rho = 1,
+`sqrt`, sweep, 20 workers, all `ok`. Copied from the server as `runs_exp4.jsonl` and appended to
+each `runs.jsonl` locally. The rerun reproduces the reference runs: leaf 2-way TVD within 0.25%
+on every dataset. The stratified metrics cost little: 1 s to 399 s per run, against 1 s to 227 s.
+3-way TVD, median of 5, at the root and at the leaves:
+
+| dataset | level | contained | 2 pairs | 1 pair | 0 pairs |
+|---|---|---|---|---|---|
+| ipums_1940 | national | 0.00012 | 0.00119 | 0.00191 | - |
+| | ENUMDIST | 0.12314 | 0.16021 | **0.05784** | - |
+| chilean_census | national | 0.00583 | 0.03746 | 0.04273 | 0.07117 |
+| | ZC_LOC | 0.47103 | 0.43993 | 0.33690 | **0.33256** |
+| spanish_census | national | 0.00136 | 0.02527 | 0.06282 | 0.08730 |
+| | CMUN | **0.05151** | 0.08093 | 0.12244 | 0.14826 |
+| sinasc | national | 0.00094 | 0.01040 | 0.02055 | 0.03038 |
+| | CODMUNRES | **0.12667** | 0.15294 | 0.17927 | 0.23174 |
+| adult | national | 0.03074 | 0.05480 | 0.09151 | 0.11403 |
+| | AGE_5 | **0.16265** | 0.19427 | 0.26410 | 0.30635 |
+
+**Near the root the error follows the coverage on all five datasets**: contained < 2 pairs <
+1 pair < 0 pairs, with disjoint min-max ranges over the 5 rounds. **Measuring two of the three
+pairs does not recover the triple**: at the root that stratum is still 1.8x (adult) to 19x (Spain)
+worse than the contained one. The unmeasured pair's association given the third attribute is set
+by the random coupling. The gaps are smallest on adult, where the noise already dominates at the
+root (48,842 records), as with pairs in experiment 5.
+
+**At the leaves the datasets split, and the split is experiment 5's.** On Spain, SINASC and adult
+the ordering holds at every level, ranges disjoint throughout. On IPUMS and Chile it inverts at the
+finest levels and the contained and 2-pair triples become the *worst*: from COUNTY down on IPUMS,
+from COMUNA down on Chile (at REGION, 1 pair already edges out 2 pairs, 0.0548 against 0.0575).
+Round-to-round spread there is 0.1-0.4%, so the inversion is not noise. These are exactly the two
+datasets where experiment 5's unmeasured/measured ratio for pairs falls below 1 at the leaves (0.5
+and 0.9). It is the same crossing seen in triples: the more of a triple lies inside the bags, the
+more of its error is noise of high-dimensional bags, which dominates in small nodes. That
+agreement between two independent metrics is what makes experiment 4 more than a copy of
+experiment 5. Figure: `python -m docs.figures.fig_levels`, which also prints the full table.
+
+**Experiment 5** ran nothing of its own, as designed: its 5 configurations are the reference runs,
+already `ok`. It reads `<name>_metrics.json` (every pair with its U in both files), which
 is **not** in `runs.jsonl` — `workload` is empty there for four of the five datasets — so those 5
 files have to be copied from the server before that analysis can be written.
 
 ### Step 2.4 — depth
 
-20 runs (4 datasets x 5 rounds) at rho = 1 with `sqrt` and the sweep, 20 workers, all `ok`. Spain's
+20 runs (4 datasets x 5 rounds) at rho = 1 with `sqrt` and the sweep, all `ok`, with **8 workers**:
+the default of `orchestrate.py` until 2026-10-01, while the full-depth runs they are compared with
+used 20. Utility is unaffected (step 2.5 reran the same situation and moved less than 0.5%); the
+times below are not comparable, and the cut runs are the slower side of it. Spain's
 arm is its own step 2.2 reference, which is already 3 levels. Median of 5 throughout, and every
 full-against-cut comparison below has **disjoint min-max ranges** over the 5 rounds unless said
 otherwise.
@@ -746,7 +901,7 @@ error is.
 | chilean_census | 6 -> 3 | 15,195 -> 56 | 1,563.8 -> **69.8** | 4,188 -> **8,754** | 1,023 -> **5,484** |
 | ipums_1940 | 5 -> 3 | 152,009 -> 3,108 | 1,932.2 -> **93.9** | 14,426 -> 12,438 | 2,766 -> 1,027 |
 
-Chile and IPUMS are 22x and 21x faster. But **Chile's peak memory doubles and its largest worker
+Chile and IPUMS are 22x and 21x faster, with 8 workers against 20, so a lower bound. But **Chile's peak memory doubles and its largest worker
 grows 5.4x**, because the model per node group scales with `n_children` and a shallower tree gives
 each group more children — REGION to PROVINCIA is 56 children of 313,821 records each. SINASC moves
 the same way. IPUMS goes the other way, because its wide groups at full depth were Supdist to
@@ -766,10 +921,18 @@ Enumdist.
 `ok`. Median of 5 throughout, and every comparison below has **disjoint min-max ranges** over the 5
 rounds unless said otherwise. Coverage is the fraction of attribute pairs inside some bag.
 
+> **Rerun 2026-10-03.** The first pass ran the derived structures with 8 workers, the default of
+> `orchestrate.py` until 2026-10-01, while the declared ones are the 20-worker runs of steps 2.1-2.3,
+> so its times compared 8 workers against 20. The 115 derived runs were redone at 20. Utility did not
+> move: within 0.5% at every level on IPUMS, SINASC and Spain, 1-4% on adult, which is its normal
+> round-to-round spread. Time did: the derived structures got 1.6-1.7x faster on IPUMS and SINASC,
+> and unchanged on Spain and adult. Memory is unchanged, since main plus largest worker does not
+> depend on the number of workers. The one conclusion that was an artefact is below, under cost.
+
 **What the tree returned.** Merges are respected on all four datasets. Splits are exact on adult
 and IPUMS only: SINASC 17 -> 14, 21 -> 17, 21 -> 18 bags; Spain 64 -> 62, 77 -> 71, 79 -> 70,
 80 -> 70. Spain's `blocks_s3` and `blocks_s4` come out as the **same structure** (70 bags,
-W 76,020 against 75,999, tvd2 0.04543 both): the family saturates there, and a figure should show
+W 76,020 against 75,999, tvd2 0.06112 both): the family saturates there, and a figure should show
 one of them. IPUMS `das_m1` is the full joint in one bag, identical to the declared `joint`.
 
 **Whole-tree utility and cost.** Mean of `tvd2` over the levels; seconds are initialize plus
@@ -777,69 +940,73 @@ estimation; GB is `memory_mb` main plus largest worker:
 
 | dataset | structure | bags | coverage | W | Delta | tvd2 | seconds | GB |
 |---|---|---|---|---|---|---|---|---|
-| adult | `blocks_s2` | 13 | 14.3% | 2,884 | 26 | 0.12456 | 1.5 | 0.53 |
-| | `blocks_s1` | 11 | 18.7% | 3,384 | 22 | **0.12269** | 1.6 | 0.54 |
+| adult | `blocks_s2` | 13 | 14.3% | 2,884 | 26 | **0.12477** | 1.5 | 0.54 |
+| | `blocks_s1` | 11 | 18.7% | 3,384 | 22 | 0.12544 | 1.6 | 0.54 |
 | | `blocks` | 7 | 23.1% | 27,188 | 14 | 0.13785 | 3.5 | 0.56 |
-| | `blocks_m1` | 6 | 26.4% | 40,705 | 12 | 0.17032 | 4.7 | 0.59 |
-| | `blocks_m2` | 5 | 28.6% | 82,085 | 10 | 0.19974 | 7.6 | 0.64 |
-| | `blocks_m3` | 4 | 31.9% | 503,960 | 8 | 0.28295 | 37.5 | 1.20 |
-| sinasc | `blocks_s3` | 18 | 11.6% | 1,919 | 36 | 0.04037 | 64.1 | 4.44 |
-| | `blocks_s2` | 17 | 13.2% | 2,135 | 34 | 0.03994 | 63.6 | 4.45 |
-| | `blocks_s1` | 14 | 17.9% | 3,680 | 28 | 0.03855 | 69.0 | 4.45 |
+| | `blocks_m1` | 6 | 26.4% | 40,705 | 12 | 0.17435 | 4.7 | 0.59 |
+| | `blocks_m2` | 5 | 28.6% | 82,085 | 10 | 0.19923 | 7.6 | 0.64 |
+| | `blocks_m3` | 4 | 31.9% | 503,960 | 8 | 0.28125 | 37.5 | 1.19 |
+| sinasc | `blocks_s3` | 18 | 11.6% | 1,919 | 36 | 0.04036 | 37.8 | 4.43 |
+| | `blocks_s2` | 17 | 13.2% | 2,135 | 34 | 0.03990 | 37.6 | 4.46 |
+| | `blocks_s1` | 14 | 17.9% | 3,680 | 28 | 0.03856 | 40.9 | 4.44 |
 | | `blocks` | 9 | 21.1% | 6,844 | 18 | **0.03798** | 43.8 | 4.45 |
-| | `blocks_m1` | 8 | 23.2% | 18,204 | 16 | 0.03843 | 134.9 | 4.48 |
-| | `blocks_m2` | 7 | 24.7% | 31,536 | 14 | 0.03915 | 210.0 | 4.36 |
-| | `blocks_m3` | 6 | 27.9% | 57,009 | 12 | 0.04179 | 337.5 | 4.57 |
-| | `blocks_m4` | 5 | 29.5% | 81,160 | 10 | 0.04498 | 468.1 | 4.65 |
-| spanish_census | `blocks_s4` | 70 | 3.2% | 75,999 | 140 | 0.06112 | 243.7 | 9.45 |
-| | `blocks_s3` | 70 | 3.3% | 76,020 | 140 | 0.06111 | 248.9 | 9.46 |
-| | `blocks_s2` | 71 | 3.3% | 76,029 | 142 | 0.06419 | 241.0 | 9.54 |
-| | `blocks_s1` | 62 | 3.9% | 77,808 | 124 | 0.06192 | 213.2 | 9.43 |
+| | `blocks_m1` | 8 | 23.2% | 18,204 | 16 | 0.03849 | 79.6 | 4.38 |
+| | `blocks_m2` | 7 | 24.7% | 31,536 | 14 | 0.03912 | 123.8 | 4.45 |
+| | `blocks_m3` | 6 | 27.9% | 57,009 | 12 | 0.04174 | 198.2 | 4.55 |
+| | `blocks_m4` | 5 | 29.5% | 81,160 | 10 | 0.04496 | 273.8 | 4.66 |
+| spanish_census | `blocks_s4` | 70 | 3.2% | 75,999 | 140 | 0.06112 | 240.2 | 9.45 |
+| | `blocks_s3` | 70 | 3.3% | 76,020 | 140 | 0.06112 | 254.7 | 9.47 |
+| | `blocks_s2` | 71 | 3.3% | 76,029 | 142 | 0.06419 | 250.4 | 9.46 |
+| | `blocks_s1` | 62 | 3.9% | 77,808 | 124 | 0.06191 | 213.1 | 9.40 |
 | | `blocks` | 41 | 4.6% | 135,481 | 82 | **0.05762** | 310.6 | 9.51 |
-| | `blocks_m1` | 40 | 4.6% | 135,567 | 80 | 0.05770 | 302.8 | 9.48 |
-| | `blocks_m2` | 39 | 4.7% | 139,806 | 78 | 0.05783 | 307.4 | 9.51 |
-| | `blocks_m3` | 38 | 4.8% | 155,871 | 76 | 0.05793 | 323.2 | 9.56 |
-| | `blocks_m4` | 37 | 4.9% | 161,614 | 74 | 0.05803 | 332.1 | 9.58 |
-| ipums_1940 | `das_s2` | 5 | 33.3% | 496 | 10 | 0.01805 | 4,691.2 | 14.54 |
-| | `das_s1` | 4 | 46.7% | 736 | 8 | **0.01651** | 4,005.2 | 15.18 |
+| | `blocks_m1` | 40 | 4.6% | 135,567 | 80 | 0.05772 | 314.8 | 9.56 |
+| | `blocks_m2` | 39 | 4.7% | 139,806 | 78 | 0.05780 | 320.0 | 9.57 |
+| | `blocks_m3` | 38 | 4.8% | 155,871 | 76 | 0.05792 | 330.5 | 9.66 |
+| | `blocks_m4` | 37 | 4.9% | 161,614 | 74 | 0.05804 | 347.4 | 9.61 |
+| ipums_1940 | `das_s2` | 5 | 33.3% | 496 | 10 | 0.01805 | 2,930.0 | 14.59 |
+| | `das_s1` | 4 | 46.7% | 736 | 8 | **0.01650** | 2,513.3 | 15.18 |
 | | `das` | 2 | 60.0% | 4,640 | 4 | 0.02099 | 1,932.2 | 16.79 |
-| | `das_m1` | 1 | 100.0% | 44,544 | 2 | 0.02419 | 9,509.7 | 22.04 |
+| | `das_m1` | 1 | 100.0% | 44,544 | 2 | 0.02416 | 5,625.2 | 22.16 |
 
-**More coverage is not better.** On adult, splitting improves tvd2 11% and halves the time, while
-merging to 31.9% coverage doubles it and costs 25x the time. On IPUMS the optimum is **interior**,
-at 46.7%: better than the declaration and better than the full joint. SINASC and Spain are
-optimal at their declaration. Spain's merges are within 0.7% of each other, because its 41 bags are
-fixed by the constraint scopes much as Chile's are (coverage moves 4.6% -> 4.9%).
+**More coverage is not better.** On adult, splitting improves tvd2 9% and takes less than half the
+time, while merging to 31.9% coverage doubles it and costs 11x the time. On IPUMS the optimum is
+**interior**, at 46.7%: better than the declaration and better than the full joint. SINASC and
+Spain are optimal at their declaration. Spain's merges are within 0.7% of each other, because its
+41 bags are fixed by the constraint scopes much as Chile's are (coverage moves 4.6% -> 4.9%).
 
 **The finding: the best structure changes down the tree, and it follows records per node.** Per
 level, with records per node:
 
 | dataset | level | records/node | best | its coverage | runner-up |
 |---|---|---|---|---|---|
-| ipums_1940 | national | 132,404,766 | `das_m1` 0.00038 | **100.0%** | `das` 0.00042 |
-| | STATEFIP | 2,596,171 | `das_s1` 0.00196 | 46.7% | `das` 0.00200 |
-| | COUNTY | 42,601 | `das_s1` 0.00953 | 46.7% | `das_s2` 0.01029 |
-| | SUPDIST | 41,311 | `das_s1` 0.00942 | 46.7% | `das_s2` 0.01023 |
-| | ENUMDIST | 871 | `das_s1` 0.06061 | 46.7% | `das_s2` 0.06362 |
-| sinasc | national | 2,561,858 | `blocks` 0.01075 | **21.1%** | `blocks_m1` 0.01108 |
-| | REGIAO | 512,371 | `blocks` 0.01132 | 21.1% | `blocks_m1` 0.01173 |
-| | UF | 94,883 | `blocks` 0.01470 | 21.1% | `blocks_m1` 0.01538 |
-| | REGSAUD | 5,693 | `blocks_s1` 0.02967 | **17.9%** | `blocks` 0.02996 |
-| | CODMUNRES | 459 | `blocks_s1` 0.12240 | 17.9% | `blocks_s2` 0.12312 |
-| spanish_census | national | 4,707,186 | `blocks_m2` 0.04070 | **4.7%** | `blocks_m4` 0.04071 |
-| | CPRO | 90,522 | `blocks_m1` 0.04871 | 4.6% | `blocks` 0.04872 |
-| | CMUN | 5,178 | `blocks` 0.08336 | **4.6%** | `blocks_m1` 0.08364 |
-| adult | every level | 48,842 -> 3,256 | `blocks_s1` / `blocks_s2` | 18.7% / 14.3% | tied with each other at levels 1-3 |
+| ipums_1940 | national | 132,404,766 | `das_m1` 0.00037 | **100.0%** | `das` 0.00042 |
+| | STATEFIP | 2,596,172 | `das_s1` 0.00196 | 46.7% | `das` 0.00200 |
+| | COUNTY | 42,601 | `das_s1` 0.00951 | 46.7% | `das_s2` 0.01028 |
+| | SUPDIST | 41,312 | `das_s1` 0.00942 | 46.7% | `das_s2` 0.01022 |
+| | ENUMDIST | 871 | `das_s1` 0.06061 | 46.7% | `das_s2` 0.06364 |
+| sinasc | national | 2,561,858 | `blocks` 0.01075 | **21.1%** | `blocks_m1` 0.01111 |
+| | REGIAO | 512,372 | `blocks` 0.01132 | 21.1% | `blocks_m1` 0.01177 |
+| | UF | 94,884 | `blocks` 0.01470 | 21.1% | `blocks_m1` 0.01537 |
+| | REGSAUD | 5,693 | `blocks_s1` 0.02963 | **17.9%** | `blocks` 0.02996 |
+| | CODMUNRES | 460 | `blocks_s1` 0.12254 | 17.9% | `blocks_s2` 0.12294 |
+| spanish_census | national | 4,707,186 | `blocks_m2` 0.04068 | **4.7%** | `blocks_m4` 0.04069 |
+| | CPRO | 90,523 | `blocks_m1` 0.04871 | 4.6% | `blocks_m2` 0.04871 |
+| | CMUN | 5,178 | `blocks` 0.08336 | **4.6%** | `blocks_m1` 0.08368 |
+| adult | national | 48,842 | `blocks_s1` 0.04284 | 18.7% | `blocks` 0.04521 |
+| | AGE_20 -> AGE_5 | 12,210 -> 3,256 | `blocks_s2` | 14.3% | `blocks_s1`, tied at every level |
 
 Within every dataset, the coverage of the best structure **never increases** going down the tree.
 IPUMS crosses from the joint to `das_s1` between the national node and the states; SINASC crosses
-from `blocks` to `blocks_s1` between UF (94,883 per node) and REGSAUD (5,693). That is not the
+from `blocks` to `blocks_s1` between UF (94,884 per node) and REGSAUD (5,693). That is not the
 level where SINASC's measured and unmeasured pairs swap: in experiment 5 they never do (1.4 at the
 leaves), so the two crossings are different quantities; Spain crosses
 from a merge to its declaration between the nation and CMUN. Adult never has enough records for
-coverage to pay. Two of these are close but still disjoint: IPUMS STATEFIP (0.00195-0.00196
-against 0.00198-0.00202) and the Spain national merges (0.04069-0.04072 against 0.04075-0.04079).
-At CPRO, Spain's `blocks_m1` and `blocks` are tied.
+coverage to pay: a split is the best at every level, `blocks_s1` at the root and `blocks_s2` below,
+the two overlapping below the root. SINASC's two lowest levels overlap with their runner-up too
+(REGSAUD 0.02955-0.02982 against 0.02974-0.03011). Two of the close ones are still disjoint: IPUMS
+STATEFIP (0.00194-0.00196 against 0.00198-0.00202) and the Spain national merges against the
+declaration (0.04066-0.04072 against 0.04075-0.04079). At CPRO, Spain's merges and its declaration
+are tied.
 
 The mechanism: the error has a term set by coverage (what no bag measures is filled in by the
 coupling), which does not depend on the node's size, and a noise term that grows with the cells
@@ -848,12 +1015,14 @@ noise is negligible and coverage decides; at the leaves the noise decides and th
 win. Records per node fall by five orders of magnitude on IPUMS, so **no single structure is best
 at every level**.
 
-**Cost has an interior minimum too.** Time is not monotone in the width. IPUMS `das_s1`, with 6x
-fewer cells than the declaration, is **2.1x slower** (4,005 s against 1,932 s), and `das_s2` 2.4x;
-SINASC `blocks_s1` is 1.6x slower than `blocks`. Wide bags cost cells; many bags cost separator
-rows and transports in the sweep. On IPUMS and SINASC the minimum sits at the declaration; on adult
-and Spain the splits are faster (0.46x and 0.69x). Memory barely moves except where W does: IPUMS
-22.0 GB for the joint against 14.5 GB for `das_s2`, adult 1.20 GB against 0.53 GB.
+**Cost follows the width in one direction only.** Merging is slower on every dataset: SINASC
+`blocks_m4`, with 12x the cells, takes 6.3x the time of the declaration, and the IPUMS joint 2.9x.
+Splitting is faster on SINASC (`blocks_s1` 0.93x), Spain (0.69x) and adult (0.46x), but not on
+IPUMS, where `das_s1` has 6x fewer cells than the declaration and is **1.3x slower** (2,513 s
+against 1,932 s), and `das_s2` 1.5x: many bags cost separator rows and transports in the sweep.
+The first pass read "an interior minimum at the declaration on IPUMS and SINASC" (2.1x and 1.6x
+slower splits); on SINASC that was the 8 workers. Memory barely moves except where W does: IPUMS
+22.2 GB for the joint against 14.6 GB for `das_s2`, adult 1.19 GB against 0.54 GB.
 
 **What this buys the paper.** It answers experiment 6 with a mechanism rather than a ranking: the
 choice of marginals is a bias-variance trade-off whose balance point moves with the records per

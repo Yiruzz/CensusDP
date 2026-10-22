@@ -4,8 +4,9 @@ A configuration spells out every runner flag that tells two runs apart, so a run
 experiments share (the reference run of a dataset serves experiments 4 to 7) has a single name
 and runs once. benchmarks/orchestrate.py runs them; benchmarks/README.md is the plan.
 
-Part 1 (experiments 1 and 2) compares against the DAS with the DAS budget, which the runner
-cannot express yet. Part 2 (experiments 3 to 7) starts with experiment 3, in two steps:
+Part 1 compares against the DAS with the DAS budget: experiment 1 and the performance table run
+from benchmarks/ipums_1940/campaign.sh, and experiment 2's scaling sweep is listed here, at the
+Part 2 budget, since it is not compared with the DAS. Part 2 (experiments 3 to 7) starts with experiment 3, in two steps:
   1. exp3_composition: every composition at COMPOSITION_RHO. The winner goes in COMPOSITION.
   2. exp3_budget: every rho with COMPOSITION. The chosen one goes in RHO.
 Until both are set, an experiment that needs them refuses to list its runs.
@@ -14,6 +15,7 @@ triples are sampled differently (see exp4).
 """
 
 import importlib
+import math
 
 from benchmarks.common import COMPOSITIONS
 
@@ -25,6 +27,12 @@ RHO = 1               # exp3_budget, 2026-09-23
 # Its structure is decided by its constraint scopes, not by its marginals -- see exp6.
 EXP6_EXCLUDED = ('chilean_census',)
 TRIPLES = 100
+# Experiment 2: prefixes of the 78 ESCENSUS columns, dense where the full-joint arm still runs.
+EXP2_COLUMNS = (2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 78)
+# The full-joint measurement is one dense float64 vector of the joint per node. Its arm runs until
+# one such vector alone exceeds the RAM of the server (123.5 GB, d = 8), that point included: the
+# crash is the finding, and every larger d fails the same way, so the figure draws its width only.
+FULL_JOINT_MAX_CELLS = 123.5e9 / 8
 
 
 def decided(config):
@@ -52,8 +60,34 @@ def exp1():
 
 
 def exp2():
-    """Time, memory and width vs number of columns on IPUMS 1940, full-joint and marginal."""
-    das_budget()
+    """Width, time and memory against the number of attributes on ESCENSUS, both pipelines.
+
+    The first d columns of the questionnaire (`--columns d`): the marginal arm keeps every declared
+    bag cut to them, and the edit rules whose columns are all kept, up to the 78 of the reference
+    run; the full-joint arm measures their whole joint. Utility is not compared, since the TVD of
+    different sets of attributes is not comparable, so every run samples its memory instead and
+    skips the metrics, like exp6_memory. At d = 78 the marginal configuration is exp6_memory's
+    declared row of this dataset, and is run once.
+
+    ESCENSUS rather than IPUMS 1940, whose joint over its 6 attributes is 44,544 cells, so the
+    full-joint arm never breaks there and the DAS is a single point already in Table 3. Here the
+    joint passes 10^6 cells at d = 6 and 10^9 at d = 7, and the arm is expected to run out of
+    memory (see FULL_JOINT_MAX_CELLS): that crash, against the marginal width, is the result. Both
+    arms share every flag but the pipeline and the rounding, which is 'mip' because the sweep is
+    undefined on the full joint.
+    """
+    dataset = 'spanish_census'
+    domains = importlib.import_module(f'benchmarks.{dataset}.domains')
+    runs = []
+    for d in EXP2_COLUMNS:
+        changes = {'columns': d} if d < len(domains.COLUMNS) else {}
+        runs.append((dataset, marginal(dataset, **changes, memory=1)))
+    for d in EXP2_COLUMNS:
+        runs.append((dataset, decided({'full_joint': True, 'rho': RHO, 'composition': COMPOSITION,
+                                       'rounding': 'mip', 'columns': d, 'memory': 1})))
+        if math.prod(len(domains.DOMAINS[c]) for c in domains.COLUMNS[:d]) > FULL_JOINT_MAX_CELLS:
+            break  # the joint only grows with d
+    return runs
 
 
 def exp3_composition():
