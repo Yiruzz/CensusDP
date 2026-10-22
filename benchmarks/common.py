@@ -18,6 +18,22 @@ if os.environ.get('BAR_CONV_TOL'):
 COMPOSITIONS = ('exponential', 'uniform', 'proportional', 'sqrt')
 
 
+def mbi_root():
+    """The mbi checkout the baselines run from (benchmarks/baselines): $MBI_ROOT, else extra/mbi
+    in this repository (the server), else ~/Research/mbi."""
+    if os.environ.get('MBI_ROOT'):
+        return Path(os.environ['MBI_ROOT'])
+    inside = Path(__file__).resolve().parents[1] / 'extra' / 'mbi'
+    return inside if inside.exists() else Path.home() / 'Research' / 'mbi'
+
+
+def mbi_python():
+    """The Python of the mbi checkout's venv: the baselines need JAX, TopDown's venv does not."""
+    if os.name == 'nt':
+        return str(mbi_root() / '.venv' / 'Scripts' / 'python.exe')
+    return str(mbi_root() / '.venv' / 'bin' / 'python')
+
+
 def parquet(dataset, sample=False):
     """data/<dataset>/<dataset>.parquet, or its _sample counterpart."""
     suffix = '_sample' if sample else ''

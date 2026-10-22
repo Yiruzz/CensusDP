@@ -28,7 +28,7 @@ from pathlib import Path
 from benchmarks import common
 from benchmarks.experiments import EXPERIMENTS
 
-NAMED = ('full_joint', 'structure', 'rho', 'composition', 'rounding')
+NAMED = ('full_joint', 'structure', 'rho', 'composition', 'rounding', 'baseline')
 METRIC_FLAGS = ('triples',)
 # Read by the orchestrator itself, never passed to the driver or the metrics.
 ORCHESTRATOR_FLAGS = ('memory',)
@@ -140,9 +140,13 @@ class MemorySampler(threading.Thread):
 
 
 def label(config):
-    """Unique name of a configuration, e.g. blocks_rho1_exponential_sweep or ..._columns3."""
-    parts = ['fulljoint' if config.get('full_joint') else config['structure'],
-             f"rho{config['rho']:g}", config['composition'], config['rounding']]
+    """Unique name of a configuration, e.g. blocks_rho1_exponential_sweep or ..._columns3, and
+    flat_mst_rho1 for a baseline (benchmarks/baselines)."""
+    if config.get('baseline'):
+        parts = ['flat', config['baseline'], f"rho{config['rho']:g}"]
+    else:
+        parts = ['fulljoint' if config.get('full_joint') else config['structure'],
+                 f"rho{config['rho']:g}", config['composition'], config['rounding']]
     return '_'.join(parts + [f'{key}{value}' for key, value in config.items() if key not in NAMED])
 
 
@@ -209,16 +213,25 @@ def call(command, log, timeout=None, memory=None, min_available_gb=None):
 
 
 def run(dataset, config, name, rep, args):
-    """One repetition: the driver, then the metrics. Returns its line for runs.jsonl."""
+    """One repetition: the driver, then the metrics. Returns its line for runs.jsonl.
+
+    A baseline configuration runs benchmarks/baselines/run.py under the mbi venv instead of the
+    driver, and counts its edit-rule violations after the metrics, before the CSV goes.
+    """
     files = {suffix: Path(common.out_path(dataset, name + suffix))
-             for suffix in ('.json', '_metrics.json', '.log', '.csv')}
+             for suffix in ('.json', '_metrics.json', '_violations.json', '.log', '.csv')}
     for path in files.values():
         path.unlink(missing_ok=True)  # nothing stale from an earlier attempt
     driver = {key: value for key, value in config.items()
               if key not in METRIC_FLAGS and key not in ORCHESTRATOR_FLAGS}
     metrics = {key: value for key, value in config.items() if key in METRIC_FLAGS}
-    command = [sys.executable, '-m', f'benchmarks.{dataset}.driver', '--name', name,
-               '--workers', str(args.workers)] + flags(driver)
+    baseline = driver.pop('baseline', None)
+    if baseline:
+        command = [common.mbi_python(), '-m', 'benchmarks.baselines.run', dataset, baseline,
+                   '--name', name] + flags(driver)
+    else:
+        command = [sys.executable, '-m', f'benchmarks.{dataset}.driver', '--name', name,
+                   '--workers', str(args.workers)] + flags(driver)
     if args.sample:
         command.append('--sample')
     memory = {} if config.get('memory') else None
@@ -243,6 +256,14 @@ def run(dataset, config, name, rep, args):
                        metrics_seconds=metrics['seconds'])
         else:
             row.update(status='metrics_error', returncode=code)
+        if code == 0 and baseline:
+            code = call([sys.executable, '-m', 'benchmarks.baselines.violations', dataset, name],
+                        files['.log'])
+            if code == 0:
+                violations = json.loads(files['_violations.json'].read_text(encoding='utf-8'))
+                row['violations'] = {key: violations[key] for key in ('violating', 'share')}
+            else:
+                row.update(status='violations_error', returncode=code)
     if not args.keep_csv:
         files['.csv'].unlink(missing_ok=True)
     row['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -294,9 +315,20 @@ def main():
             print(f'  {dataset:<16} {name}')
         return
 
+    # A baseline or a full-joint run that ran out of time or memory once is not run again in a
+    # later round: not finishing is a property of the configuration, not of the seed (exp8, AIM on
+    # the largest; exp2, the full joint past 6 columns).
+    gave_up = {(dataset, name.rsplit('_r', 1)[0]) for dataset in datasets
+               for name, state in status[dataset].items() if state in ('timeout', 'out_of_memory')}
     for index, (dataset, config, name, rep) in enumerate(pending, 1):
+        if (config.get('baseline') or config.get('full_joint')) and (dataset, label(config)) in gave_up:
+            print(f'[{index}/{len(pending)}] {dataset} {name}: skipped, an earlier round did not '
+                  f'finish', flush=True)
+            continue
         started = time.perf_counter()
         row = run(dataset, config, name, rep, args)
+        if row['status'] in ('timeout', 'out_of_memory'):
+            gave_up.add((dataset, label(config)))
         with open(results[dataset], 'a', encoding='utf-8') as handle:
             handle.write(json.dumps(row) + '\n')
         print(f'[{index}/{len(pending)}] {time.strftime("%H:%M")} {dataset} {name}: '

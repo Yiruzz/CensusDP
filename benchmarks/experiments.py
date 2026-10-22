@@ -27,6 +27,9 @@ RHO = 1               # exp3_budget, 2026-09-23
 # Its structure is decided by its constraint scopes, not by its marginals -- see exp6.
 EXP6_EXCLUDED = ('chilean_census',)
 TRIPLES = 100
+# Experiment 8: the flat synthesizers of benchmarks/baselines, MST first so that AIM, which may
+# not finish on the large datasets, comes last in every round.
+BASELINES = ('mst', 'aim')
 # Experiment 2: prefixes of the 78 ESCENSUS columns, dense where the full-joint arm still runs.
 EXP2_COLUMNS = (2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 78)
 # The full-joint measurement is one dense float64 vector of the joint per node. Its arm runs until
@@ -190,6 +193,14 @@ def exp7():
             for rounding in ('sweep', 'mip')]
 
 
+def exp8():
+    """Flat baselines: MST and AIM with the leaf geography as one column, at RHO. TopDown's side
+    is the reference run (exp5), which publishes the same release, so nothing of ours reruns."""
+    return [(dataset, decided({'baseline': mechanism, 'rho': RHO}))
+            for mechanism in BASELINES for dataset in DATASETS]
+
+
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
                'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': exp4,
-               'exp5': reference, 'exp6': exp6, 'exp6_memory': exp6_memory, 'exp7': exp7}
+               'exp5': reference, 'exp6': exp6, 'exp6_memory': exp6_memory, 'exp7': exp7,
+               'exp8': exp8}
