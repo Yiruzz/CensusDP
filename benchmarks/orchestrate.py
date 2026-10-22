@@ -35,23 +35,25 @@ ORCHESTRATOR_FLAGS = ('memory',)
 
 
 def machine_mb():
-    """MemTotal - MemAvailable in MB: the machine-wide instrument of benchmarks/ipums_1940/campaign.sh."""
+    """MemTotal - MemAvailable in MB, the machine-wide instrument of
+    benchmarks/ipums_1940/campaign.sh, and MemAvailable itself: the kernel's estimate of the RAM
+    it can still hand out without swapping."""
     values = {}
     with open('/proc/meminfo', encoding='ascii') as handle:
         for line in handle:
             key, value = line.split(':', 1)
             values[key] = int(value.split()[0])
-    return (values['MemTotal'] - values['MemAvailable']) / 1024
+    return (values['MemTotal'] - values['MemAvailable']) / 1024, values['MemAvailable'] / 1024
 
 
 def session_pss_mb(session):
-    """Sum of Pss + SwapPss in MB over every process of a session.
+    """Pss and SwapPss in MB, each summed over every process of a session.
 
     PSS charges each shared page to the processes mapping it in equal parts, so the copy-on-write
     pages the forked workers share with the main process are counted once, where a sum of RSS
     would count them once per worker. SwapPss keeps the swapped pages, which RSS hides.
     """
-    total = 0
+    total = {'Pss:': 0, 'SwapPss:': 0}
     for entry in os.listdir('/proc'):
         if not entry.isdigit():
             continue
@@ -62,11 +64,12 @@ def session_pss_mb(session):
                     continue
             with open(f'/proc/{entry}/smaps_rollup', encoding='ascii') as handle:
                 for line in handle:
-                    if line.startswith(('Pss:', 'SwapPss:')):
-                        total += int(line.split()[1])
+                    key = line.split(maxsplit=1)[0]
+                    if key in total:
+                        total[key] += int(line.split()[1])
         except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError, ValueError):
             continue  # the process ended between the listing and the read
-    return total / 1024
+    return total['Pss:'] / 1024, total['SwapPss:'] / 1024
 
 
 class MemorySampler(threading.Thread):
@@ -82,26 +85,45 @@ class MemorySampler(threading.Thread):
     gave it a single sample, while reading smaps_rollup ten times a second on the 20 GB processes of
     IPUMS would cost the run itself. Those processes only grow after the first seconds, when the
     sampling has already slowed down. Linux only.
+
+    With `min_available_mb`, the session is killed on the spot and marked `out_of_memory` once the
+    host's MemAvailable falls below it, i.e. once the RAM is full: a run that does not fit is the
+    finding, not something to wait out in swap on a shared host. The trigger is the RAM and not the
+    run's swap, because the kernel moves idle pages to swap long before the RAM is full, which
+    would kill runs that fit. The kill lands within one sampling interval, so a few GB may reach
+    swap first; the run's swap is recorded either way.
     """
 
-    def __init__(self, session, interval=1.0, first=0.1, fast=10.0):
+    def __init__(self, session, interval=1.0, first=0.1, fast=10.0, min_available_mb=None):
         super().__init__(daemon=True)
         self.session, self.interval, self.first, self.fast = session, interval, first, fast
+        self.min_available_mb = min_available_mb
         self.finished = threading.Event()
-        self.baseline_machine = machine_mb()
-        self.peak_machine = self.peak_pss = 0.0
+        self.out_of_memory = False
+        self.baseline_machine, self.lowest_available = machine_mb()
+        self.peak_machine = self.peak_pss = self.peak_swap = 0.0
         self.samples = 0
 
     def sample(self):
-        self.peak_machine = max(self.peak_machine, machine_mb())
-        self.peak_pss = max(self.peak_pss, session_pss_mb(self.session))
+        used, available = machine_mb()
+        self.peak_machine = max(self.peak_machine, used)
+        self.lowest_available = min(self.lowest_available, available)
+        pss, swap = session_pss_mb(self.session)
+        self.peak_pss = max(self.peak_pss, pss + swap)
+        self.peak_swap = max(self.peak_swap, swap)
         self.samples += 1
+        if self.min_available_mb is not None and available < self.min_available_mb:
+            self.out_of_memory = True
+            try:
+                os.killpg(self.session, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # it ended on its own since the sample
 
     def run(self):
         started = time.monotonic()
         self.sample()
-        while not self.finished.wait(self.first if time.monotonic() - started < self.fast
-                                     else self.interval):
+        while not self.out_of_memory and not self.finished.wait(
+                self.first if time.monotonic() - started < self.fast else self.interval):
             self.sample()
 
     def result(self):
@@ -110,6 +132,9 @@ class MemorySampler(threading.Thread):
         return {'peak_machine_gb': self.peak_machine / 1024,
                 'baseline_machine_gb': self.baseline_machine / 1024,
                 'peak_session_pss_gb': self.peak_pss / 1024,
+                'peak_session_swap_gb': self.peak_swap / 1024,
+                'lowest_available_gb': self.lowest_available / 1024,
+                'min_available_gb': self.min_available_mb and self.min_available_mb / 1024,
                 'samples': self.samples, 'interval_s': self.interval, 'first_interval_s': self.first,
                 'fast_s': self.fast}
 
@@ -143,8 +168,10 @@ def recorded(path):
     return status
 
 
-def call(command, log, timeout=None, memory=None):
-    """Run a command with its output appended to log. Returns its exit code, or 'timeout'.
+def call(command, log, timeout=None, memory=None, min_available_gb=None):
+    """Run a command with its output appended to log. Returns its exit code, 'timeout', or
+    'out_of_memory' when the sampler killed it because the host had less than `min_available_gb`
+    of RAM left.
 
     With `memory` (a dict), the run's process tree is sampled while it runs and the peaks are
     written into it. The process is started in a session of its own, so its session id is its pid.
@@ -155,7 +182,8 @@ def call(command, log, timeout=None, memory=None):
                                    start_new_session=True)
         sampler = None
         if memory is not None:
-            sampler = MemorySampler(process.pid)
+            sampler = MemorySampler(process.pid, min_available_mb=min_available_gb
+                                    and min_available_gb * 1024)
             sampler.start()
         try:
             code = process.wait(timeout=timeout)
@@ -171,6 +199,8 @@ def call(command, log, timeout=None, memory=None):
         finally:
             if sampler is not None:
                 memory.update(sampler.result())
+                if sampler.out_of_memory:
+                    code = 'out_of_memory'
             # A killed run leaves its spill behind (DataHandler.initialize_directories).
             for kind in ('spill', 'microdata'):
                 shutil.rmtree(common.DATA / 'data_cache' / f'topdown_{kind}_{process.pid}',
@@ -192,7 +222,8 @@ def run(dataset, config, name, rep, args):
     if args.sample:
         command.append('--sample')
     memory = {} if config.get('memory') else None
-    code = call(command, files['.log'], args.timeout and args.timeout * 3600, memory)
+    code = call(command, files['.log'], args.timeout and args.timeout * 3600, memory,
+                args.min_available_gb)
 
     row = {'name': name, 'rep': rep, 'config': config, 'status': 'error'}
     if files['.json'].exists():
@@ -200,7 +231,7 @@ def run(dataset, config, name, rep, args):
     if memory is not None:
         row['memory_sampled'] = memory
     if code != 0:
-        row.update(status='timeout' if code == 'timeout' else 'error', returncode=code)
+        row.update(status=code if code in ('timeout', 'out_of_memory') else 'error', returncode=code)
     elif memory is not None:
         row['status'] = 'ok'  # utility is not recomputed: exp6 already holds it
     else:
@@ -226,6 +257,8 @@ def main():
     parser.add_argument('--sample', action='store_true', help='use the small subsets')
     parser.add_argument('--workers', type=int, default=20)
     parser.add_argument('--timeout', type=float, help='hours before a run is killed')
+    parser.add_argument('--min-available-gb', type=float,
+                        help='kill a memory-sampled run once the host has less RAM available than this')
     parser.add_argument('--retry', action='store_true', help='run again what failed or timed out')
     parser.add_argument('--keep-csv', action='store_true', help='keep the synthetic microdata')
     parser.add_argument('--dry-run', action='store_true', help='list the pending runs and exit')

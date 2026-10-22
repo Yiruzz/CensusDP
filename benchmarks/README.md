@@ -79,7 +79,7 @@ the local machine (not in git). Install GNU time too (`apt install time`) for th
   starts, so medians over the first rounds are available long before the fifth.
 - **Results.** Every run, failed ones included, appends one line to
   `data/out/<dataset>/runs.jsonl`: the configuration, the round, `status` (`ok`, `error`,
-  `timeout`, `metrics_error`), the runner record (width, sensitivity, bags, ρ per level, seconds,
+  `timeout`, `out_of_memory`, `metrics_error`), the runner record (width, sensitivity, bags, ρ per level, seconds,
   memory) and the metrics per tree level. Next to it stay `<name>.json`, `<name>_metrics.json`
   (every pair and triple) and `<name>.log` (live TopDown output). The synthetic CSV is deleted.
 - **Shared runs.** A configuration has one name wherever it appears, so a run several experiments
@@ -204,16 +204,23 @@ not compared with the DAS. IPUMS 1940 cannot show it, since its full joint over 
 
 ```bash
 unset BAR_CONV_TOL
-python -m benchmarks.orchestrate exp2 --reps 5 --timeout 4 2>&1 | tee -a data/out/orchestrate.log
+python -m benchmarks.orchestrate exp2 --reps 5 --timeout 4 --min-available-gb 2 2>&1 | tee -a data/out/orchestrate.log
 ```
+
+`--min-available-gb 2` kills a run as soon as the host's `MemAvailable` falls below 2 GB, that is,
+once the RAM is full, and records it as `out_of_memory`. Not fitting in RAM is the finding, and
+waiting it out in swap would only load the shared host for up to the timeout. The trigger is the
+RAM, not the run's swap: the kernel moves idle pages to swap long before the RAM is full, so a swap
+trigger would kill runs that fit. The kill lands within one sampling interval (1 s), so some pages
+may reach swap first; `peak_session_swap_gb` and `lowest_available_gb` record both.
 
 - **Marginal:** d ∈ {2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 78}, each declared bag cut to the
   kept columns. d = 78 is the `blocks` row of `exp6_memory` and is skipped as recorded.
 - **Full-joint:** d = 2 … 8. The joint is 7.4·10⁶ cells at d = 6 (502 s on the laptop sample with
   4 workers), 1.5·10⁹ at d = 7 (12 GB per dense vector) and 8.5·10¹⁰ at d = 8, where one vector
   alone exceeds the server's RAM. Running out of memory is the expected result: the run is
-  recorded as `error` (or `timeout`) with its sampled memory peak, and the figure draws the width
-  of every larger d as computed, not run.
+  recorded as `out_of_memory` (or `error`, if an allocation fails before anything swaps) with its
+  sampled memory peak, and the figure draws the width of every larger d as computed, not run.
 - No metrics: the TVD of different attribute sets is not comparable, and the `memory` flag skips them.
 
 ---
