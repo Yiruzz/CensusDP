@@ -195,8 +195,10 @@ def exp7():
 
 def exp8():
     """Flat baselines: MST and AIM with the leaf geography as one column, at RHO. TopDown's side
-    is the reference run (exp5), which publishes the same release, so nothing of ours reruns."""
-    return [(dataset, decided({'baseline': mechanism, 'rho': RHO}))
+    is the reference run (exp5), which publishes the same release, so nothing of ours reruns.
+    `memory` samples the session PSS, the instrument of TopDown's memory columns, and is what lets
+    --min-available-gb stop a run that fills the shared host instead of letting it swap."""
+    return [(dataset, decided({'baseline': mechanism, 'rho': RHO, 'memory': 1}))
             for mechanism in BASELINES for dataset in DATASETS]
 
 

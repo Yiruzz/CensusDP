@@ -165,8 +165,12 @@ def main():
                           if len([c for c in cl if c != GEO]) > 1]
 
         started = time.perf_counter()
-        decode(synthetic.to_dict(), domains, hierarchy, nodes).to_csv(
-            common.out_path(args.dataset, f'{name}.csv'), sep=';', index=False)
+        # Written as TopDown writes it (data_handler.py): DuckDB quotes '' as "", which metrics.py
+        # reads back as '', where pandas leaves it bare and it comes back NULL (SINASC, Spain).
+        con = duckdb.connect()
+        con.register('synthetic', decode(synthetic.to_dict(), domains, hierarchy, nodes))
+        con.execute(f"COPY synthetic TO '{common.out_path(args.dataset, f'{name}.csv')}' "
+                    f"(FORMAT CSV, HEADER TRUE, DELIMITER ';')")
         record['seconds']['write'] = time.perf_counter() - started
         record['memory_mb'] = peak_memory_mb()
         record['status'] = 'ok'

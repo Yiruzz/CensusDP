@@ -143,9 +143,14 @@ def _encode(path, domains, hierarchy, leaves):
     data = {'leaf': np.asarray(leaf, dtype=np.int64), 'n_leaves': len(leaves)}
     for column, values in domains.items():
         domain = np.asarray(values)
-        raw = np.asarray(con.execute(f"SELECT {column} FROM read_parquet('{path}')"
-                                     ).fetchnumpy()[column])
-        data[column] = np.searchsorted(domain, raw.astype(domain.dtype)).astype(np.int16)
+        fetched = con.execute(f"SELECT {column} FROM read_parquet('{path}')").fetchnumpy()[column]
+        raw = np.asarray(fetched).astype(domain.dtype)
+        code = np.searchsorted(domain, raw)
+        # An unchecked code past the domain spills into the next leaf's cells in _leaf_counts.
+        if np.ma.is_masked(fetched) or (code >= len(domain)).any() or (
+                domain[np.minimum(code, len(domain) - 1)] != raw).any():
+            raise ValueError(f'{path}: {column} has NULLs or values outside its declared domain')
+        data[column] = code.astype(np.int16)
     return data
 
 
