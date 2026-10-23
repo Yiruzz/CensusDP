@@ -25,6 +25,7 @@ os.environ.setdefault('JAX_ENABLE_COMPILATION_CACHE', 'false')
 
 sys.path.append(str(common.mbi_root() / 'mechanisms'))
 
+import jax  # noqa: E402
 import networkx as nx  # noqa: E402
 import numpy as np  # noqa: E402
 from mbi import Dataset, LinearMeasurement, estimation  # noqa: E402
@@ -78,6 +79,11 @@ class AIM(upstream_aim.AIM):
 
         terminate = False
         while not terminate:
+            # Every projection is compiled for the model's cliques, which change each round, so the
+            # executables of past rounds are dead. Kept, they piled up at ~210 per round and ~1 GB per
+            # round on the SINASC sample, and on the server Chile and Spain died compiling with RAM
+            # free ("LLVM compilation error: Cannot allocate memory"). Cleared, memory stays flat.
+            jax.clear_caches()
             if self.rho - rho_used < 2 * (0.5 / sigma**2 + 1.0 / 8 * epsilon**2):
                 # Use up whatever budget is left in one last round.
                 remaining = self.rho - rho_used
