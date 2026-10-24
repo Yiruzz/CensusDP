@@ -200,14 +200,20 @@ def exp7():
 def exp8():
     """Flat baselines: MST and AIM with the leaf geography as one column, at RHO. TopDown's side
     is the reference run (exp5), which publishes the same release, so nothing of ours reruns.
-    `memory` samples the session PSS, the instrument of TopDown's memory columns, and is what lets
-    --min-available-gb stop a run that fills the shared host instead of letting it swap."""
-    return [(dataset, decided({'baseline': mechanism, 'rho': RHO, 'memory': 1}))
+    Utility, edit-rule violations and time; memory is exp8_memory."""
+    return [(dataset, decided({'baseline': mechanism, 'rho': RHO}))
             for mechanism in BASELINES for dataset in DATASETS
             if (dataset, mechanism) not in EXP8_EXCLUDED]
+
+
+def exp8_memory():
+    """exp8 again, only to sample the session PSS, the instrument of TopDown's memory columns; it
+    is also what lets --min-available-gb stop a run that fills the shared host. Like exp6_memory,
+    the orchestrator skips the metrics of these runs (measured peak: 50 GB, MST on Spain)."""
+    return [(dataset, {**config, 'memory': 1}) for dataset, config in exp8()]
 
 
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
                'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': exp4,
                'exp5': reference, 'exp6': exp6, 'exp6_memory': exp6_memory, 'exp7': exp7,
-               'exp8': exp8}
+               'exp8': exp8, 'exp8_memory': exp8_memory}
