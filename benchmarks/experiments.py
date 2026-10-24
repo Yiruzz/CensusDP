@@ -30,6 +30,10 @@ TRIPLES = 100
 # Experiment 8: the flat synthesizers of benchmarks/baselines, MST first so that AIM, which may
 # not finish on the large datasets, comes last in every round.
 BASELINES = ('mst', 'aim')
+# AIM on Spain does not finish: 3,160 candidates and 1,264 rounds at ~17 min a round (~15 days),
+# and XLA fails compiling after 21 rounds (5.9 h, 36 GB PSS, 82 GB free; 2026-10-23). Its one
+# round-1 attempt is the record; further rounds would repeat it.
+EXP8_EXCLUDED = (('spanish_census', 'aim'),)
 # Experiment 2: prefixes of the 78 ESCENSUS columns, dense where the full-joint arm still runs.
 EXP2_COLUMNS = (2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 78)
 # The full-joint measurement is one dense float64 vector of the joint per node. Its arm runs until
@@ -199,7 +203,8 @@ def exp8():
     `memory` samples the session PSS, the instrument of TopDown's memory columns, and is what lets
     --min-available-gb stop a run that fills the shared host instead of letting it swap."""
     return [(dataset, decided({'baseline': mechanism, 'rho': RHO, 'memory': 1}))
-            for mechanism in BASELINES for dataset in DATASETS]
+            for mechanism in BASELINES for dataset in DATASETS
+            if (dataset, mechanism) not in EXP8_EXCLUDED]
 
 
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
