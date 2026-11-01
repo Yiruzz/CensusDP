@@ -175,6 +175,22 @@ extrapolate before committing the server (`RUNNING_1940.md` §5).
 | `QAGE` · `CENRACE` 01 … 06 | `age` · `race` 0 … 5 |
 | — | `citizen` (missing: see the decisions below) |
 
+**Rerun with the fixed reader** (2026-11-01, review item R15; why in the decisions, step 1.1).
+Five national runs back to back, about 4.5 h each, so about 23 h. Never alongside an orchestrator.
+Both trees must be at the fix: the fork (pulled from GitHub, `make-1940-path-runnable`) and
+CensusDP (`benchmarks`, for `das_release.py`). The dry run checks the reader, the shims and the disk
+(300 GB free per run) without launching:
+
+```bash
+git -C ~/das1940/repo pull --ff-only && git -C ~/CensusDP pull --ff-only
+bash ~/das1940/repo/deploy1940/campaign.sh 1 5 --dry-run
+bash ~/das1940/repo/deploy1940/campaign.sh 1 5
+```
+
+It writes `~/das1940/out/campaign/das_fixed_rep{1..5}.json` (time, memory) and
+`~/CensusDP/data/out/ipums_1940/das_fixed_rep{1..5}_metrics.json` (utility), and deletes each
+release after scoring it. A scoring failure keeps the release as `das_fixed_repN_unscored`.
+
 ### Step 1.2 — Run ours with the DAS configuration
 
 **To build in `runner.py`** before `exp1` and `exp2` can list their runs (they refuse today):
@@ -598,11 +614,18 @@ From the truth, 168,885 non-Hispanic minus 4,509 Hispanic Other Asian/PI gives *
 too many (+7.46%)**, a TVD of 0.00124 in each `hispanic` pair at the root by itself. The releases left
 on the server confirm it: `CENRACE 01` with `CENHISP 2` holds 646 in Oregon and 404 in Alaska, against
 558 and 406 non-Hispanic Other Asian/PI in the truth; a rotation would have put them under
-`CENHISP 1`. `das_release.py` undoes the race labels but not the carry. **Not corrected, by
-decision** (2026-10-04): it is the release's implementation, the comparison reports the DAS as it
-runs, and the paper describes the defect with a `% TODO` to settle with the advisors. Correcting it
-would need the national releases, which are deleted after scoring, so it means rerunning the DAS
-with the exact inverse in `das_release.py`.
+`CENHISP 1`. `das_release.py` undid the race labels but not the carry, and the decision of
+2026-10-04 was to report the DAS as it runs.
+
+**Corrected 2026-11-01, at the source, by rerunning** (review item R15). The fork's reader now
+subtracts 1 from race, as its own comment says; nothing else in the DAS changed. Undoing the
+two-cell shift at scoring instead would have fixed the records but not the measurements, which the
+DAS had spent on queries over the shifted cells. `deploy1940/campaign.sh` names these runs
+`das_fixed_rep1..5` and refuses to start on an unfixed reader; `das_release.py` now inverts
+`CENRACE - 1` and refuses a release whose race 0 (White) is not the majority, i.e. an unfixed one.
+The figures take the DAS's utility from `das_fixed_rep*` (`docs/figures/campaign.py::FIXED_READER`)
+and its time and memory from `das_rep2..6`, which the fix does not change. The command is in
+step 1.1, "Rerun with the fixed reader".
 
 > **Before the unit bounds** (2026-09-27, `exp1_sin_unidades/`). Cost: full-joint 65.4 min (4.1x),
 > 59.9 GB; marginal 29.4 min (9.2x), 22.3 GB. 2-way TVD national / STATEFIP / COUNTY / SUPDIST /

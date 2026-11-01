@@ -7,30 +7,22 @@ recode in the release's 1940 writer is injective:
 
     our column   MDF column   forward (ipums_1940_writer.py)   inverse here
     age          QAGE         age                              QAGE
-    race         CENRACE      race + 1, zero-padded to 2       (CENRACE - 2) mod 6  (!)
+    race         CENRACE      race + 1, zero-padded to 2       CENRACE - 1
     hispanic     CENHISP      0 -> '1', else '2'               CENHISP - 1
     sex          QSEX         0 -> '1', else '2'               QSEX - 1
     hhgq         GQTYPE       0->000 1->101 2->201 3->301       the same map,
                               4->401 5->501 6->601 else 701     read backwards
 
-The race inverse is not CENRACE - 1, and the extra shift is compensating for a defect in
-the release rather than a quirk of ours. `ipums_1940_reader.py:59-60` reads
+The race inverse holds only for a release of the FIXED reader. As published,
+`ipums_1940_reader.py:61` read `cenrace1940 = race` under a comment saying 1 is subtracted,
+so IPUMS RACE 1..6 went into an axis declared 0..5, and the unchecked ravel of the
+histogram index carried race 6 into `hispanic`: the whole histogram shifted by two cells,
+164,376 Hispanics too many (das1940/HANDOFF.md section 5.18). The runs das_rep1..6 were made
+that way and scored with (CENRACE - 2) mod 6, which undid the labels but not the carry. The
+fork now subtracts 1, its campaign names those runs das_fixed_rep*, and convert() refuses a
+release whose race 0 (White, 89.7% of the 1940 persons) is not the majority, which is what an
+unfixed release read with this inverse looks like.
 
-    # 1940s RACE has 6 values, which are re-indexed by subtracting 1, ...
-    cenrace1940 = race            # 1..6, and nothing is subtracted
-
-so IPUMS RACE 1..6 goes into an axis that `Race1940Attr.getLevels()` declares as 0..5
-(0 = White ... 5 = Other Asian or Pacific Islander) and that the config declares as
-`cenrace1940.legal: 0-5`. Value 6 is outside that range and wraps to 0, so the histogram's
-race axis is rotated one position: index 0 holds Other Asian or Pacific Islander, index 1
-holds White, and so on. The writer then adds 1 back and documents '01 = White alone', so
-**the published MDF labels every race category one position off**, with one wrapped.
-Measured on the national release, every category matches its neighbour to within the DP
-noise, confirming a pure rotation rather than anything data-dependent.
-
-Undoing it here is deliberate. Leaving it in would make the TVD of every race marginal
-measure a labelling error instead of the privacy mechanism, which is what the comparison
-is for. The defect is reported separately; it is not repaired by pretending it is ours.
 CITIZEN is absent. `IPUMSPersonWriter.var_list` (ipums_1940_writer.py:246) has it
 commented out, so the DAS spends budget on that dimension -- it appears in the
 `detailed` query and in `age * hispanic * cenrace * citizen`, 60% of the
@@ -98,7 +90,7 @@ def convert(release_dir, name, epsilon):
             CAST(QSEX    AS INTEGER) - 1               AS sex,
             CAST(QAGE    AS INTEGER)                   AS age,
             CAST(CENHISP AS INTEGER) - 1               AS hispanic,
-            ((CAST(CENRACE AS INTEGER) - 2) % 6 + 6) % 6 AS race
+            CAST(CENRACE AS INTEGER) - 1               AS race
         FROM read_csv('{parts}', delim='|', header=false, auto_detect=false,
                       quote='', escape='', columns={{{columns}}})
     """
@@ -106,10 +98,10 @@ def convert(release_dir, name, epsilon):
 
     stats = con.execute(f"""
         SELECT count(*), count(hhgq), min(age), max(age),
-               min(race), max(race), count(DISTINCT STATEFIP)
+               min(race), max(race), count(DISTINCT STATEFIP), avg((race = 0)::INTEGER)
         FROM ({select})
     """).fetchone()
-    records, hhgq_ok, age_lo, age_hi, race_lo, race_hi, states = stats
+    records, hhgq_ok, age_lo, age_hi, race_lo, race_hi, states, white = stats
 
     print(f'{target}')
     print(f'  records          {records:,}')
@@ -122,6 +114,10 @@ def convert(release_dir, name, epsilon):
     if not (0 <= age_lo and age_hi <= 115 and 0 <= race_lo and race_hi <= 5):
         sys.exit('  a recoded value fell outside its declared domain; the inverse is wrong.')
     print('  hhgq             every row mapped')
+    print(f'  race 0 (White)   {white:.2%}           (89.7% in the truth)')
+    if white < 0.5:
+        sys.exit('  race 0 is not the majority: this release comes from the unfixed reader, '
+                 'whose race axis is shifted. Rerun the DAS with the fixed fork.')
 
     run = {
         'status': 'ok',
