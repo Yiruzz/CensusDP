@@ -12,12 +12,11 @@ STRUCTURES = {
         ['workclass', 'occupation', 'education_num', 'income'],
         ['capital_gain', 'capital_loss', 'income'],
         ['race', 'native_country', 'income'],
-        ['age', 'marital_status'],
         ['hours_per_week', 'occupation'],
         ['fnlwgt', 'income'],
     ],
     'large': [
-        ['age', 'marital_status', 'relationship', 'sex', 'income'],
+        ['marital_status', 'relationship', 'sex', 'income'],
         ['workclass', 'occupation', 'education_num', 'income'],
         ['occupation', 'hours_per_week', 'income'],
         ['capital_gain', 'capital_loss', 'income'],

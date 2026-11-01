@@ -41,6 +41,13 @@ Gurobi needs a full licence (`GRB_LICENSE_FILE`). Copy the data, keeping the pat
 | chilean_census | `data/chilean_census/chilean_census.parquet`, `chilean_census_nodes.json`, `data/csv-personas-censo-2017/etiquetas_persona_comuna_16r.csv` |
 | ipums_1940 | `data/ipums_1940/EXT1940USCB.dat.gz`, `EXT1940USCB_AK.dat` |
 
+> **ADULT changed on 2026-11-01: age is no longer an attribute.** It defines the hierarchy, and
+> released as an attribute too, nothing tied it to the record's node: 4.2% of the leaf records
+> came out with an age outside their band. ADULT now has 13 attributes, `blocks` 6 bags and
+> W = 26,593, and its derived family stops at `blocks_m2`. Every ADULT number below predates the
+> change; the old runs are kept in `data/out/adult_with_age_20261101/`. The parquet is unchanged
+> (it still carries age, which builds the hierarchy columns), so a server copy needs no rebuild.
+
 Also copy every `*_sample.parquet` and `*_sample_nodes.json`. Then build IPUMS and smoke-test:
 
 ```bash
