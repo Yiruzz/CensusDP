@@ -34,6 +34,11 @@ BASELINES = ('mst', 'aim')
 # and XLA fails compiling after 21 rounds (5.9 h, 36 GB PSS, 82 GB free; 2026-10-23). Its one
 # round-1 attempt is the record; further rounds would repeat it.
 EXP8_EXCLUDED = (('spanish_census', 'aim'),)
+# exp8_fair: the datasets whose declared structure was chosen from the association in the data,
+# so that TopDown selects it privately there, with the share of the budget AIM gives selection.
+# IPUMS 1940 (the DAS workload) and CHCENSUS (the questionnaire) declare public structures.
+SELECTION_DATASETS = ('adult', 'sinasc', 'spanish_census')
+SELECTION_SHARE = 0.1
 # Experiment 2: prefixes of the 78 ESCENSUS columns, dense where the full-joint arm still runs.
 EXP2_COLUMNS = (2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64, 78)
 # The full-joint measurement is one dense float64 vector of the joint per node. Its arm runs until
@@ -219,6 +224,30 @@ def exp8():
             if (dataset, mechanism) not in EXP8_EXCLUDED]
 
 
+def exp8_fair():
+    """Experiment 8 on equal terms, the redesign after the review (R2), 2026-11-01.
+
+    Every method is charged everything it reads from the data, at the same total RHO, and gets the
+    same invariant, the total, which bounded DP already makes public:
+    - TopDown publishes the root population only (`invariants='root'`), not the first level's.
+      Where its declared structure was chosen from the data (SELECTION_DATASETS), it selects the
+      marginals privately with SELECTION_SHARE of RHO (`selection`, TopDown's own selection, its
+      default strategy), so the structure differs from the other experiments there. IPUMS 1940
+      and CHCENSUS keep their declared structure, which comes from public sources.
+    - MST and AIM run unchanged, with their own selection inside the budget (MST a third of rho,
+      AIM a tenth of every round). `triples` is the metrics' default of 100, so it changes nothing
+      in the run; it gives these rounds their own names, so they run again and are scored with the
+      population metrics that the exp8 rounds lack.
+    Both arms are scored with the exp4 triple estimator.
+    """
+    runs = []
+    for dataset in DATASETS:
+        extra = {'selection': SELECTION_SHARE} if dataset in SELECTION_DATASETS else {}
+        runs.append((dataset, marginal(dataset, invariants='root', triples=TRIPLES, **extra)))
+    runs += [(dataset, {**config, 'triples': TRIPLES}) for dataset, config in exp8()]
+    return runs
+
+
 def exp8_memory():
     """exp8 again, only to sample the session PSS, the instrument of TopDown's memory columns; it
     is also what lets --min-available-gb stop a run that fills the shared host. Like exp6_memory,
@@ -230,4 +259,4 @@ EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
                'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': exp4,
                'exp4_parent': exp4_parent,
                'exp5': reference, 'exp6': exp6, 'exp6_memory': exp6_memory, 'exp7': exp7,
-               'exp8': exp8, 'exp8_memory': exp8_memory}
+               'exp8': exp8, 'exp8_fair': exp8_fair, 'exp8_memory': exp8_memory}

@@ -338,6 +338,32 @@ rm data/out/*/*_keep1_r1.csv
 ```
 
 Each writes `data/out/<dataset>/parent_reference_released.json`, the only file the figures need.
+
+### Step 2.7 — Baselines on equal terms (experiment 8, redesigned): 70 runs
+
+TopDown's structures for ADULT, SINASC and ESCENSUS were chosen from the data outside 
+the budget, and TopDown alone published exact first-level populations. `exp8_fair` 
+charges everything at ρ = 1 and gives every method the same invariant, the total:
+
+- **TopDown** runs with `--invariants root` (the root population only) and, on those three
+  datasets, `--selection 0.1`: `TopDown.set_marginal_selection` with its default strategy spends
+  10% of ρ on the 2-way marginals and the tree keeps 0.9. IPUMS 1940 and CHCENSUS keep their
+  public structures and the whole ρ.
+- **MST and AIM** run unchanged (MST a third of ρ on selection, AIM a tenth of every round). Their
+  `triples` key is the metrics' default, so it only gives these rounds new names: they run again
+  because the exp8 rounds were scored before `metrics.py` reported node populations.
+
+`metrics.py` now also reports, per level, `population_l1`, `population_relative` and
+`empty_nodes`. ADULT runs locally (`--datasets adult`); AIM on ESCENSUS stays excluded
+(`EXP8_EXCLUDED`). From the medians of the earlier rounds, one round of the four server datasets
+takes about 4.6 h with the metrics, so five take about a day; `--reps 1` gives a first answer.
+
+```bash
+python -m benchmarks.orchestrate exp8_fair --datasets ipums_1940 chilean_census spanish_census sinasc --reps 5 --timeout 12 2>&1 | tee -a data/out/orchestrate.log
+```
+
+Bring back the four `runs.jsonl` and the `*_metrics.json` of the new names; `fig_baselines.py`
+reads them (`FAIR = True`).
 Without `--released` the script scores the non-private copy (the true parent), a property of the
 data only; it runs locally in minutes and writes `parent_reference.json`.
 

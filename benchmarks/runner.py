@@ -37,6 +37,13 @@ def parse_args(hierarchy, marginals, workload):
     parser.add_argument('--full-joint', action='store_true', help='full-joint instead of marginals')
     parser.add_argument('--structure', default=marginals.DEFAULT,
                         choices=sorted(marginals.STRUCTURES))
+    parser.add_argument('--selection', type=float, metavar='FRACTION',
+                        help='select the marginals privately instead of declaring --structure, '
+                             'spending this share of the total budget (TopDown.set_marginal_selection, '
+                             'its default strategy); the rest goes to the tree')
+    parser.add_argument('--invariants', default='first_level', choices=('first_level', 'root'),
+                        help='exact populations: of the root and the first level, or of the root '
+                             'only, which bounded DP already makes public')
     parser.add_argument('--rho', type=float, default=1.0, help='total rho-zCDP budget')
     parser.add_argument('--epsilon', type=float,
                         help='total pure-epsilon-DP budget; switches the mechanism from the '
@@ -70,6 +77,10 @@ def default_name(args):
         parts.append(f'c{args.columns}')
     if args.rounding != 'auto':
         parts.append(args.rounding)
+    if args.selection:
+        parts.append(f'select{args.selection:g}')
+    if args.invariants != 'first_level':
+        parts.append(f'inv{args.invariants}')
     if args.unit_bounds:
         parts.append('units')
     if args.sample:
@@ -107,12 +118,13 @@ def main(dataset, hierarchy, domains, constraints, marginals, workload=None):
         'dataset': dataset, 'name': name, 'sample': args.sample, 'records': records,
         'hierarchy': hierarchy, 'nodes_per_level': nodes, 'columns': columns,
         'mode': 'full_joint' if args.full_joint else 'marginal',
-        'structure': None if args.full_joint else args.structure,
+        'structure': None if args.full_joint else 'selected' if args.selection else args.structure,
         'rho': args.rho, 'composition': args.composition, 'level_rhos': level_budgets,
         'mechanism': type(mechanism).__name__, 'epsilon': args.epsilon,
         'workload': chosen_workload,
         'query_budget': list(workload.WORKLOADS[chosen_workload][1]) if chosen_workload else None,
         'rounding': rounding, 'workers': args.workers, 'check': args.check,
+        'selection': args.selection, 'invariants': args.invariants,
         'unit_bounds': args.unit_bounds,
         'solver_options': common.SOLVER_OPTIONS, 'status': 'error', 'seconds': {},
     }
@@ -131,11 +143,16 @@ def main(dataset, hierarchy, domains, constraints, marginals, workload=None):
             algorithm.set_query_budget(proportions)
         elif args.full_joint:
             algorithm.set_query_workload(None)
+        elif args.selection:
+            algorithm.set_marginal_selection(budget_fraction=args.selection)
         else:
             bags = [[c for c in bag if c in columns] for bag in marginals.STRUCTURES[args.structure]]
             algorithm.set_marginals([bag for bag in bags if bag])
         algorithm.set_rounding_method(args.rounding)
-        algorithm.set_constraint_to_level(0, SumEqualRealTotal(TrueExpression()))
+        # set_constraint_to_level(l) registers the rule up to tree level l + 1, so 0 makes the root
+        # and the first level exact and -1 the root alone.
+        algorithm.set_constraint_to_level(0 if args.invariants == 'first_level' else -1,
+                                          SumEqualRealTotal(TrueExpression()))
         for rule in constraints.constraints(columns):
             algorithm.set_constraint_to_tree(rule)
         if args.unit_bounds:
@@ -152,6 +169,9 @@ def main(dataset, hierarchy, domains, constraints, marginals, workload=None):
                 record.update(bags=[list(bag) for bag in algorithm.junction_tree.bags],
                               width=int(algorithm.data_handler.marginal_width))
             record['sensitivity'] = int(algorithm.query_sensitivity)
+            if args.selection:
+                # The tree's levels after the selection's share was carved out, then that share.
+                record['level_rhos'] = list(mechanism.level_params)
             started = time.perf_counter()
             algorithm.estimation_phase()
             record['seconds']['estimation'] = time.perf_counter() - started

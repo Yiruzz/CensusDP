@@ -8,7 +8,8 @@ For every marginal, the original and synthetic distributions are compared inside
 a level (TVD, and L1 over counts) and averaged over the nodes of that level. Pairs are split
 into those inside some junction-tree bag and the rest; triples into those contained in a bag
 and the rest, the rest also by how many of their pairs a bag measures. Pairs also carry their
-national symmetric uncertainty U in both files.
+national symmetric uncertainty U in both files. Each level also reports the error in the node
+populations (mean absolute and mean relative) and how many nodes the release leaves empty.
 Writes data/out/<dataset>/<name>_metrics.json.
 """
 
@@ -84,6 +85,12 @@ def evaluate(original, synthetic_csv, domains, hierarchy, bags, triples=100, wor
         tvd, l1, _ = _compare(data, tuple(marginal), sizes, parents)
         workload_rows.append({'columns': list(marginal), 'tvd': tvd, 'l1': l1})
 
+    # Node populations, original and synthetic: a release that does not enforce them (MST, AIM,
+    # or TopDown below the invariant levels) is scored on them too, and a node it leaves empty
+    # gets TVD 1 in every marginal (_distance), so the count of those is reported as well.
+    populations = [[np.bincount(parent[d['leaf']], minlength=int(parent.max()) + 1) for d in data]
+                   for parent in parents]
+
     levels = []
     for level, column in enumerate(['national'] + list(hierarchy)):
         def mean(rows, keep=lambda row: True, key='tvd'):
@@ -101,6 +108,10 @@ def evaluate(original, synthetic_csv, domains, hierarchy, bags, triples=100, wor
             **{f'tvd3_pairs{k}': mean(triple_rows, lambda row, k=k: not row['contained']
                                       and row['measured_pairs'] == k) for k in range(3)},
             'workload_l1': mean(workload_rows, key='l1'),
+            'population_l1': float(np.abs(populations[level][0] - populations[level][1]).mean()),
+            'population_relative': float((np.abs(populations[level][0] - populations[level][1])
+                                          / populations[level][0]).mean()),
+            'empty_nodes': int((populations[level][1] == 0).sum()),
         })
     return {'levels': levels, 'pairs': pairs, 'triples': triple_rows, 'workload': workload_rows}
 
