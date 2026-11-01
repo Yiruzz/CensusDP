@@ -133,6 +133,19 @@ def exp4():
     return [(dataset, marginal(dataset, triples=TRIPLES)) for dataset in DATASETS]
 
 
+def exp4_parent():
+    """exp4 once more, keeping the synthetic CSV for benchmarks/parent_reference.py --released.
+
+    That script copies to every node the distribution of its parent in the release, which is
+    post-processing of the release and so private at the same rho, and it needs the synthetic
+    microdata, which the other runs delete. The `keep` flag is read by the orchestrator only: it
+    keeps the CSV and gives these runs their own names, which `select` in the figures refuses
+    unless asked, so they never enter a median. One round is enough, the parent copy is a
+    reference line, not a result with a spread.
+    """
+    return [(dataset, marginal(dataset, triples=TRIPLES, keep=1)) for dataset in DATASETS]
+
+
 def exp6():
     """Utility, time and memory along the family of structures derived from the declared one.
 
@@ -215,5 +228,6 @@ def exp8_memory():
 
 EXPERIMENTS = {'exp1': exp1, 'exp2': exp2, 'exp3_composition': exp3_composition,
                'exp3_budget': exp3_budget, 'exp3_depth': exp3_depth, 'exp4': exp4,
+               'exp4_parent': exp4_parent,
                'exp5': reference, 'exp6': exp6, 'exp6_memory': exp6_memory, 'exp7': exp7,
                'exp8': exp8, 'exp8_memory': exp8_memory}

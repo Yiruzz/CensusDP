@@ -30,8 +30,9 @@ from benchmarks.experiments import EXPERIMENTS
 
 NAMED = ('full_joint', 'structure', 'rho', 'composition', 'rounding', 'baseline')
 METRIC_FLAGS = ('triples',)
-# Read by the orchestrator itself, never passed to the driver or the metrics.
-ORCHESTRATOR_FLAGS = ('memory',)
+# Read by the orchestrator itself, never passed to the driver or the metrics. `keep` keeps the
+# synthetic CSV of that configuration, as --keep-csv does for every run (exp4_parent).
+ORCHESTRATOR_FLAGS = ('memory', 'keep')
 
 
 def machine_mb():
@@ -264,7 +265,7 @@ def run(dataset, config, name, rep, args):
                 row['violations'] = {key: violations[key] for key in ('violating', 'share')}
             else:
                 row.update(status='violations_error', returncode=code)
-    if not args.keep_csv:
+    if not (args.keep_csv or config.get('keep')):
         files['.csv'].unlink(missing_ok=True)
     row['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
     return row

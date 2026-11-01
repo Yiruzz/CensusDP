@@ -317,6 +317,30 @@ merging or splitting the marginals moves its width by 2% and its bag count by 1.
 The analysis plots the bags the junction tree **returned** (`bags` in the run record), never the
 ones requested: a split can be re-fused by the triangulation.
 
+### Step 2.6 — Private parent copy (reference for experiments 3 and 4): 5 runs
+
+To judge a leaf TVD.
+`benchmarks/parent_reference.py --released` gives every node the distribution of its parent **in
+the release**, scaled to the node's released population: post-processing of the release, so private
+at the same ρ. It needs the synthetic CSV, which every other run deletes, so `exp4_parent` reruns
+the exp4 configuration once with the orchestrator-only `keep` flag (own names, CSV kept, never in a
+median). ADULT ran locally on 2026-11-01; the other four run here, about 1 h 15 min of TopDown
+plus the metrics.
+
+```bash
+git pull
+python -m benchmarks.orchestrate exp4_parent --datasets ipums_1940 chilean_census spanish_census sinasc --reps 1 --timeout 4 2>&1 | tee -a data/out/orchestrate.log
+python -m benchmarks.parent_reference ipums_1940 --released das_rho1_sqrt_sweep_triples100_keep1_r1
+python -m benchmarks.parent_reference chilean_census --released baseline_rho1_sqrt_sweep_triples100_keep1_r1
+python -m benchmarks.parent_reference spanish_census --released blocks_rho1_sqrt_sweep_triples100_keep1_r1
+python -m benchmarks.parent_reference sinasc --released blocks_rho1_sqrt_sweep_triples100_keep1_r1
+rm data/out/*/*_keep1_r1.csv
+```
+
+Each writes `data/out/<dataset>/parent_reference_released.json`, the only file the figures need.
+Without `--released` the script scores the non-private copy (the true parent), a property of the
+data only; it runs locally in minutes and writes `parent_reference.json`.
+
 ---
 
 ## Decisions and findings
